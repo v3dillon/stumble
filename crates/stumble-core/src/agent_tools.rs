@@ -1,0 +1,1842 @@
+use crate::domain::*;
+use crate::ranking::{rank_discovery, RankingInput};
+use crate::signing::{
+    hash_api_token, new_plaintext_api_token, sign_public_event, verify_event, SigningError,
+};
+use crate::skill_pack::{
+    default_skill_pack, export_skill_pack, fork_skill_pack, import_skill_pack, patch_skill_pack,
+    skill_pack_payload, validate_skill_pack,
+};
+use crate::store::{save_store_snapshot, InMemoryStore, StoreError, StorePersistenceError};
+use chrono::Utc;
+use serde_json::json;
+use std::collections::BTreeMap;
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
+use url::Url;
+use uuid::Uuid;
+
+#[derive(Debug, thiserror::Error)]
+pub enum AgentToolsError {
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Signing(#[from] SigningError),
+    #[error(transparent)]
+    Persistence(#[from] StorePersistenceError),
+    #[error("lock poisoned")]
+    LockPoisoned,
+    #[error("bad url: {0}")]
+    BadUrl(String),
+}
+
+#[derive(Clone)]
+pub struct AgentTools {
+    store: Arc<RwLock<InMemoryStore>>,
+    persistence_path: Option<Arc<PathBuf>>,
+}
+
+impl AgentTools {
+    pub fn new(store: InMemoryStore) -> Self {
+        Self {
+            store: Arc::new(RwLock::new(store)),
+            persistence_path: None,
+        }
+    }
+
+    pub fn new_persistent(store: InMemoryStore, path: impl Into<PathBuf>) -> Self {
+        Self {
+            store: Arc::new(RwLock::new(store)),
+            persistence_path: Some(Arc::new(path.into())),
+        }
+    }
+
+    pub fn store(&self) -> Arc<RwLock<InMemoryStore>> {
+        self.store.clone()
+    }
+
+    pub fn persistence_path(&self) -> Option<&Path> {
+        self.persistence_path.as_deref().map(PathBuf::as_path)
+    }
+
+    pub fn default_auth_context(&self) -> Result<AuthContext, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let node = store.default_node()?;
+        Ok(AuthContext {
+            user_id: None,
+            tenant_id: node.tenant_id,
+            node_id: node.id,
+        })
+    }
+
+    fn persist_locked(&self, store: &InMemoryStore) -> Result<(), AgentToolsError> {
+        if let Some(path) = &self.persistence_path {
+            save_store_snapshot(store, path)?;
+        }
+        Ok(())
+    }
+
+    pub fn list_pods(&self, tenant_id: Option<TenantId>) -> Result<Vec<Pod>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        Ok(store
+            .pods
+            .values()
+            .filter(|pod| pod.tenant_id == tenant_id || pod.tenant_id.is_none())
+            .cloned()
+            .collect())
+    }
+
+    /// Pods that are safe to expose on the unauthenticated federation surface.
+    /// Only `Public` pods are returned; private and invite-only pods are withheld.
+    pub fn list_public_pods(
+        &self,
+        tenant_id: Option<TenantId>,
+    ) -> Result<Vec<Pod>, AgentToolsError> {
+        Ok(self
+            .list_pods(tenant_id)?
+            .into_iter()
+            .filter(|pod| pod.visibility == Visibility::Public)
+            .collect())
+    }
+
+    /// Look up a pod by slug. Thin accessor over the store.
+    pub fn pod_by_slug(
+        &self,
+        slug: &str,
+        tenant_id: Option<TenantId>,
+    ) -> Result<Pod, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        Ok(store.pod_by_slug(slug, tenant_id)?)
+    }
+
+    /// Pod manifest for the federation surface. A non-public pod is reported as
+    /// `NotFound` — byte-identical to a missing pod — so private pods cannot be
+    /// probed for existence through this endpoint.
+    pub fn federation_pod_manifest(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+    ) -> Result<PodManifest, AgentToolsError> {
+        let manifest = self.pod_manifest(ctx, pod_slug)?;
+        if manifest.pod.visibility != Visibility::Public {
+            return Err(StoreError::NotFound(format!("pod {pod_slug}")).into());
+        }
+        Ok(manifest)
+    }
+
+    /// Pod event log for the federation surface. A non-public pod is reported as
+    /// `NotFound` so private pods never expose their events.
+    pub fn federation_pod_events(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+    ) -> Result<Vec<EventLog>, AgentToolsError> {
+        let pod = self.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        if pod.visibility != Visibility::Public {
+            return Err(StoreError::NotFound(format!("pod {pod_slug}")).into());
+        }
+        self.export_pod_events(ctx, pod_slug)
+    }
+
+    pub fn route_link_to_pods(
+        &self,
+        ctx: &AuthContext,
+        request: RouteLinkRequest,
+        confidence_threshold: f32,
+    ) -> Result<RouteLinkResponse, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let text = route_text(&request);
+        let mut candidates = store
+            .pods
+            .values()
+            .filter(|pod| pod.tenant_id == ctx.tenant_id || pod.tenant_id.is_none())
+            .map(|pod| {
+                score_pod_route(
+                    pod,
+                    store.pod_skill_packs.get(&pod.id),
+                    &text,
+                    &request.tags,
+                )
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
+        let selected = candidates.first().cloned().and_then(|top| {
+            let second_score = candidates
+                .get(1)
+                .map(|candidate| candidate.score)
+                .unwrap_or(0.0);
+            if top.score >= confidence_threshold && top.score - second_score >= 0.75 {
+                Some(top)
+            } else {
+                None
+            }
+        });
+        Ok(RouteLinkResponse {
+            needs_confirmation: selected.is_none(),
+            selected,
+            candidates,
+            confidence_threshold,
+        })
+    }
+
+    pub fn create_tenant(&self, request: CreateTenantRequest) -> Result<Tenant, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        if store
+            .tenants
+            .values()
+            .any(|tenant| tenant.slug == request.slug)
+        {
+            return Err(StoreError::Duplicate(format!("tenant {}", request.slug)).into());
+        }
+        let tenant = Tenant {
+            id: Uuid::now_v7(),
+            name: request.name,
+            slug: request.slug,
+            created_at: Utc::now(),
+        };
+        store.tenants.insert(tenant.id, tenant.clone());
+        let node = crate::signing::create_node_identity(
+            format!("{} managed node", tenant.name),
+            Some(tenant.id),
+        );
+        store.node_identities.insert(node.id, node);
+        self.persist_locked(&store)?;
+        Ok(tenant)
+    }
+
+    pub fn create_dev_token(
+        &self,
+        request: DevTokenRequest,
+    ) -> Result<DevTokenResponse, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let tenant_id = request
+            .tenant_slug
+            .as_deref()
+            .map(|slug| store.tenant_by_slug(slug).map(|t| t.id))
+            .transpose()?;
+        let user_id = request.user_id.unwrap_or_else(Uuid::now_v7);
+        store.users.entry(user_id).or_insert(User {
+            id: user_id,
+            display_name: "Remote Agent User".to_string(),
+            created_at: Utc::now(),
+        });
+        if let Some(tenant_id) = tenant_id {
+            let exists = store
+                .tenant_users
+                .iter()
+                .any(|tu| tu.tenant_id == tenant_id && tu.user_id == user_id);
+            if !exists {
+                store.tenant_users.push(TenantUser {
+                    tenant_id,
+                    user_id,
+                    role: TenantRole::Member,
+                    created_at: Utc::now(),
+                });
+            }
+        }
+        let token = new_plaintext_api_token();
+        let token_hash = hash_api_token(&token);
+        let api_token = ApiToken {
+            id: Uuid::now_v7(),
+            user_id,
+            tenant_id,
+            token_hash: token_hash.clone(),
+            label: request.label,
+            created_at: Utc::now(),
+            last_used_at: None,
+            revoked_at: None,
+        };
+        store.api_tokens.insert(api_token.id, api_token);
+        self.persist_locked(&store)?;
+        Ok(DevTokenResponse {
+            token,
+            token_hash,
+            user_id,
+            tenant_id,
+        })
+    }
+
+    pub fn authenticate_token(&self, token: &str) -> Result<Option<AuthContext>, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let hash = hash_api_token(token);
+        let Some((token_id, user_id, tenant_id)) = store
+            .api_tokens
+            .iter()
+            .find(|(_, token)| token.token_hash == hash && token.revoked_at.is_none())
+            .map(|(id, token)| (*id, token.user_id, token.tenant_id))
+        else {
+            return Ok(None);
+        };
+        let node = store.node_for_tenant(tenant_id)?;
+        let api_token = store
+            .api_tokens
+            .get_mut(&token_id)
+            .ok_or_else(|| StoreError::NotFound("api token".to_string()))?;
+        api_token.last_used_at = Some(Utc::now());
+        self.persist_locked(&store)?;
+        Ok(Some(AuthContext {
+            user_id: Some(user_id),
+            tenant_id,
+            node_id: node.id,
+        }))
+    }
+
+    pub fn create_pod(
+        &self,
+        ctx: &AuthContext,
+        request: CreatePodRequest,
+    ) -> Result<Pod, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        if store
+            .pods
+            .values()
+            .any(|pod| pod.slug == request.slug && pod.tenant_id == ctx.tenant_id)
+        {
+            return Err(StoreError::Duplicate(format!("pod {}", request.slug)).into());
+        }
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        let pod = Pod {
+            id: Uuid::now_v7(),
+            tenant_id: ctx.tenant_id,
+            name: request.name,
+            slug: request.slug,
+            description: request.description,
+            visibility: request.visibility,
+            created_by: ctx.user_id,
+            created_at: Utc::now(),
+            origin_node_id: Some(node.id),
+        };
+        store.pods.insert(pod.id, pod.clone());
+        store.pod_rules.insert(
+            pod.id,
+            PodRules {
+                pod_id: pod.id,
+                blocked_topics: vec![],
+                blocked_domains: vec![],
+                auto_promote_crawler_candidates: false,
+                federate_sources: matches!(pod.visibility, Visibility::Public),
+            },
+        );
+        store
+            .pod_skill_packs
+            .insert(pod.id, default_skill_pack(&pod));
+        if let Some(user_id) = ctx.user_id {
+            store.pod_memberships.push(PodMembership {
+                user_id,
+                pod_id: pod.id,
+                role: PodRole::Owner,
+                created_at: Utc::now(),
+            });
+        }
+        let event = sign_public_event(
+            &node,
+            "pod_created",
+            &pod.slug,
+            json!({"pod": pod.clone()}),
+            store.latest_event_hash(&pod.slug),
+        )?;
+        store.event_log.push(event);
+        self.persist_locked(&store)?;
+        Ok(pod)
+    }
+
+    pub fn join_pod(&self, ctx: &AuthContext, pod_slug: &str) -> Result<(), AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+        let Some(user_id) = ctx.user_id else {
+            return Ok(());
+        };
+        if !store
+            .pod_memberships
+            .iter()
+            .any(|m| m.user_id == user_id && m.pod_id == pod.id)
+        {
+            store.pod_memberships.push(PodMembership {
+                user_id,
+                pod_id: pod.id,
+                role: PodRole::Member,
+                created_at: Utc::now(),
+            });
+            self.persist_locked(&store)?;
+        }
+        Ok(())
+    }
+
+    pub fn submit_link_to_pod(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+        request: SubmitLinkRequest,
+    ) -> Result<Submission, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+        let canonical_url = canonicalize_url(&request.url)?;
+        let domain = Url::parse(&canonical_url)
+            .map_err(|e| AgentToolsError::BadUrl(e.to_string()))?
+            .domain()
+            .unwrap_or("unknown")
+            .to_string();
+        let existing = store
+            .submissions
+            .values()
+            .find(|s| s.canonical_url == canonical_url && s.tenant_id == ctx.tenant_id)
+            .cloned();
+        let submission = if let Some(existing) = existing {
+            existing
+        } else {
+            let description = request.description.clone();
+            let submission = Submission {
+                id: Uuid::now_v7(),
+                tenant_id: ctx.tenant_id,
+                url: request.url.clone(),
+                canonical_url: canonical_url.clone(),
+                title: request.title.unwrap_or_else(|| canonical_url.clone()),
+                description,
+                domain,
+                submitted_by: ctx.user_id,
+                discovered_by_crawler: request.discovered_by_crawler,
+                submitter_note: request.note,
+                summary: request.description,
+                tags: request.tags,
+                embedding: None,
+                created_at: Utc::now(),
+                origin_event_id: None,
+            };
+            store.submissions.insert(submission.id, submission.clone());
+            submission
+        };
+        if !store
+            .submission_pods
+            .iter()
+            .any(|link| link.pod_id == pod.id && link.submission_id == submission.id)
+        {
+            store.submission_pods.push(SubmissionPod {
+                submission_id: submission.id,
+                pod_id: pod.id,
+                created_at: Utc::now(),
+            });
+        }
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        let event = sign_public_event(
+            &node,
+            "link_submitted",
+            &pod.slug,
+            json!({"submission": submission.clone()}),
+            store.latest_event_hash(&pod.slug),
+        )?;
+        store.event_log.push(event);
+        self.persist_locked(&store)?;
+        Ok(submission)
+    }
+
+    /// Remove a submission's association with a pod. If no pod references the
+    /// submission afterward, the submission and its assets (plus any per-user
+    /// saves/notes/history keyed on it) are purged too. Emits a signed
+    /// `link_removed` event for the pod. Returns `true` if the submission itself
+    /// was purged. Errors with `NotFound` if the link is not present in the pod.
+    pub fn remove_submission_from_pod(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+        submission_id: SubmissionId,
+    ) -> Result<bool, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+
+        let before = store.submission_pods.len();
+        store
+            .submission_pods
+            .retain(|link| !(link.pod_id == pod.id && link.submission_id == submission_id));
+        if store.submission_pods.len() == before {
+            return Err(StoreError::NotFound(format!(
+                "submission {submission_id} in pod {pod_slug}"
+            ))
+            .into());
+        }
+
+        // Purge the submission entirely once no pod references it anymore.
+        let purged = !store
+            .submission_pods
+            .iter()
+            .any(|link| link.submission_id == submission_id);
+        if purged {
+            store.submissions.remove(&submission_id);
+            store
+                .submission_assets
+                .retain(|_, asset| asset.submission_id != submission_id);
+            store.saves.retain(|(_, sid)| *sid != submission_id);
+            store
+                .reading_history
+                .retain(|(_, sid)| *sid != submission_id);
+            store
+                .private_notes
+                .retain(|(_, sid), _| *sid != submission_id);
+        }
+
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        let event = sign_public_event(
+            &node,
+            "link_removed",
+            &pod.slug,
+            json!({"submission_id": submission_id, "submission_purged": purged}),
+            store.latest_event_hash(&pod.slug),
+        )?;
+        store.event_log.push(event);
+        self.persist_locked(&store)?;
+        Ok(purged)
+    }
+
+    pub fn add_submission_asset(
+        &self,
+        ctx: &AuthContext,
+        submission_id: SubmissionId,
+        request: RepresentativeImageRequest,
+    ) -> Result<SubmissionAsset, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let submission = store
+            .submissions
+            .get(&submission_id)
+            .ok_or_else(|| StoreError::NotFound("submission".to_string()))?;
+        store.assert_tenant(submission.tenant_id, ctx.tenant_id)?;
+        if request.url.is_none() && request.local_path.is_none() {
+            return Err(StoreError::Validation(
+                "representative image requires url or local_path".to_string(),
+            )
+            .into());
+        }
+        if let Some(existing) = store.submission_assets.values().find(|asset| {
+            asset.submission_id == submission_id
+                && asset.asset_type == SubmissionAssetType::RepresentativeImage
+                && asset.source == request.source
+                && asset.url == request.url
+                && asset.local_path == request.local_path
+        }) {
+            return Ok(existing.clone());
+        }
+        let asset = SubmissionAsset {
+            id: Uuid::now_v7(),
+            tenant_id: ctx.tenant_id,
+            submission_id,
+            asset_type: SubmissionAssetType::RepresentativeImage,
+            source: request.source,
+            url: request.url,
+            local_path: request.local_path,
+            mime_type: request.mime_type,
+            alt_text: request.alt_text,
+            created_at: Utc::now(),
+        };
+        store.submission_assets.insert(asset.id, asset.clone());
+        self.persist_locked(&store)?;
+        Ok(asset)
+    }
+
+    pub fn assets_for_submission(
+        &self,
+        ctx: &AuthContext,
+        submission_id: SubmissionId,
+    ) -> Result<Vec<SubmissionAsset>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let submission = store
+            .submissions
+            .get(&submission_id)
+            .ok_or_else(|| StoreError::NotFound("submission".to_string()))?;
+        store.assert_tenant(submission.tenant_id, ctx.tenant_id)?;
+        Ok(store
+            .submission_assets
+            .values()
+            .filter(|asset| asset.submission_id == submission_id)
+            .cloned()
+            .collect())
+    }
+
+    pub fn discover_in_pod(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+        request: DiscoverRequest,
+    ) -> Result<Vec<DiscoveryItem>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+        let pack = store
+            .pod_skill_packs
+            .get(&pod.id)
+            .ok_or_else(|| StoreError::NotFound("skill pack".to_string()))?;
+        let submissions = store.submissions_for_pod(pod.id);
+        let user_id = request.user_id.or(ctx.user_id);
+        let preferences = user_id.and_then(|id| store.user_preferences.get(&(id, ctx.tenant_id)));
+        let feedback = store
+            .feedback_events
+            .iter()
+            .filter(|f| user_id.is_some_and(|id| f.user_id == id) && f.tenant_id == ctx.tenant_id)
+            .collect();
+        Ok(rank_discovery(RankingInput {
+            pod: &pod,
+            rules: store.pod_rules.get(&pod.id),
+            skill_pack: pack,
+            submissions,
+            preferences,
+            feedback,
+            query: &request.query,
+            avoid: &request.avoid,
+            mode: request.mode,
+            limit: request.limit,
+        }))
+    }
+
+    pub fn generate_brief(
+        &self,
+        ctx: &AuthContext,
+        request: GenerateBriefRequest,
+    ) -> Result<Brief, AgentToolsError> {
+        let mut all_items = Vec::new();
+        for slug in &request.pod_slugs {
+            let mut items = self.discover_in_pod(
+                ctx,
+                slug,
+                DiscoverRequest {
+                    query: request
+                        .query
+                        .clone()
+                        .unwrap_or_else(|| "daily brief".to_string()),
+                    avoid: vec![],
+                    limit: 4,
+                    mode: DiscoveryMode::DeepMatch,
+                    user_id: request.user_id,
+                },
+            )?;
+            all_items.append(&mut items);
+        }
+        all_items.truncate(4);
+        let roles = [
+            "one thing to read",
+            "one thing to explore",
+            "one older gem",
+            "one adjacent surprise",
+        ];
+        let brief_items = all_items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| BriefItem {
+                submission_id: item.submission_id,
+                role: roles.get(idx).unwrap_or(&"recommended").to_string(),
+                title: item.title.clone(),
+                url: item.url.clone(),
+                summary: item.short_summary.clone(),
+                why_it_matters: item.why_belongs_in_pod.clone(),
+                why_user_may_care: item.why_matches_request.clone(),
+            })
+            .collect();
+        let brief = Brief {
+            id: Uuid::now_v7(),
+            tenant_id: ctx.tenant_id,
+            user_id: request.user_id.or(ctx.user_id),
+            title: "Stumble Brief".to_string(),
+            query: request.query,
+            created_at: Utc::now(),
+            private: true,
+            items: brief_items,
+            reflection: Some(
+                "What would be useful to try, not just interesting to read?".to_string(),
+            ),
+        };
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        store.briefs.insert(brief.id, brief.clone());
+        self.persist_locked(&store)?;
+        Ok(brief)
+    }
+
+    pub fn get_skill_pack(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+    ) -> Result<PodSkillPack, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+        store
+            .pod_skill_packs
+            .get(&pod.id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("skill pack".to_string()).into())
+    }
+
+    pub fn pod_agent_context(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+    ) -> Result<PodAgentContext, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+        let pack = store
+            .pod_skill_packs
+            .get(&pod.id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("skill pack".to_string()))?;
+        let validation = validate_skill_pack(&pack);
+        if !validation.valid {
+            return Err(StoreError::Validation(validation.errors.join(", ")).into());
+        }
+        Ok(PodAgentContext {
+            pod_slug: pod.slug,
+            pod_name: pod.name,
+            skill_pack_version: pack.version,
+            skill_md: pack.skill_md,
+            pod_yaml: pack.pod_yaml,
+            filters_yaml: pack.filters_yaml,
+            validation,
+        })
+    }
+
+    pub fn patch_skill_pack(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+        patch: SkillPackPatch,
+    ) -> Result<PodSkillPack, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        let existing = store
+            .pod_skill_packs
+            .get(&pod.id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("skill pack".to_string()))?;
+        let pack = patch_skill_pack(&existing, patch);
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        let event = sign_public_event(
+            &node,
+            "pod_skill_pack_updated",
+            &pod.slug,
+            skill_pack_payload(&pack),
+            store.latest_event_hash(&pod.slug),
+        )?;
+        store.pod_skill_packs.insert(pod.id, pack.clone());
+        store.event_log.push(event);
+        self.persist_locked(&store)?;
+        Ok(pack)
+    }
+
+    pub fn export_skill_pack(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+    ) -> Result<ExportedSkillPack, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        let pack = store
+            .pod_skill_packs
+            .get(&pod.id)
+            .ok_or_else(|| StoreError::NotFound("skill pack".to_string()))?;
+        let events_jsonl = store
+            .public_events_for_pod(&pod.slug)
+            .into_iter()
+            .map(|event| serde_json::to_string(&event))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap_or_default()
+            .join("\n");
+        Ok(export_skill_pack(pack, events_jsonl))
+    }
+
+    pub fn import_skill_pack(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+        files: BTreeMap<String, String>,
+    ) -> Result<PodSkillPack, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        let existing = store
+            .pod_skill_packs
+            .get(&pod.id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("skill pack".to_string()))?;
+        let pack = import_skill_pack(&existing, &files);
+        let report = validate_skill_pack(&pack);
+        if !report.valid {
+            return Err(StoreError::Validation(report.errors.join(", ")).into());
+        }
+        store.pod_skill_packs.insert(pod.id, pack.clone());
+        self.persist_locked(&store)?;
+        Ok(pack)
+    }
+
+    pub fn fork_skill_pack(
+        &self,
+        ctx: &AuthContext,
+        source_pod_slug: &str,
+        target: CreatePodRequest,
+    ) -> Result<PodSkillPack, AgentToolsError> {
+        let source_pack = self.get_skill_pack(ctx, source_pod_slug)?;
+        let target_pod = self.create_pod(ctx, target)?;
+        let forked = fork_skill_pack(&source_pack, &target_pod);
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        store.pod_skill_packs.insert(target_pod.id, forked.clone());
+        self.persist_locked(&store)?;
+        Ok(forked)
+    }
+
+    pub fn validate_pod_skill_pack(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+    ) -> Result<ValidationReport, AgentToolsError> {
+        let pack = self.get_skill_pack(ctx, pod_slug)?;
+        Ok(validate_skill_pack(&pack))
+    }
+
+    pub fn add_source_to_pod(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+        source_type: CrawlerSourceType,
+        url: String,
+    ) -> Result<CrawlerSource, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        let source = CrawlerSource {
+            id: Uuid::now_v7(),
+            tenant_id: ctx.tenant_id,
+            pod_id: pod.id,
+            source_type,
+            url,
+            enabled: true,
+            crawl_interval_minutes: 1440,
+            last_crawled_at: None,
+            origin_event_id: None,
+        };
+        store.crawler_sources.insert(source.id, source.clone());
+        self.persist_locked(&store)?;
+        Ok(source)
+    }
+
+    pub fn create_crawl_candidate(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+        source_id: Uuid,
+        request: SubmitLinkRequest,
+    ) -> Result<CrawlCandidate, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        let canonical_url = canonicalize_url(&request.url)?;
+        let domain = Url::parse(&canonical_url)
+            .map_err(|e| AgentToolsError::BadUrl(e.to_string()))?
+            .domain()
+            .unwrap_or("unknown")
+            .to_string();
+        let candidate = CrawlCandidate {
+            id: Uuid::now_v7(),
+            tenant_id: ctx.tenant_id,
+            pod_id: pod.id,
+            crawler_source_id: source_id,
+            url: request.url,
+            canonical_url,
+            title: request
+                .title
+                .unwrap_or_else(|| "Untitled crawler candidate".to_string()),
+            description: request.description,
+            domain,
+            summary: None,
+            tags: request.tags,
+            status: CrawlCandidateStatus::Pending,
+            rejection_reason: None,
+            created_at: Utc::now(),
+        };
+        store
+            .crawl_candidates
+            .insert(candidate.id, candidate.clone());
+        self.persist_locked(&store)?;
+        Ok(candidate)
+    }
+
+    pub fn promote_crawl_candidate(
+        &self,
+        ctx: &AuthContext,
+        candidate_id: Uuid,
+    ) -> Result<Submission, AgentToolsError> {
+        let (pod_slug, request) = {
+            let mut store = self
+                .store
+                .write()
+                .map_err(|_| AgentToolsError::LockPoisoned)?;
+            let candidate = store
+                .crawl_candidates
+                .get_mut(&candidate_id)
+                .ok_or_else(|| StoreError::NotFound("crawl candidate".to_string()))?;
+            candidate.status = CrawlCandidateStatus::Promoted;
+            let candidate = candidate.clone();
+            self.persist_locked(&store)?;
+            let pod = store
+                .pods
+                .get(&candidate.pod_id)
+                .cloned()
+                .ok_or_else(|| StoreError::NotFound("pod".to_string()))?;
+            (
+                pod.slug,
+                SubmitLinkRequest {
+                    url: candidate.url.clone(),
+                    title: Some(candidate.title.clone()),
+                    description: candidate.description.clone(),
+                    note: Some("Promoted from approved crawler source.".to_string()),
+                    tags: candidate.tags.clone(),
+                    discovered_by_crawler: true,
+                },
+            )
+        };
+        self.submit_link_to_pod(ctx, &pod_slug, request)
+    }
+
+    pub fn save_link(
+        &self,
+        ctx: &AuthContext,
+        submission_id: SubmissionId,
+    ) -> Result<(), AgentToolsError> {
+        let Some(user_id) = ctx.user_id else {
+            return Ok(());
+        };
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        store.saves.insert((user_id, submission_id));
+        store.feedback_events.push(FeedbackEvent {
+            user_id,
+            tenant_id: ctx.tenant_id,
+            submission_id,
+            event_type: FeedbackKind::Saved,
+            reason: None,
+            created_at: Utc::now(),
+            local_only: true,
+        });
+        self.persist_locked(&store)?;
+        Ok(())
+    }
+
+    pub fn block_source(&self, ctx: &AuthContext, source: String) -> Result<(), AgentToolsError> {
+        let Some(user_id) = ctx.user_id else {
+            return Ok(());
+        };
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let prefs = store
+            .user_preferences
+            .entry((user_id, ctx.tenant_id))
+            .or_insert(UserPreferences {
+                user_id,
+                tenant_id: ctx.tenant_id,
+                interests: vec![],
+                blocked_topics: vec![],
+                blocked_sources: vec![],
+                preferred_brief_length: 7,
+                preferred_discovery_mode: DiscoveryMode::DeepMatch,
+            });
+        if !prefs.blocked_sources.contains(&source) {
+            prefs.blocked_sources.push(source);
+        }
+        self.persist_locked(&store)?;
+        Ok(())
+    }
+
+    pub fn block_topic(&self, ctx: &AuthContext, topic: String) -> Result<(), AgentToolsError> {
+        let Some(user_id) = ctx.user_id else {
+            return Ok(());
+        };
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let prefs = store
+            .user_preferences
+            .entry((user_id, ctx.tenant_id))
+            .or_insert(UserPreferences {
+                user_id,
+                tenant_id: ctx.tenant_id,
+                interests: vec![],
+                blocked_topics: vec![],
+                blocked_sources: vec![],
+                preferred_brief_length: 7,
+                preferred_discovery_mode: DiscoveryMode::DeepMatch,
+            });
+        if !prefs.blocked_topics.contains(&topic) {
+            prefs.blocked_topics.push(topic);
+        }
+        self.persist_locked(&store)?;
+        Ok(())
+    }
+
+    pub fn update_preferences(
+        &self,
+        ctx: &AuthContext,
+        request: UpdatePreferencesRequest,
+    ) -> Result<UserPreferences, AgentToolsError> {
+        let Some(user_id) = ctx.user_id else {
+            return Err(StoreError::Validation(
+                "preferences require an authenticated user".to_string(),
+            )
+            .into());
+        };
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let prefs = store
+            .user_preferences
+            .entry((user_id, ctx.tenant_id))
+            .or_insert(UserPreferences {
+                user_id,
+                tenant_id: ctx.tenant_id,
+                interests: vec![],
+                blocked_topics: vec![],
+                blocked_sources: vec![],
+                preferred_brief_length: 7,
+                preferred_discovery_mode: DiscoveryMode::DeepMatch,
+            });
+        if let Some(interests) = request.interests {
+            prefs.interests = normalize_unique(interests);
+        }
+        if let Some(blocked_topics) = request.blocked_topics {
+            prefs.blocked_topics = normalize_unique(blocked_topics);
+        }
+        if let Some(blocked_sources) = request.blocked_sources {
+            prefs.blocked_sources = normalize_unique(blocked_sources);
+        }
+        if let Some(length) = request.preferred_brief_length {
+            prefs.preferred_brief_length = length.clamp(1, 10);
+        }
+        if let Some(mode) = request.preferred_discovery_mode {
+            prefs.preferred_discovery_mode = mode;
+        }
+        let prefs = prefs.clone();
+        self.persist_locked(&store)?;
+        Ok(prefs)
+    }
+
+    pub fn node_info(&self, ctx: &AuthContext) -> Result<NodeInfo, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        Ok(NodeInfo {
+            node_id: node.id,
+            display_name: node.display_name,
+            public_key: node.public_key,
+            supported_protocol_version: "stumble/0.1".to_string(),
+        })
+    }
+
+    pub fn well_known_node(
+        &self,
+        ctx: &AuthContext,
+        base_url: &str,
+    ) -> Result<WellKnownNode, AgentToolsError> {
+        let node = self.node_info(ctx)?;
+        let base = base_url.trim_end_matches('/');
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert("node".to_string(), format!("{base}/federation/node"));
+        endpoints.insert("pods".to_string(), format!("{base}/federation/pods"));
+        endpoints.insert(
+            "pod_manifest_template".to_string(),
+            format!("{base}/federation/pods/{{slug}}/manifest"),
+        );
+        endpoints.insert(
+            "pod_events_template".to_string(),
+            format!("{base}/federation/pods/{{slug}}/events"),
+        );
+        endpoints.insert(
+            "hub_search_pods".to_string(),
+            format!("{base}/hub/search-pods"),
+        );
+        Ok(WellKnownNode {
+            protocol: "stumble/0.1".to_string(),
+            node,
+            endpoints,
+        })
+    }
+
+    pub fn pod_manifest(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+    ) -> Result<PodManifest, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        let pack = store
+            .pod_skill_packs
+            .get(&pod.id)
+            .ok_or_else(|| StoreError::NotFound("skill pack".to_string()))?;
+        let public_source_summary = store
+            .crawler_sources
+            .values()
+            .filter(|source| source.pod_id == pod.id && source.enabled)
+            .map(|source| source.url.clone())
+            .collect();
+        Ok(PodManifest {
+            pod: pod.clone(),
+            latest_known_event_hash: store.latest_event_hash(&pod.slug),
+            skill_pack_version: pack.version,
+            public_source_summary,
+        })
+    }
+
+    pub fn register_hub_node(
+        &self,
+        request: HubRegisterNodeRequest,
+    ) -> Result<HubRegisteredNode, AgentToolsError> {
+        validate_protocol_version(&request.protocol_version)?;
+        let base_url = validate_hub_base_url(&request.base_url, "base_url")?;
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let now = Utc::now();
+        let registered = HubRegisteredNode {
+            node_id: request.node_id,
+            display_name: request.display_name,
+            base_url: normalized_url(base_url),
+            public_key: request.public_key,
+            protocol_version: request.protocol_version,
+            registered_at: store
+                .hub_nodes
+                .get(&request.node_id)
+                .map(|node| node.registered_at)
+                .unwrap_or(now),
+            last_seen_at: now,
+        };
+        store
+            .hub_nodes
+            .insert(registered.node_id, registered.clone());
+        self.persist_locked(&store)?;
+        Ok(registered)
+    }
+
+    pub fn list_hub_nodes(&self) -> Result<Vec<HubRegisteredNode>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        Ok(store.hub_nodes.values().cloned().collect())
+    }
+
+    pub fn register_hub_pod(
+        &self,
+        request: HubRegisterPodRequest,
+    ) -> Result<HubRegisteredPod, AgentToolsError> {
+        let node_base_url = validate_hub_base_url(&request.node_base_url, "node_base_url")?;
+        let manifest_url =
+            validate_hub_endpoint_url(&request.manifest_url, "manifest_url", &node_base_url)?;
+        let events_url =
+            validate_hub_endpoint_url(&request.events_url, "events_url", &node_base_url)?;
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        if !store.hub_nodes.contains_key(&request.node_id) {
+            return Err(StoreError::Validation(format!(
+                "hub pod node_id {} is not registered",
+                request.node_id
+            ))
+            .into());
+        }
+        let now = Utc::now();
+        let key = (request.node_id, request.pod_slug.clone());
+        let registered_at = store
+            .hub_pods
+            .get(&key)
+            .map(|pod| pod.registered_at)
+            .unwrap_or(now);
+        let pod = HubRegisteredPod {
+            id: store
+                .hub_pods
+                .get(&key)
+                .map(|pod| pod.id)
+                .unwrap_or_else(Uuid::now_v7),
+            node_id: request.node_id,
+            node_base_url: normalized_url(node_base_url),
+            pod_slug: request.pod_slug,
+            pod_name: request.pod_name,
+            description: request.description,
+            tags: normalize_unique(request.tags),
+            skill_pack_version: request.skill_pack_version,
+            latest_event_hash: request.latest_event_hash,
+            manifest_url: normalized_url(manifest_url),
+            events_url: normalized_url(events_url),
+            registered_at,
+            updated_at: now,
+        };
+        store.hub_pods.insert(key, pod.clone());
+        self.persist_locked(&store)?;
+        Ok(pod)
+    }
+
+    pub fn index_local_public_pods_in_hub(
+        &self,
+        ctx: &AuthContext,
+        base_url: &str,
+    ) -> Result<Vec<HubRegisteredPod>, AgentToolsError> {
+        let node_base_url = validate_hub_base_url(base_url, "base_url")?;
+        let normalized_base_url = normalized_url(node_base_url.clone());
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        let now = Utc::now();
+        let registered_node = HubRegisteredNode {
+            node_id: node.id,
+            display_name: node.display_name.clone(),
+            base_url: normalized_base_url.clone(),
+            public_key: node.public_key.clone(),
+            protocol_version: "stumble/0.1".to_string(),
+            registered_at: store
+                .hub_nodes
+                .get(&node.id)
+                .map(|node| node.registered_at)
+                .unwrap_or(now),
+            last_seen_at: now,
+        };
+        store.hub_nodes.insert(node.id, registered_node);
+
+        let public_pods = store
+            .pods
+            .values()
+            .filter(|pod| {
+                (pod.tenant_id == ctx.tenant_id || pod.tenant_id.is_none())
+                    && pod.visibility == Visibility::Public
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut indexed = Vec::new();
+        for pod in public_pods {
+            let Some(pack) = store.pod_skill_packs.get(&pod.id) else {
+                continue;
+            };
+            let manifest_url = validate_hub_endpoint_url(
+                &format!(
+                    "{}/federation/pods/{}/manifest",
+                    normalized_base_url, pod.slug
+                ),
+                "manifest_url",
+                &node_base_url,
+            )?;
+            let events_url = validate_hub_endpoint_url(
+                &format!(
+                    "{}/federation/pods/{}/events",
+                    normalized_base_url, pod.slug
+                ),
+                "events_url",
+                &node_base_url,
+            )?;
+            let key = (node.id, pod.slug.clone());
+            let registered_at = store
+                .hub_pods
+                .get(&key)
+                .map(|pod| pod.registered_at)
+                .unwrap_or(now);
+            let registered_pod = HubRegisteredPod {
+                id: store
+                    .hub_pods
+                    .get(&key)
+                    .map(|pod| pod.id)
+                    .unwrap_or_else(Uuid::now_v7),
+                node_id: node.id,
+                node_base_url: normalized_base_url.clone(),
+                pod_slug: pod.slug.clone(),
+                pod_name: pod.name.clone(),
+                description: pod.description.clone(),
+                tags: route_tokens(&format!("{} {} {}", pod.slug, pod.name, pod.description)),
+                skill_pack_version: pack.version,
+                latest_event_hash: store.latest_event_hash(&pod.slug),
+                manifest_url: normalized_url(manifest_url),
+                events_url: normalized_url(events_url),
+                registered_at,
+                updated_at: now,
+            };
+            store.hub_pods.insert(key, registered_pod.clone());
+            indexed.push(registered_pod);
+        }
+        self.persist_locked(&store)?;
+        Ok(indexed)
+    }
+
+    pub fn search_hub_pods(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<HubSearchPodsResponse, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let query = query.trim().to_lowercase();
+        let query_tokens = route_tokens(&query);
+        let mut results = store
+            .hub_pods
+            .values()
+            .filter_map(|pod| score_hub_pod(pod, &query_tokens))
+            .collect::<Vec<_>>();
+        results.sort_by(|a, b| b.score.total_cmp(&a.score));
+        results.truncate(limit.clamp(1, 50));
+        Ok(HubSearchPodsResponse { query, results })
+    }
+
+    pub fn pod_discovery_feed(
+        &self,
+        ctx: &AuthContext,
+        base_url: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<PodDiscoveryFeedResponse, AgentToolsError> {
+        self.index_local_public_pods_in_hub(ctx, base_url)?;
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        let query = query.trim().to_lowercase();
+        let query_tokens = route_tokens(&query);
+        let mut local_public_pods = Vec::new();
+        let mut global_public_pods = Vec::new();
+        for pod in store.hub_pods.values() {
+            let scope = if pod.node_id == node.id {
+                PodDiscoveryScope::Local
+            } else {
+                PodDiscoveryScope::Global
+            };
+            let Some(item) = discovery_feed_item(pod, scope, &query_tokens) else {
+                continue;
+            };
+            match item.scope {
+                PodDiscoveryScope::Local => local_public_pods.push(item),
+                PodDiscoveryScope::Global => global_public_pods.push(item),
+            }
+        }
+        sort_discovery_feed_items(&mut local_public_pods);
+        sort_discovery_feed_items(&mut global_public_pods);
+        let limit = limit.clamp(1, 50);
+        local_public_pods.truncate(limit);
+        global_public_pods.truncate(limit);
+        Ok(PodDiscoveryFeedResponse {
+            query,
+            local_public_pods,
+            global_public_pods,
+            private_interests_exported: false,
+        })
+    }
+
+    pub fn discover_public_pods_for_home(
+        &self,
+        ctx: &AuthContext,
+        topics: Vec<String>,
+        limit: usize,
+    ) -> Result<HomePublicPodDiscoveryResponse, AgentToolsError> {
+        let mut effective_topics = normalize_unique(topics);
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        if effective_topics.is_empty() {
+            if let Some(user_id) = ctx.user_id {
+                if let Some(prefs) = store.user_preferences.get(&(user_id, ctx.tenant_id)) {
+                    effective_topics = prefs.interests.clone();
+                }
+            }
+        }
+        let query = effective_topics.join(" ");
+        let route_request = RouteLinkRequest {
+            url: String::new(),
+            title: Some(query.clone()),
+            summary: Some(query.clone()),
+            tags: effective_topics.clone(),
+        };
+        // This is a public discovery surface. Routing scores every pod the caller
+        // can see (including their own private pods), so restrict the results to
+        // public slugs before returning them.
+        let public_slugs: std::collections::HashSet<String> = store
+            .pods
+            .values()
+            .filter(|pod| {
+                (pod.tenant_id == ctx.tenant_id || pod.tenant_id.is_none())
+                    && pod.visibility == Visibility::Public
+            })
+            .map(|pod| pod.slug.clone())
+            .collect();
+        drop(store);
+        let local_public_pods = self
+            .route_link_to_pods(ctx, route_request, 0.0)?
+            .candidates
+            .into_iter()
+            .filter(|candidate| candidate.score > 0.0 && public_slugs.contains(&candidate.pod_slug))
+            .take(limit.clamp(1, 25))
+            .collect();
+        let hub_results = self.search_hub_pods(&query, limit)?.results;
+        Ok(HomePublicPodDiscoveryResponse {
+            topics: effective_topics,
+            local_public_pods,
+            hub_results,
+            private_interests_exported: false,
+        })
+    }
+
+    pub fn export_pod_events(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+    ) -> Result<Vec<EventLog>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        Ok(store.public_events_for_pod(&pod.slug))
+    }
+
+    pub fn import_pod_events(
+        &self,
+        ctx: &AuthContext,
+        peer_id: PeerId,
+        events: Vec<EventLog>,
+    ) -> Result<usize, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let peer = store
+            .trusted_peers
+            .get(&peer_id)
+            .cloned()
+            .ok_or(StoreError::UntrustedPeer)?;
+        if !peer.enabled {
+            return Err(StoreError::UntrustedPeer.into());
+        }
+        let mut imported = 0;
+        for mut event in events {
+            if store.event_log.iter().any(|existing| {
+                existing.event_id == event.event_id || existing.content_hash == event.content_hash
+            }) {
+                continue;
+            }
+            if !verify_event(&event, &peer.public_key)? {
+                return Err(StoreError::InvalidSignature.into());
+            }
+            event.imported_from_peer_id = Some(peer_id);
+            event.verified = true;
+            event.tenant_id = ctx.tenant_id;
+            store.event_log.push(event);
+            imported += 1;
+        }
+        if imported > 0 {
+            self.persist_locked(&store)?;
+        }
+        Ok(imported)
+    }
+
+    pub fn import_public_events_from_hub_node(
+        &self,
+        ctx: &AuthContext,
+        node_id: NodeIdentityId,
+        events: Vec<EventLog>,
+    ) -> Result<usize, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let node = store
+            .hub_nodes
+            .get(&node_id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(format!("hub node {node_id}")))?;
+        let mut imported = 0;
+        for mut event in events {
+            if event.author_node_id != node_id || crate::store::is_private_event(&event.event_type)
+            {
+                continue;
+            }
+            if store.event_log.iter().any(|existing| {
+                existing.event_id == event.event_id || existing.content_hash == event.content_hash
+            }) {
+                continue;
+            }
+            if !verify_event(&event, &node.public_key)? {
+                return Err(StoreError::InvalidSignature.into());
+            }
+            event.imported_from_peer_id = None;
+            event.verified = true;
+            event.tenant_id = ctx.tenant_id;
+            store.event_log.push(event);
+            imported += 1;
+        }
+        if imported > 0 {
+            self.persist_locked(&store)?;
+        }
+        Ok(imported)
+    }
+}
+
+pub fn canonicalize_url(value: &str) -> Result<String, AgentToolsError> {
+    let mut url = Url::parse(value).map_err(|e| AgentToolsError::BadUrl(e.to_string()))?;
+    url.set_fragment(None);
+    if (url.scheme() == "https" && url.port() == Some(443))
+        || (url.scheme() == "http" && url.port() == Some(80))
+    {
+        let _ = url.set_port(None);
+    }
+    let mut pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(k, _)| {
+            !matches!(
+                k.as_ref(),
+                "utm_source" | "utm_medium" | "utm_campaign" | "utm_term" | "utm_content"
+            )
+        })
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    pairs.sort();
+    url.set_query(None);
+    if !pairs.is_empty() {
+        url.query_pairs_mut().extend_pairs(pairs);
+    }
+    Ok(url.to_string())
+}
+
+fn validate_protocol_version(value: &str) -> Result<(), AgentToolsError> {
+    if value == "stumble/0.1" {
+        return Ok(());
+    }
+    Err(StoreError::Validation(format!(
+        "unsupported protocol_version {value}; expected stumble/0.1"
+    ))
+    .into())
+}
+
+fn validate_hub_base_url(value: &str, field: &str) -> Result<Url, AgentToolsError> {
+    let mut url = parse_hub_url(value, field)?;
+    url.set_query(None);
+    url.set_fragment(None);
+    validate_hub_scheme_and_host(&url, field)?;
+    Ok(url)
+}
+
+fn validate_hub_endpoint_url(
+    value: &str,
+    field: &str,
+    node_base_url: &Url,
+) -> Result<Url, AgentToolsError> {
+    let mut url = parse_hub_url(value, field)?;
+    url.set_query(None);
+    url.set_fragment(None);
+    validate_hub_scheme_and_host(&url, field)?;
+    if url.scheme() != node_base_url.scheme()
+        || url.host_str() != node_base_url.host_str()
+        || url.port_or_known_default() != node_base_url.port_or_known_default()
+    {
+        return Err(StoreError::Validation(format!(
+            "{field} must use the same scheme, host, and port as node_base_url"
+        ))
+        .into());
+    }
+    if !url
+        .path()
+        .starts_with(node_base_url.path().trim_end_matches('/'))
+    {
+        return Err(StoreError::Validation(format!("{field} must be under node_base_url")).into());
+    }
+    Ok(url)
+}
+
+fn parse_hub_url(value: &str, field: &str) -> Result<Url, AgentToolsError> {
+    let url = Url::parse(value)
+        .map_err(|error| StoreError::Validation(format!("{field} is not a valid URL: {error}")))?;
+    if url.username() != "" || url.password().is_some() {
+        return Err(StoreError::Validation(format!("{field} must not include credentials")).into());
+    }
+    Ok(url)
+}
+
+fn validate_hub_scheme_and_host(url: &Url, field: &str) -> Result<(), AgentToolsError> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(StoreError::Validation(format!("{field} must use http or https")).into());
+    }
+    if url.host_str().is_none() {
+        return Err(StoreError::Validation(format!("{field} must include a host")).into());
+    }
+    if !hub_url_is_loopback(url) && url.scheme() != "https" {
+        return Err(StoreError::Validation(format!(
+            "{field} must use https unless it is loopback-only"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn hub_url_is_loopback(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+fn normalized_url(url: Url) -> String {
+    url.to_string().trim_end_matches('/').to_string()
+}
+
+fn normalize_unique(values: Vec<String>) -> Vec<String> {
+    let mut output = Vec::new();
+    for value in values {
+        let value = value.trim().to_lowercase();
+        if !value.is_empty() && !output.contains(&value) {
+            output.push(value);
+        }
+    }
+    output
+}
+
+fn route_text(request: &RouteLinkRequest) -> String {
+    format!(
+        "{} {} {} {}",
+        request.url,
+        request.title.clone().unwrap_or_default(),
+        request.summary.clone().unwrap_or_default(),
+        request.tags.join(" ")
+    )
+    .to_lowercase()
+}
+
+fn score_pod_route(
+    pod: &Pod,
+    pack: Option<&PodSkillPack>,
+    text: &str,
+    tags: &[String],
+) -> PodRouteCandidate {
+    let mut score = 0.0_f32;
+    let mut reasons = Vec::new();
+    let tag_text = tags.join(" ").to_lowercase();
+    let pod_text = format!("{} {} {}", pod.name, pod.slug, pod.description).to_lowercase();
+    for token in route_tokens(&pod_text) {
+        if text.contains(&token) || tag_text.contains(&token) {
+            score += 1.5;
+            if reasons.len() < 4 {
+                reasons.push(format!("matched pod term '{token}'"));
+            }
+        }
+    }
+    if let Some(pack) = pack {
+        let skill_text =
+            format!("{} {} {}", pack.skill_md, pack.pod_yaml, pack.filters_yaml).to_lowercase();
+        for token in route_tokens(&skill_text) {
+            if text.contains(&token) || tag_text.contains(&token) {
+                score += 0.4;
+                if reasons.len() < 6 {
+                    reasons.push(format!("matched skill-pack term '{token}'"));
+                }
+            }
+        }
+    }
+    let domain_bonus = if text.contains("x.com") || text.contains("twitter.com") {
+        if pod.slug.contains("alien") || pod.slug.contains("internet") {
+            1.0
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+    if domain_bonus > 0.0 {
+        score += domain_bonus;
+        reasons.push("social link fits this pod's discovery surface".to_string());
+    }
+    PodRouteCandidate {
+        pod_slug: pod.slug.clone(),
+        pod_name: pod.name.clone(),
+        score,
+        reasons,
+    }
+}
+
+fn score_hub_pod(pod: &HubRegisteredPod, query_tokens: &[String]) -> Option<HubSearchPodResult> {
+    let haystack = format!(
+        "{} {} {} {}",
+        pod.pod_slug,
+        pod.pod_name,
+        pod.description,
+        pod.tags.join(" ")
+    )
+    .to_lowercase();
+    let mut score = 0.0_f32;
+    let mut reasons = Vec::new();
+    for token in query_tokens {
+        if haystack.contains(token) {
+            score += if pod.tags.iter().any(|tag| tag.eq_ignore_ascii_case(token)) {
+                2.0
+            } else {
+                1.0
+            };
+            if reasons.len() < 6 {
+                reasons.push(format!("matched public pod term '{token}'"));
+            }
+        }
+    }
+    if score <= 0.0 {
+        None
+    } else {
+        Some(HubSearchPodResult {
+            pod: pod.clone(),
+            score,
+            reasons,
+        })
+    }
+}
+
+fn discovery_feed_item(
+    pod: &HubRegisteredPod,
+    scope: PodDiscoveryScope,
+    query_tokens: &[String],
+) -> Option<PodDiscoveryFeedItem> {
+    if query_tokens.is_empty() {
+        return Some(PodDiscoveryFeedItem {
+            pod: pod.clone(),
+            scope,
+            score: 0.0,
+            reasons: Vec::new(),
+        });
+    }
+    let scored = score_hub_pod(pod, query_tokens)?;
+    Some(PodDiscoveryFeedItem {
+        pod: scored.pod,
+        scope,
+        score: scored.score,
+        reasons: scored.reasons,
+    })
+}
+
+fn sort_discovery_feed_items(items: &mut [PodDiscoveryFeedItem]) {
+    items.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| b.pod.updated_at.cmp(&a.pod.updated_at))
+    });
+}
+
+fn route_tokens(text: &str) -> Vec<String> {
+    let stop = [
+        "the",
+        "and",
+        "for",
+        "with",
+        "pod",
+        "this",
+        "that",
+        "from",
+        "into",
+        "links",
+        "link",
+        "discovery",
+        "personal",
+        "public",
+        "private",
+        "use",
+        "when",
+        "brief",
+        "style",
+        "good",
+        "bad",
+        "stuff",
+        "weird",
+    ];
+    let mut out = Vec::new();
+    for token in text
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::trim)
+        .filter(|token| token.len() > 3)
+    {
+        if !stop.contains(&token) && !out.iter().any(|existing| existing == token) {
+            out.push(token.to_string());
+        }
+        if out.len() >= 80 {
+            break;
+        }
+    }
+    out
+}

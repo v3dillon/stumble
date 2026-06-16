@@ -1,0 +1,12 @@
+[package]
+name = "stumble-mcp"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+stumble-core = { path = "../stumble-core" }
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
