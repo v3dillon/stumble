@@ -56,6 +56,11 @@ pub struct InMemoryStore {
     pub discovery_tasks: HashMap<DiscoveryTaskId, DiscoveryTask>,
     pub candidates: HashMap<CandidateId, Candidate>,
     pub candidate_submissions: HashMap<CandidateSubmissionId, CandidateSubmission>,
+    pub pod_curation_policies: HashMap<PodId, CurationPolicy>,
+    pub pod_placements: HashMap<(CandidateId, PodId), PodPlacement>,
+    pub accepted_placement_projections:
+        HashMap<(ContentItemId, PodId), AcceptedPlacementProjection>,
+    pub(crate) federated_content_item_ids: HashMap<FederatedContentItemKey, ContentItemId>,
     pub node_identities: HashMap<NodeIdentityId, NodeIdentity>,
     pub trusted_peers: HashMap<PeerId, TrustedPeer>,
     pub pods: HashMap<PodId, Pod>,
@@ -99,6 +104,14 @@ struct PersistedStore {
     candidates: Vec<Candidate>,
     #[serde(default)]
     candidate_submissions: Vec<CandidateSubmission>,
+    #[serde(default)]
+    pod_curation_policies: Vec<PersistedPodCurationPolicy>,
+    #[serde(default)]
+    pod_placements: Vec<PodPlacement>,
+    #[serde(default)]
+    accepted_placement_projections: Vec<AcceptedPlacementProjection>,
+    #[serde(default)]
+    federated_content_item_ids: Vec<PersistedFederatedContentItemId>,
     node_identities: Vec<NodeIdentity>,
     trusted_peers: Vec<TrustedPeer>,
     pods: Vec<Pod>,
@@ -136,6 +149,42 @@ struct PersistedPrivateNote {
     body: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedPodCurationPolicy {
+    pod_id: PodId,
+    policy: CurationPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedFederatedContentItemId {
+    #[serde(default)]
+    tenant_id: Option<TenantId>,
+    origin_node_id: NodeIdentityId,
+    origin_content_item_id: ContentItemId,
+    local_content_item_id: ContentItemId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct FederatedContentItemKey {
+    tenant_id: Option<TenantId>,
+    origin_node_id: NodeIdentityId,
+    origin_content_item_id: ContentItemId,
+}
+
+impl FederatedContentItemKey {
+    pub(crate) const fn new(
+        tenant_id: Option<TenantId>,
+        origin_node_id: NodeIdentityId,
+        origin_content_item_id: ContentItemId,
+    ) -> Self {
+        Self {
+            tenant_id,
+            origin_node_id,
+            origin_content_item_id,
+        }
+    }
+}
+
 impl From<&InMemoryStore> for PersistedStore {
     fn from(store: &InMemoryStore) -> Self {
         Self {
@@ -150,6 +199,32 @@ impl From<&InMemoryStore> for PersistedStore {
             discovery_tasks: store.discovery_tasks.values().cloned().collect(),
             candidates: store.candidates.values().cloned().collect(),
             candidate_submissions: store.candidate_submissions.values().cloned().collect(),
+            pod_curation_policies: store
+                .pod_curation_policies
+                .iter()
+                .map(|(pod_id, policy)| PersistedPodCurationPolicy {
+                    pod_id: *pod_id,
+                    policy: *policy,
+                })
+                .collect(),
+            pod_placements: store.pod_placements.values().cloned().collect(),
+            accepted_placement_projections: store
+                .accepted_placement_projections
+                .values()
+                .cloned()
+                .collect(),
+            federated_content_item_ids: store
+                .federated_content_item_ids
+                .iter()
+                .map(
+                    |(key, local_content_item_id)| PersistedFederatedContentItemId {
+                        tenant_id: key.tenant_id,
+                        origin_node_id: key.origin_node_id,
+                        origin_content_item_id: key.origin_content_item_id,
+                        local_content_item_id: *local_content_item_id,
+                    },
+                )
+                .collect(),
             node_identities: store.node_identities.values().cloned().collect(),
             trusted_peers: store.trusted_peers.values().cloned().collect(),
             pods: store.pods.values().cloned().collect(),
@@ -257,6 +332,35 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .candidate_submissions
                 .into_iter()
                 .map(|submission| (submission.id, submission))
+                .collect(),
+            pod_curation_policies: snapshot
+                .pod_curation_policies
+                .into_iter()
+                .map(|entry| (entry.pod_id, entry.policy))
+                .collect(),
+            pod_placements: snapshot
+                .pod_placements
+                .into_iter()
+                .map(|placement| ((placement.candidate_id, placement.pod_id), placement))
+                .collect(),
+            accepted_placement_projections: snapshot
+                .accepted_placement_projections
+                .into_iter()
+                .map(|projection| ((projection.content_item_id, projection.pod_id), projection))
+                .collect(),
+            federated_content_item_ids: snapshot
+                .federated_content_item_ids
+                .into_iter()
+                .map(|entry| {
+                    (
+                        FederatedContentItemKey::new(
+                            entry.tenant_id,
+                            entry.origin_node_id,
+                            entry.origin_content_item_id,
+                        ),
+                        entry.local_content_item_id,
+                    )
+                })
                 .collect(),
             node_identities: snapshot
                 .node_identities
@@ -392,6 +496,10 @@ const STORE_COLLECTIONS: &[&str] = &[
     "discovery_tasks",
     "candidates",
     "candidate_submissions",
+    "pod_curation_policies",
+    "pod_placements",
+    "accepted_placement_projections",
+    "federated_content_item_ids",
     "node_identities",
     "trusted_peers",
     "pods",
@@ -651,6 +759,10 @@ fn record_key(
         "hub_pods" => &["node_id", "pod_slug"],
         "hub_nodes" => &["node_id"],
         "pod_rules" | "pod_skill_packs" => &["pod_id"],
+        "pod_curation_policies" => &["pod_id"],
+        "pod_placements" => &["candidate_id", "pod_id"],
+        "accepted_placement_projections" => &["content_item_id", "pod_id"],
+        "federated_content_item_ids" => &["tenant_id", "origin_node_id", "origin_content_item_id"],
         "pod_package_versions" => &["pod_id", "version"],
         "event_log" => &["event_id"],
         "feedback_events" => return Ok(serde_json::to_string(value)?),

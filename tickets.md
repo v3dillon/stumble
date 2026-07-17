@@ -102,20 +102,20 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 ## Curate and route Content Items across Pods
 
-**Status:** ready-for-agent
+**Status:** complete
 
 **What to build:** Convert Candidates into canonical Content Items and independently accepted Pod Placements under Manual, Assisted, or Autonomous Curation. Support local cross-Pod routing and provenance-preserving Add to Pod.
 
 **Blocked by:** Submit provenance-bearing Candidates; Require approval for sensitive changes.
 
-- [ ] Manual Curation requires authorized review for every proposed placement.
-- [ ] Assisted Curation may accept trusted high-confidence proposals and queues uncertainty.
-- [ ] Autonomous Curation requires an approved sensitive-change proposal before activation.
-- [ ] Each placement records its evidence, curation path, actor, and audit history.
-- [ ] A Routing Agent may propose additional placements only in Pods the node is authorized to curate.
-- [ ] One canonical Content Item can hold Accepted Placements in multiple Pods.
-- [ ] An authorized Add to Pod action immediately creates an Accepted Placement and optional curation note.
-- [ ] Rejections and reversals affect future local routing without leaking private feedback.
+- [x] Manual Curation requires authorized review for every proposed placement.
+- [x] Assisted Curation may accept trusted high-confidence proposals and queues uncertainty.
+- [x] Autonomous Curation requires an approved sensitive-change proposal before activation.
+- [x] Each placement records its evidence, curation path, actor, and audit history.
+- [x] A Routing Agent may propose additional placements only in Pods the node is authorized to curate.
+- [x] One canonical Content Item can hold Accepted Placements in multiple Pods.
+- [x] An authorized Add to Pod action immediately creates an Accepted Placement and optional curation note.
+- [x] Rejections and reversals affect future local routing without leaking private feedback.
 
 ## Deliver a finite local Feed
 
