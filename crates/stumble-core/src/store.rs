@@ -63,6 +63,7 @@ pub struct InMemoryStore {
     pub(crate) federated_content_item_ids: HashMap<FederatedContentItemKey, ContentItemId>,
     pub node_identities: HashMap<NodeIdentityId, NodeIdentity>,
     pub trusted_peers: HashMap<PeerId, TrustedPeer>,
+    pub subscriptions: HashMap<SubscriptionId, Subscription>,
     pub pods: HashMap<PodId, Pod>,
     pub pod_memberships: Vec<PodMembership>,
     pub pod_rules: HashMap<PodId, PodRules>,
@@ -116,6 +117,8 @@ struct PersistedStore {
     federated_content_item_ids: Vec<PersistedFederatedContentItemId>,
     node_identities: Vec<NodeIdentity>,
     trusted_peers: Vec<TrustedPeer>,
+    #[serde(default)]
+    subscriptions: Vec<Subscription>,
     pods: Vec<Pod>,
     pod_memberships: Vec<PodMembership>,
     pod_rules: Vec<PodRules>,
@@ -233,6 +236,7 @@ impl From<&InMemoryStore> for PersistedStore {
                 .collect(),
             node_identities: store.node_identities.values().cloned().collect(),
             trusted_peers: store.trusted_peers.values().cloned().collect(),
+            subscriptions: store.subscriptions.values().cloned().collect(),
             pods: store.pods.values().cloned().collect(),
             pod_memberships: store.pod_memberships.clone(),
             pod_rules: store.pod_rules.values().cloned().collect(),
@@ -380,6 +384,11 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .into_iter()
                 .map(|peer| (peer.id, peer))
                 .collect(),
+            subscriptions: snapshot
+                .subscriptions
+                .into_iter()
+                .map(|subscription| (subscription.id, subscription))
+                .collect(),
             pods: snapshot.pods.into_iter().map(|pod| (pod.id, pod)).collect(),
             pod_memberships: snapshot.pod_memberships,
             pod_rules: snapshot
@@ -516,6 +525,7 @@ const STORE_COLLECTIONS: &[&str] = &[
     "federated_content_item_ids",
     "node_identities",
     "trusted_peers",
+    "subscriptions",
     "pods",
     "pod_memberships",
     "pod_rules",
@@ -896,9 +906,35 @@ impl InMemoryStore {
     pub fn public_events_for_pod(&self, pod_slug: &str) -> Vec<EventLog> {
         self.event_log
             .iter()
-            .filter(|event| event.pod_slug == pod_slug && !is_private_event(&event.event_type))
+            .filter(|event| event.pod_slug == pod_slug && is_federated_pod_event(&event.event_type))
             .cloned()
             .collect()
+    }
+
+    pub fn portable_package_events_for_pod(&self, pod_slug: &str) -> Vec<EventLog> {
+        self.event_log
+            .iter()
+            .filter(|event| {
+                event.pod_slug == pod_slug
+                    && matches!(
+                        event.event_type.as_str(),
+                        "pod_created"
+                            | "private_pod_package_created"
+                            | "pod_skill_pack_updated"
+                            | "pod_package_imported"
+                            | "pod_package_forked"
+                    )
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub fn latest_federated_event_hash(&self, pod_slug: &str) -> Option<String> {
+        self.event_log
+            .iter()
+            .rev()
+            .find(|event| event.pod_slug == pod_slug && is_federated_pod_event(&event.event_type))
+            .map(|event| event.content_hash.clone())
     }
 
     pub fn latest_event_hash(&self, pod_slug: &str) -> Option<String> {
@@ -920,6 +956,19 @@ pub fn is_private_event(event_type: &str) -> bool {
             | "source_blocked_private"
             | "topic_blocked_private"
             | "reading_history_recorded"
+    )
+}
+
+pub fn is_federated_pod_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "pod_created"
+            | "pod_published"
+            | "pod_skill_pack_updated"
+            | "pod_package_imported"
+            | "pod_package_forked"
+            | "content_item_placed"
+            | "link_removed"
     )
 }
 

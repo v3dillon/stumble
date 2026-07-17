@@ -11,6 +11,31 @@ pub type SubmissionId = Uuid;
 pub type PeerId = Uuid;
 pub type NodeIdentityId = Uuid;
 
+/// Stable local identity of a User's [`Subscription`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SubscriptionId(Uuid);
+
+impl From<Uuid> for SubscriptionId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl std::fmt::Display for SubscriptionId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::str::FromStr for SubscriptionId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse().map(Self)
+    }
+}
+
 /// Stable canonical identity of a [`ContentItem`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -930,6 +955,8 @@ pub enum HarnessWriteOperation {
     IndexPublicPods,
     CreatePod,
     JoinPod,
+    SubscribePublicPod,
+    SynchronizeSubscription,
     SubmitLinkToPod,
     SubmitCandidate,
     SetPodCurationPolicy,
@@ -2104,6 +2131,90 @@ pub struct PodManifest {
     pub latest_known_event_hash: Option<String>,
     pub skill_pack_version: i32,
     pub public_source_summary: Vec<String>,
+}
+
+/// Signed public artifacts exported by an Origin Node for one Pod.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct FederationPodSnapshot {
+    /// Origin identity whose public key verifies every returned Pod Event.
+    pub node: NodeInfo,
+    /// Current public Pod metadata and latest signed-event pointer.
+    pub manifest: PodManifest,
+    /// Events after the requested cursor, in append order.
+    pub events: Vec<EventLog>,
+}
+
+impl FederationPodSnapshot {
+    /// Creates an ordered snapshot fetched from an Origin Node.
+    #[must_use]
+    pub const fn new(node: NodeInfo, manifest: PodManifest, events: Vec<EventLog>) -> Self {
+        Self {
+            node,
+            manifest,
+            events,
+        }
+    }
+}
+
+/// Local-only relationship making one remote public Pod Feed-eligible.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Subscription {
+    /// Stable Home Node identity for the relationship.
+    pub id: SubscriptionId,
+    /// User whose Feed may use synchronized accepted content.
+    pub user_id: UserId,
+    /// Optional hosted tenant boundary.
+    pub tenant_id: Option<TenantId>,
+    /// Canonical direct address supplied by the User.
+    pub public_pod_url: String,
+    /// Authoritative Origin Node identity.
+    pub origin_node_id: NodeIdentityId,
+    /// Origin Node verification key pinned at subscription time.
+    pub origin_public_key: String,
+    /// Public Pod slug at the direct address.
+    pub pod_slug: String,
+    /// Local projected Pod identity.
+    pub local_pod_id: PodId,
+    /// Last contiguous signed event projected by the Home Node.
+    pub last_event_hash: Option<String>,
+    /// Time at which the User subscribed.
+    pub created_at: DateTime<Utc>,
+    /// Time of the latest successful synchronization attempt.
+    pub synchronized_at: DateTime<Utc>,
+}
+
+/// Direct-address request containing artifacts fetched outbound from an Origin Node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct SubscribePublicPodRequest {
+    /// Canonical public Pod URL used for future outbound synchronization.
+    pub public_pod_url: String,
+    /// Origin snapshot fetched from that address.
+    pub snapshot: FederationPodSnapshot,
+}
+
+impl SubscribePublicPodRequest {
+    /// Creates a direct-address Subscription request.
+    #[must_use]
+    pub fn new(public_pod_url: impl Into<String>, snapshot: FederationPodSnapshot) -> Self {
+        Self {
+            public_pod_url: public_pod_url.into(),
+            snapshot,
+        }
+    }
+}
+
+/// Observable result of creating or incrementally refreshing a Subscription.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SynchronizationResult {
+    /// Updated local Subscription and cursor.
+    pub subscription: Subscription,
+    /// Number of newly projected signed events.
+    pub imported_events: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

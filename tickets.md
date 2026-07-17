@@ -152,20 +152,20 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 ## Subscribe and synchronize across two nodes
 
-**Status:** ready-for-agent
+**Status:** complete
 
 **What to build:** Let a private outbound-only Home Node subscribe directly to a public Pod on another reachable Origin Node, verify its signed package and events, synchronize accepted content into SQLite, and include it in the local Feed.
 
 **Blocked by:** Create and exchange portable Pod Packages; Curate and route Content Items across Pods; Deliver a finite local Feed.
 
-- [ ] An Origin Node can publish a public Pod through an approved visibility change.
-- [ ] A Home Node can subscribe using the public Pod URL without becoming publicly reachable.
-- [ ] Signed Pod Package versions and append-only Pod Events are verified before projection.
-- [ ] Synchronization resumes incrementally from a stored cursor and is idempotent.
-- [ ] Only Accepted Placements and permitted Content References synchronize.
-- [ ] Remote content becomes Feed-eligible while local Taste Profile and Feedback Signals remain private.
-- [ ] An unavailable Origin Node does not make already synchronized Feed content unusable.
-- [ ] The two-node behavior is covered at the primary temporary-SQLite acceptance seam.
+- [x] An Origin Node can publish a public Pod through an approved visibility change.
+- [x] A Home Node can subscribe using the public Pod URL without becoming publicly reachable.
+- [x] Signed Pod Package versions and append-only Pod Events are verified before projection.
+- [x] Synchronization resumes incrementally from a stored cursor and is idempotent.
+- [x] Only Accepted Placements and permitted Content References synchronize.
+- [x] Remote content becomes Feed-eligible while local Taste Profile and Feedback Signals remain private.
+- [x] An unavailable Origin Node does not make already synchronized Feed content unusable.
+- [x] The two-node behavior is covered at the primary temporary-SQLite acceptance seam.
 
 ## Apply tombstones without erasing local curation
 

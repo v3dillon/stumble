@@ -622,6 +622,228 @@ impl AgentTools {
         self.export_pod_events(ctx, pod_slug)
     }
 
+    /// Exports one public Pod's signed artifacts after an optional event cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Pod is not locally authoritative and public,
+    /// the cursor is unknown, or the Home Node store lock is poisoned.
+    pub fn federation_pod_snapshot(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+        after_event_hash: Option<&str>,
+    ) -> Result<FederationPodSnapshot, AgentToolsError> {
+        let node = self.node_info(ctx)?;
+        let manifest = self.federation_pod_manifest(ctx, pod_slug)?;
+        let all_events = self.federation_pod_events(ctx, pod_slug)?;
+        let events = match after_event_hash {
+            Some(cursor) => {
+                let index = all_events
+                    .iter()
+                    .position(|event| event.content_hash == cursor)
+                    .ok_or_else(|| {
+                        StoreError::Validation("synchronization cursor is unknown".to_string())
+                    })?;
+                all_events.into_iter().skip(index + 1).collect()
+            }
+            None => all_events,
+        };
+        Ok(FederationPodSnapshot {
+            node,
+            manifest,
+            events,
+        })
+    }
+
+    /// Subscribes to a directly addressed public Pod and projects verified artifacts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when authorization is denied, the public URL is invalid,
+    /// signed artifacts fail verification, or persistence fails.
+    pub fn subscribe_public_pod(
+        &self,
+        ctx: &AuthContext,
+        request: SubscribePublicPodRequest,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<SynchronizationResult, AgentToolsError> {
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Subscription requires an authenticated User".to_string())
+        })?;
+        let public_pod_url =
+            validate_public_pod_url(&request.public_pod_url, &request.snapshot.manifest.pod.slug)?;
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::SubscriptionManagement, None)?;
+        if store.subscriptions.values().any(|subscription| {
+            subscription.user_id == user_id
+                && subscription.tenant_id == ctx.tenant_id
+                && subscription.public_pod_url == public_pod_url
+        }) {
+            return Err(StoreError::Duplicate(format!("Subscription to {public_pod_url}")).into());
+        }
+        validate_federation_snapshot(&store, ctx.tenant_id, None, &request.snapshot)?;
+        let mut projected = store.clone();
+        let imported_events =
+            project_snapshot_events(&mut projected, ctx, &request.snapshot.events)?;
+        let local_pod = projected
+            .pods
+            .values()
+            .find(|pod| {
+                pod.tenant_id == ctx.tenant_id
+                    && pod.slug == request.snapshot.manifest.pod.slug
+                    && pod.origin_node_id == Some(request.snapshot.node.node_id)
+            })
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("synchronized public Pod".to_string()))?;
+        let subscription = Subscription {
+            id: Uuid::now_v7().into(),
+            user_id,
+            tenant_id: ctx.tenant_id,
+            public_pod_url,
+            origin_node_id: request.snapshot.node.node_id,
+            origin_public_key: request.snapshot.node.public_key,
+            pod_slug: request.snapshot.manifest.pod.slug,
+            local_pod_id: local_pod.id,
+            last_event_hash: request.snapshot.manifest.latest_known_event_hash,
+            created_at: now,
+            synchronized_at: now,
+        };
+        projected
+            .subscriptions
+            .insert(subscription.id, subscription.clone());
+        if !projected
+            .pod_memberships
+            .iter()
+            .any(|membership| membership.user_id == user_id && membership.pod_id == local_pod.id)
+        {
+            projected.pod_memberships.push(PodMembership {
+                user_id,
+                pod_id: local_pod.id,
+                role: PodRole::Member,
+                created_at: now,
+            });
+        }
+        record_harness_write_at(
+            &mut projected,
+            ctx,
+            HarnessWriteOperation::SubscribePublicPod,
+            Some(local_pod.id),
+            now,
+        );
+        self.persist_locked(&mut projected)?;
+        *store = projected;
+        Ok(SynchronizationResult {
+            subscription,
+            imported_events,
+        })
+    }
+
+    /// Applies the next contiguous signed event segment for a Subscription.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when authorization is denied, Origin identity changes,
+    /// the event chain is discontinuous or invalid, or persistence fails.
+    pub fn synchronize_subscription(
+        &self,
+        ctx: &AuthContext,
+        subscription_id: SubscriptionId,
+        mut snapshot: FederationPodSnapshot,
+    ) -> Result<SynchronizationResult, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let existing = store
+            .subscriptions
+            .get(&subscription_id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(format!("Subscription {subscription_id}")))?;
+        authorize_harness(
+            &store,
+            ctx,
+            HarnessCapability::SubscriptionManagement,
+            Some(existing.local_pod_id),
+        )?;
+        if ctx.user_id != Some(existing.user_id)
+            || existing.tenant_id != ctx.tenant_id
+            || existing.origin_node_id != snapshot.node.node_id
+            || existing.origin_public_key != snapshot.node.public_key
+            || existing.pod_slug != snapshot.manifest.pod.slug
+        {
+            return Err(StoreError::Validation(
+                "synchronization artifacts do not match the Subscription".to_string(),
+            )
+            .into());
+        }
+        discard_replayed_events(&store, existing.last_event_hash.as_deref(), &mut snapshot)?;
+        validate_federation_snapshot(
+            &store,
+            ctx.tenant_id,
+            existing.last_event_hash.as_deref(),
+            &snapshot,
+        )?;
+        let mut projected = store.clone();
+        let imported_events = project_snapshot_events(&mut projected, ctx, &snapshot.events)?;
+        let synchronized_at = Utc::now();
+        let subscription = projected
+            .subscriptions
+            .get_mut(&subscription_id)
+            .ok_or_else(|| StoreError::NotFound(format!("Subscription {subscription_id}")))?;
+        subscription.last_event_hash = snapshot.manifest.latest_known_event_hash;
+        subscription.synchronized_at = synchronized_at;
+        let subscription = subscription.clone();
+        record_harness_write_at(
+            &mut projected,
+            ctx,
+            HarnessWriteOperation::SynchronizeSubscription,
+            Some(subscription.local_pod_id),
+            synchronized_at,
+        );
+        self.persist_locked(&mut projected)?;
+        *store = projected;
+        Ok(SynchronizationResult {
+            subscription,
+            imported_events,
+        })
+    }
+
+    /// Reads one local Subscription within the authenticated User boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Subscription is missing, belongs to another
+    /// User or tenant, or the store lock is poisoned.
+    pub fn subscription(
+        &self,
+        ctx: &AuthContext,
+        subscription_id: SubscriptionId,
+    ) -> Result<Subscription, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let subscription = store
+            .subscriptions
+            .get(&subscription_id)
+            .filter(|subscription| {
+                Some(subscription.user_id) == ctx.user_id && subscription.tenant_id == ctx.tenant_id
+            })
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(format!("Subscription {subscription_id}")))?;
+        authorize_harness(
+            &store,
+            ctx,
+            HarnessCapability::SubscriptionManagement,
+            Some(subscription.local_pod_id),
+        )?;
+        Ok(subscription)
+    }
+
     pub fn route_link_to_pods(
         &self,
         ctx: &AuthContext,
@@ -2289,15 +2511,17 @@ impl AgentTools {
                 created_at: Utc::now(),
             });
         }
-        let node = store.node_for_tenant(ctx.tenant_id)?;
-        let event = sign_public_event(
-            &node,
-            "link_submitted",
-            &pod.slug,
-            json!({"submission": submission.clone()}),
-            store.latest_event_hash(&pod.slug),
-        )?;
-        store.event_log.push(event);
+        if pod.visibility != Visibility::Public {
+            let node = store.node_for_tenant(ctx.tenant_id)?;
+            let event = sign_public_event(
+                &node,
+                "link_submitted",
+                &pod.slug,
+                json!({"submission": submission.clone()}),
+                store.latest_event_hash(&pod.slug),
+            )?;
+            store.event_log.push(event);
+        }
         record_harness_write(
             &mut store,
             ctx,
@@ -3593,7 +3817,7 @@ impl AgentTools {
             .get(&pod.id)
             .ok_or_else(|| StoreError::NotFound("skill pack".to_string()))?;
         let events_jsonl = store
-            .public_events_for_pod(&pod.slug)
+            .portable_package_events_for_pod(&pod.slug)
             .into_iter()
             .map(|event| serde_json::to_string(&event))
             .collect::<Result<Vec<_>, _>>()
@@ -4225,7 +4449,7 @@ impl AgentTools {
             .collect();
         Ok(PodManifest {
             pod: pod.clone(),
-            latest_known_event_hash: store.latest_event_hash(&pod.slug),
+            latest_known_event_hash: store.latest_federated_event_hash(&pod.slug),
             skill_pack_version: pack.version,
             public_source_summary,
         })
@@ -4586,7 +4810,7 @@ impl AgentTools {
             event.imported_from_peer_id = Some(peer_id);
             event.verified = true;
             event.tenant_id = ctx.tenant_id;
-            project_imported_public_event(&mut store, ctx, &event);
+            project_imported_public_event(&mut store, ctx, &event)?;
             store.event_log.push(event);
             imported += 1;
         }
@@ -4635,7 +4859,7 @@ impl AgentTools {
             event.imported_from_peer_id = None;
             event.verified = true;
             event.tenant_id = ctx.tenant_id;
-            project_imported_public_event(&mut store, ctx, &event);
+            project_imported_public_event(&mut store, ctx, &event)?;
             store.event_log.push(event);
             imported += 1;
         }
@@ -4707,56 +4931,401 @@ pub fn canonicalize_url(value: &str) -> Result<String, AgentToolsError> {
     Ok(url.to_string())
 }
 
-fn project_imported_public_event(store: &mut InMemoryStore, ctx: &AuthContext, event: &EventLog) {
+fn discard_replayed_events(
+    store: &InMemoryStore,
+    cursor: Option<&str>,
+    snapshot: &mut FederationPodSnapshot,
+) -> Result<(), AgentToolsError> {
+    let mut previous_hash = snapshot
+        .events
+        .first()
+        .and_then(|event| event.previous_event_hash.clone());
+    for event in &snapshot.events {
+        if event.author_node_id != snapshot.node.node_id
+            || event.pod_slug != snapshot.manifest.pod.slug
+            || event.previous_event_hash != previous_hash
+            || !is_subscription_projection_event(&event.event_type)
+            || !verify_event(event, &snapshot.node.public_key)?
+        {
+            return Err(StoreError::InvalidSignature.into());
+        }
+        previous_hash = Some(event.content_hash.clone());
+    }
+    let Some(cursor) = cursor else {
+        return Ok(());
+    };
+    if snapshot
+        .events
+        .first()
+        .is_none_or(|event| event.previous_event_hash.as_deref() == Some(cursor))
+    {
+        return Ok(());
+    }
+    if let Some(cursor_index) = snapshot
+        .events
+        .iter()
+        .position(|event| event.content_hash == cursor)
+    {
+        snapshot.events.drain(..=cursor_index);
+        return Ok(());
+    }
+    let is_complete_retry = snapshot
+        .events
+        .last()
+        .is_some_and(|event| event.content_hash == cursor)
+        && snapshot.events.iter().all(|event| {
+            store.event_log.iter().any(|existing| {
+                existing.event_id == event.event_id && existing.content_hash == event.content_hash
+            })
+        });
+    if is_complete_retry {
+        snapshot.events.clear();
+        return Ok(());
+    }
+    Err(StoreError::Validation("signed Pod Event chain is discontinuous".to_string()).into())
+}
+
+/// Validates and canonicalizes a direct public Pod address before outbound I/O.
+///
+/// # Errors
+///
+/// Returns an error unless the address uses HTTPS (or loopback HTTP) and has
+/// the canonical `/federation/pods/<slug>` shape.
+pub fn canonical_public_pod_url(value: &str) -> Result<String, AgentToolsError> {
+    let mut url = Url::parse(value).map_err(|error| AgentToolsError::BadUrl(error.to_string()))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| StoreError::Validation("public Pod URL must include a host".to_string()))?;
+    let is_loopback_http = url.scheme() == "http"
+        && (host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback()));
+    if url.scheme() != "https" && !is_loopback_http {
+        return Err(StoreError::Validation(
+            "public Pod URL must use HTTPS except on loopback".to_string(),
+        )
+        .into());
+    }
+    let path = url.path().trim_end_matches('/').to_string();
+    let segments = path.split('/').collect::<Vec<_>>();
+    if segments.len() != 4
+        || !segments[0].is_empty()
+        || segments[1] != "federation"
+        || segments[2] != "pods"
+        || segments[3].is_empty()
+    {
+        return Err(StoreError::Validation(
+            "public Pod URL must use /federation/pods/<slug>".to_string(),
+        )
+        .into());
+    }
+    url.set_path(&path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.to_string().trim_end_matches('/').to_string())
+}
+
+fn validate_public_pod_url(value: &str, pod_slug: &str) -> Result<String, AgentToolsError> {
+    let canonical = canonical_public_pod_url(value)?;
+    let url = Url::parse(&canonical).map_err(|error| AgentToolsError::BadUrl(error.to_string()))?;
+    if url.path().trim_end_matches('/') != format!("/federation/pods/{pod_slug}") {
+        return Err(StoreError::Validation(
+            "public Pod URL does not match the signed Pod slug".to_string(),
+        )
+        .into());
+    }
+    Ok(canonical)
+}
+
+fn validate_federation_snapshot(
+    store: &InMemoryStore,
+    tenant_id: Option<TenantId>,
+    expected_previous_hash: Option<&str>,
+    snapshot: &FederationPodSnapshot,
+) -> Result<(), AgentToolsError> {
+    let pod = &snapshot.manifest.pod;
+    if pod.visibility != Visibility::Public
+        || pod.origin_node_id != Some(snapshot.node.node_id)
+        || snapshot.node.supported_protocol_version != "stumble/0.1"
+    {
+        return Err(StoreError::Validation(
+            "federation snapshot does not describe an authoritative public Pod".to_string(),
+        )
+        .into());
+    }
+    validate_remote_pod_identity(store, tenant_id, snapshot)?;
+    let mut previous_hash = expected_previous_hash.map(str::to_string).or_else(|| {
+        snapshot
+            .events
+            .first()
+            .filter(|event| event.event_type == "pod_published")
+            .and_then(|event| event.previous_event_hash.clone())
+    });
+    for event in &snapshot.events {
+        if event.pod_slug != pod.slug
+            || event.author_node_id != snapshot.node.node_id
+            || !is_subscription_projection_event(&event.event_type)
+        {
+            return Err(StoreError::Validation(
+                "event is outside the subscribed public Pod stream".to_string(),
+            )
+            .into());
+        }
+        if event.previous_event_hash != previous_hash {
+            return Err(StoreError::Validation(
+                "signed Pod Event chain is discontinuous".to_string(),
+            )
+            .into());
+        }
+        if !verify_event(event, &snapshot.node.public_key)? {
+            return Err(StoreError::InvalidSignature.into());
+        }
+        validate_imported_event_payload(event)?;
+        previous_hash = Some(event.content_hash.clone());
+    }
+    if previous_hash != snapshot.manifest.latest_known_event_hash {
+        return Err(StoreError::Validation(
+            "federation snapshot does not reach the manifest event pointer".to_string(),
+        )
+        .into());
+    }
+
+    let signed_packages = snapshot
+        .events
+        .iter()
+        .filter_map(|event| event.payload_json.get("package"))
+        .map(|value| serde_json::from_value::<PodPackage>(value.clone()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| StoreError::Validation("signed Pod Package is malformed".to_string()))?;
+    validate_signed_package_versions(store, tenant_id, snapshot, &signed_packages)?;
+    Ok(())
+}
+
+fn validate_remote_pod_identity(
+    store: &InMemoryStore,
+    tenant_id: Option<TenantId>,
+    snapshot: &FederationPodSnapshot,
+) -> Result<(), AgentToolsError> {
+    let remote = &snapshot.manifest.pod;
+    let origin_node_id = snapshot.node.node_id;
+    if store.pods.values().any(|local| {
+        local.tenant_id == tenant_id
+            && local.slug == remote.slug
+            && local.origin_node_id != Some(origin_node_id)
+    }) {
+        return Err(StoreError::Duplicate(format!(
+            "local Pod slug {} conflicts with the subscribed Origin",
+            remote.slug
+        ))
+        .into());
+    }
+    if store.pods.get(&remote.id).is_some_and(|local| {
+        local.tenant_id != tenant_id
+            || local.slug != remote.slug
+            || local.origin_node_id != Some(origin_node_id)
+    }) {
+        return Err(StoreError::Duplicate(format!(
+            "Origin Pod identity {} conflicts with local state",
+            remote.id
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_signed_package_versions(
+    store: &InMemoryStore,
+    tenant_id: Option<TenantId>,
+    snapshot: &FederationPodSnapshot,
+    signed_packages: &[PodPackage],
+) -> Result<(), AgentToolsError> {
+    let remote_pod = &snapshot.manifest.pod;
+    let local_pod = store.pods.values().find(|local| {
+        local.tenant_id == tenant_id
+            && local.slug == remote_pod.slug
+            && local.origin_node_id == Some(snapshot.node.node_id)
+    });
+    let local_package = local_pod.and_then(|pod| store.pod_skill_packs.get(&pod.id));
+    let mut verified_version = local_package.map(|package| package.version);
+    let mut immutable_versions = BTreeMap::new();
+    if let Some(package) = local_package {
+        immutable_versions.insert(
+            package.version,
+            normalized_package_value(package, package.pod_id)?,
+        );
+    }
+    let projected_pod_id = local_pod.map_or(remote_pod.id, |pod| pod.id);
+    for package in signed_packages {
+        PackageVersion::new(package.version)
+            .map_err(|error| StoreError::Validation(error.to_string()))?;
+        if package.pod_id != remote_pod.id || !validate_skill_pack(package).valid {
+            return Err(StoreError::Validation(
+                "signed Pod Package is invalid or belongs to another Pod".to_string(),
+            )
+            .into());
+        }
+        if verified_version.is_some_and(|version| package.version < version) {
+            return Err(StoreError::Validation(
+                "signed Pod Package version cannot move backwards".to_string(),
+            )
+            .into());
+        }
+        let value = normalized_package_value(package, projected_pod_id)?;
+        if immutable_versions
+            .get(&package.version)
+            .is_some_and(|existing| existing != &value)
+        {
+            return Err(StoreError::Validation(
+                "signed Pod Package version cannot be reused with different contents".to_string(),
+            )
+            .into());
+        }
+        immutable_versions.insert(package.version, value);
+        verified_version = Some(package.version);
+    }
+    PackageVersion::new(snapshot.manifest.skill_pack_version)
+        .map_err(|error| StoreError::Validation(error.to_string()))?;
+    if verified_version != Some(snapshot.manifest.skill_pack_version) {
+        return Err(StoreError::Validation(
+            "manifest Pod Package version lacks a matching signed event".to_string(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn normalized_package_value(
+    package: &PodPackage,
+    projected_pod_id: PodId,
+) -> Result<serde_json::Value, AgentToolsError> {
+    let mut package = package.clone();
+    package.pod_id = projected_pod_id;
+    package.owner_id = None;
+    package.proposer_harness_id = None;
+    serde_json::to_value(package).map_err(|error| {
+        StoreError::Validation(format!("signed Pod Package cannot be compared: {error}")).into()
+    })
+}
+
+fn validate_imported_event_payload(event: &EventLog) -> Result<(), AgentToolsError> {
     match event.event_type.as_str() {
         "pod_created" => {
-            let Some(pod) = event
-                .payload_json
-                .get("pod")
-                .and_then(|value| serde_json::from_value::<Pod>(value.clone()).ok())
-            else {
-                return;
-            };
-            project_imported_pod(store, ctx, event.author_node_id, pod);
+            imported_event_payload::<Pod>(event, "pod")?;
+            imported_event_payload::<PodPackage>(event, "package")?;
         }
-        "link_submitted" => {
-            let Some(submission) = event
-                .payload_json
-                .get("submission")
-                .and_then(|value| serde_json::from_value::<Submission>(value.clone()).ok())
-            else {
-                return;
-            };
-            project_imported_submission(store, ctx, event, submission);
+        "pod_published" => {
+            imported_event_payload::<Pod>(event, "pod")?;
+            imported_event_payload::<PodPackage>(event, "package")?;
+        }
+        "pod_skill_pack_updated" | "pod_package_imported" | "pod_package_forked" => {
+            imported_event_payload::<PodPackage>(event, "package")?;
         }
         "content_item_placed" => {
-            let Some(content_item) = event
-                .payload_json
-                .get("content_item")
-                .and_then(|value| serde_json::from_value::<ContentItem>(value.clone()).ok())
-            else {
-                return;
-            };
-            let content_item_id =
-                project_imported_submission(store, ctx, event, content_item.into_legacy_record());
-            let Some(mut projection) =
-                event
-                    .payload_json
-                    .get("accepted_placement")
-                    .and_then(|value| {
-                        serde_json::from_value::<AcceptedPlacementProjection>(value.clone()).ok()
-                    })
-            else {
-                return;
-            };
-            let Some(local_pod_id) = store
+            imported_event_payload::<ContentItem>(event, "content_item")?;
+            imported_event_payload::<AcceptedPlacementProjection>(event, "accepted_placement")?;
+        }
+        "link_removed" => {
+            imported_event_payload::<SubmissionId>(event, "submission_id")?;
+        }
+        _ => {
+            return Err(
+                StoreError::Validation("event is not synchronization-safe".to_string()).into(),
+            )
+        }
+    }
+    Ok(())
+}
+
+fn project_snapshot_events(
+    store: &mut InMemoryStore,
+    ctx: &AuthContext,
+    events: &[EventLog],
+) -> Result<usize, AgentToolsError> {
+    let mut imported = 0;
+    for event in events {
+        if store.event_log.iter().any(|existing| {
+            existing.event_id == event.event_id || existing.content_hash == event.content_hash
+        }) {
+            continue;
+        }
+        let mut imported_event = event.clone();
+        imported_event.tenant_id = ctx.tenant_id;
+        imported_event.imported_from_peer_id = None;
+        imported_event.verified = true;
+        if is_subscription_projection_event(&imported_event.event_type) {
+            project_imported_public_event(store, ctx, &imported_event)?;
+        }
+        store.event_log.push(imported_event);
+        imported += 1;
+    }
+    Ok(imported)
+}
+
+fn is_subscription_projection_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "pod_created"
+            | "pod_published"
+            | "pod_skill_pack_updated"
+            | "pod_package_imported"
+            | "pod_package_forked"
+            | "content_item_placed"
+    )
+}
+
+fn project_imported_public_event(
+    store: &mut InMemoryStore,
+    ctx: &AuthContext,
+    event: &EventLog,
+) -> Result<(), AgentToolsError> {
+    match event.event_type.as_str() {
+        "pod_created" => {
+            let pod = imported_event_payload::<Pod>(event, "pod")?;
+            let local_pod_id = project_imported_pod(store, ctx, event.author_node_id, pod)?;
+            let mut package = imported_event_payload::<PodPackage>(event, "package")?;
+            project_imported_package(store, local_pod_id, &mut package)?;
+        }
+        "pod_published" => {
+            let pod = imported_event_payload::<Pod>(event, "pod")?;
+            let local_pod_id = project_imported_pod(store, ctx, event.author_node_id, pod)?;
+            let mut package = imported_event_payload::<PodPackage>(event, "package")?;
+            project_imported_package(store, local_pod_id, &mut package)?;
+        }
+        "pod_skill_pack_updated" | "pod_package_imported" | "pod_package_forked" => {
+            let mut package = imported_event_payload::<PodPackage>(event, "package")?;
+            let local_pod_id = store
                 .pods
                 .values()
-                .find(|pod| pod.slug == event.pod_slug && pod.tenant_id == ctx.tenant_id)
+                .find(|pod| {
+                    pod.slug == event.pod_slug
+                        && pod.tenant_id == ctx.tenant_id
+                        && pod.origin_node_id == Some(event.author_node_id)
+                })
                 .map(|pod| pod.id)
-            else {
-                return;
-            };
+                .ok_or_else(|| StoreError::NotFound("synchronized public Pod".to_string()))?;
+            project_imported_package(store, local_pod_id, &mut package)?;
+        }
+        "link_submitted" => {
+            let submission = imported_event_payload::<Submission>(event, "submission")?;
+            project_imported_submission(store, ctx, event, submission)?;
+        }
+        "content_item_placed" => {
+            let content_item = imported_event_payload::<ContentItem>(event, "content_item")?;
+            let content_item_id =
+                project_imported_submission(store, ctx, event, content_item.into_legacy_record())?;
+            let mut projection =
+                imported_event_payload::<AcceptedPlacementProjection>(event, "accepted_placement")?;
+            let local_pod_id = store
+                .pods
+                .values()
+                .find(|pod| {
+                    pod.slug == event.pod_slug
+                        && pod.tenant_id == ctx.tenant_id
+                        && pod.origin_node_id == Some(event.author_node_id)
+                })
+                .map(|pod| pod.id)
+                .ok_or_else(|| StoreError::NotFound("synchronized public Pod".to_string()))?;
             projection.content_item_id = content_item_id;
             projection.pod_id = local_pod_id;
             projection.origin_node_id = event.author_node_id;
@@ -4765,13 +5334,8 @@ fn project_imported_public_event(store: &mut InMemoryStore, ctx: &AuthContext, e
                 .insert((content_item_id, local_pod_id), projection);
         }
         "link_removed" => {
-            let Some(origin_content_item_id) = event
-                .payload_json
-                .get("submission_id")
-                .and_then(|value| serde_json::from_value::<SubmissionId>(value.clone()).ok())
-            else {
-                return;
-            };
+            let origin_content_item_id =
+                imported_event_payload::<SubmissionId>(event, "submission_id")?;
             let origin_content_item_id = ContentItemId::from(origin_content_item_id);
             let key = FederatedContentItemKey::new(
                 ctx.tenant_id,
@@ -4780,13 +5344,17 @@ fn project_imported_public_event(store: &mut InMemoryStore, ctx: &AuthContext, e
             );
             let Some(local_content_item_id) = store.federated_content_item_ids.get(&key).copied()
             else {
-                return;
+                return Ok(());
             };
             let local_submission_id = Uuid::from(local_content_item_id);
             if let Some(pod_id) = store
                 .pods
                 .values()
-                .find(|pod| pod.slug == event.pod_slug && pod.tenant_id == ctx.tenant_id)
+                .find(|pod| {
+                    pod.slug == event.pod_slug
+                        && pod.tenant_id == ctx.tenant_id
+                        && pod.origin_node_id == Some(event.author_node_id)
+                })
                 .map(|pod| pod.id)
             {
                 store.submission_pods.retain(|link| {
@@ -4799,6 +5367,72 @@ fn project_imported_public_event(store: &mut InMemoryStore, ctx: &AuthContext, e
         }
         _ => {}
     }
+    Ok(())
+}
+
+fn imported_event_payload<T: serde::de::DeserializeOwned>(
+    event: &EventLog,
+    field: &str,
+) -> Result<T, AgentToolsError> {
+    let value = event.payload_json.get(field).cloned().ok_or_else(|| {
+        StoreError::Validation(format!(
+            "signed {} event is missing {field}",
+            event.event_type
+        ))
+    })?;
+    serde_json::from_value(value).map_err(|error| {
+        StoreError::Validation(format!(
+            "signed {} event has invalid {field}: {error}",
+            event.event_type
+        ))
+        .into()
+    })
+}
+
+fn project_imported_package(
+    store: &mut InMemoryStore,
+    local_pod_id: PodId,
+    package: &mut PodPackage,
+) -> Result<(), AgentToolsError> {
+    package.pod_id = local_pod_id;
+    package.owner_id = None;
+    package.proposer_harness_id = None;
+    let version = PackageVersion::new(package.version)
+        .map_err(|error| StoreError::Validation(error.to_string()))?;
+    if !validate_skill_pack(package).valid {
+        return Err(StoreError::Validation("signed Pod Package is invalid".to_string()).into());
+    }
+    let package_value = normalized_package_value(package, local_pod_id)?;
+    if let Some(current) = store.pod_skill_packs.get(&local_pod_id) {
+        if package.version < current.version {
+            return Err(StoreError::Validation(
+                "signed Pod Package version cannot move backwards".to_string(),
+            )
+            .into());
+        }
+        if package.version == current.version
+            && normalized_package_value(current, local_pod_id)? != package_value
+        {
+            return Err(StoreError::Validation(
+                "signed Pod Package version cannot be reused with different contents".to_string(),
+            )
+            .into());
+        }
+    }
+    if let Some(existing) = store.pod_package_versions.get(&(local_pod_id, version)) {
+        if normalized_package_value(existing, local_pod_id)? != package_value {
+            return Err(StoreError::Validation(
+                "signed Pod Package history is immutable".to_string(),
+            )
+            .into());
+        }
+    }
+    store
+        .pod_package_versions
+        .entry((local_pod_id, version))
+        .or_insert_with(|| package.clone());
+    store.pod_skill_packs.insert(local_pod_id, package.clone());
+    Ok(())
 }
 
 fn project_imported_pod(
@@ -4806,7 +5440,7 @@ fn project_imported_pod(
     ctx: &AuthContext,
     origin_node_id: NodeIdentityId,
     mut pod: Pod,
-) -> PodId {
+) -> Result<PodId, AgentToolsError> {
     pod.tenant_id = ctx.tenant_id;
     pod.visibility = Visibility::Public;
     pod.created_by = None;
@@ -4815,17 +5449,29 @@ fn project_imported_pod(
     if let Some(existing) = store
         .pods
         .values()
-        .find(|existing| existing.slug == pod.slug && existing.tenant_id == ctx.tenant_id)
+        .find(|existing| {
+            existing.slug == pod.slug
+                && existing.tenant_id == ctx.tenant_id
+                && existing.origin_node_id == Some(origin_node_id)
+        })
         .cloned()
     {
         ensure_projected_pod_support(store, &existing);
-        return existing.id;
+        return Ok(existing.id);
     }
 
-    let pod_id = pod.id;
+    if store
+        .pods
+        .values()
+        .any(|existing| existing.slug == pod.slug && existing.tenant_id == ctx.tenant_id)
+    {
+        return Err(StoreError::Duplicate(format!("Pod slug {}", pod.slug)).into());
+    }
+    let pod_id = Uuid::now_v7();
+    pod.id = pod_id;
     store.pods.insert(pod_id, pod.clone());
     ensure_projected_pod_support(store, &pod);
-    pod_id
+    Ok(pod_id)
 }
 
 fn ensure_projected_pod_support(store: &mut InMemoryStore, pod: &Pod) {
@@ -4836,10 +5482,6 @@ fn ensure_projected_pod_support(store: &mut InMemoryStore, pod: &Pod) {
         auto_promote_crawler_candidates: false,
         federate_sources: true,
     });
-    store
-        .pod_skill_packs
-        .entry(pod.id)
-        .or_insert_with(|| default_skill_pack(pod));
 }
 
 fn project_imported_submission(
@@ -4847,13 +5489,18 @@ fn project_imported_submission(
     ctx: &AuthContext,
     event: &EventLog,
     mut submission: Submission,
-) -> ContentItemId {
+) -> Result<ContentItemId, AgentToolsError> {
     let origin_content_item_id = ContentItemId::from(submission.id);
     let pod_id = store
         .pods
         .values()
-        .find(|pod| pod.slug == event.pod_slug && pod.tenant_id == ctx.tenant_id)
+        .find(|pod| {
+            pod.slug == event.pod_slug
+                && pod.tenant_id == ctx.tenant_id
+                && pod.origin_node_id == Some(event.author_node_id)
+        })
         .map(|pod| pod.id)
+        .map(Ok)
         .unwrap_or_else(|| {
             let pod = Pod {
                 id: Uuid::now_v7(),
@@ -4867,7 +5514,7 @@ fn project_imported_submission(
                 origin_node_id: Some(event.author_node_id),
             };
             project_imported_pod(store, ctx, event.author_node_id, pod)
-        });
+        })?;
 
     submission.tenant_id = ctx.tenant_id;
     submission.submitted_by = None;
@@ -4877,12 +5524,12 @@ fn project_imported_submission(
         .values()
         .find(|existing| {
             existing.tenant_id == ctx.tenant_id
-                && (existing.id == submission.id
-                    || existing.canonical_url == submission.canonical_url)
+                && existing.canonical_url == submission.canonical_url
         })
         .map(|existing| existing.id)
         .unwrap_or_else(|| {
-            let id = submission.id;
+            let id = Uuid::now_v7();
+            submission.id = id;
             store.submissions.insert(id, submission);
             id
         });
@@ -4903,7 +5550,7 @@ fn project_imported_submission(
         FederatedContentItemKey::new(ctx.tenant_id, event.author_node_id, origin_content_item_id),
         local_content_item_id,
     );
-    local_content_item_id
+    Ok(local_content_item_id)
 }
 
 fn validate_protocol_version(value: &str) -> Result<(), AgentToolsError> {
@@ -6673,11 +7320,16 @@ fn apply_sensitive_change(
                 rules.federate_sources = true;
             }
             let node = store.node_for_tenant(ctx.tenant_id)?;
+            let package = store
+                .pod_skill_packs
+                .get(pod_id)
+                .cloned()
+                .ok_or_else(|| StoreError::NotFound("Pod Package".to_string()))?;
             let event = sign_public_event(
                 &node,
                 "pod_published",
                 &pod.slug,
-                json!({"pod": pod}),
+                json!({"pod": pod, "package": package}),
                 store.latest_event_hash(&pod.slug),
             )?;
             store.event_log.push(event);
@@ -7040,9 +7692,11 @@ mod federation_projection_tests {
         let tenant_b = Uuid::now_v7();
         let ctx_a = context(tenant_a);
         let ctx_b = context(tenant_b);
-        let pod_a = public_pod(tenant_a, "shared-pod");
-        let pod_b = public_pod(tenant_b, "shared-pod");
         let origin_node_id = Uuid::now_v7();
+        let mut pod_a = public_pod(tenant_a, "shared-pod");
+        pod_a.origin_node_id = Some(origin_node_id);
+        let mut pod_b = public_pod(tenant_b, "shared-pod");
+        pod_b.origin_node_id = Some(origin_node_id);
         let origin_submission_id = Uuid::now_v7();
         let origin_submission =
             submission(origin_submission_id, tenant_a, "https://example.com/item");
@@ -7055,13 +7709,14 @@ mod federation_projection_tests {
         store.submissions.insert(local_b.id, local_b.clone());
 
         let placed = placement_event(origin_node_id, &pod_a, &origin_submission);
-        project_imported_public_event(&mut store, &ctx_a, &placed);
-        project_imported_public_event(&mut store, &ctx_b, &placed);
+        project_imported_public_event(&mut store, &ctx_a, &placed).unwrap();
+        project_imported_public_event(&mut store, &ctx_b, &placed).unwrap();
         project_imported_public_event(
             &mut store,
             &ctx_a,
             &removal_event(origin_node_id, &pod_a.slug, origin_submission_id),
-        );
+        )
+        .unwrap();
 
         assert!(!store
             .submission_pods
@@ -7094,11 +7749,129 @@ mod federation_projection_tests {
             &mut store,
             &ctx,
             &removal_event(origin_node_id, &pod.slug, coincident_id),
-        );
+        )
+        .unwrap();
 
         assert!(store
             .submission_pods
             .iter()
             .any(|link| link.pod_id == pod.id && link.submission_id == local.id));
+    }
+
+    #[test]
+    fn federated_content_id_collision_cannot_alias_a_same_tenant_item() {
+        let tenant_id = Uuid::now_v7();
+        let ctx = context(tenant_id);
+        let origin_node_id = Uuid::now_v7();
+        let mut pod = public_pod(tenant_id, "remote-collision-pod");
+        pod.origin_node_id = Some(origin_node_id);
+        let origin_id = Uuid::now_v7();
+        let local = submission(origin_id, tenant_id, "https://local.example/item");
+        let remote = submission(origin_id, tenant_id, "https://remote.example/item");
+        let mut store = InMemoryStore::default();
+        store.pods.insert(pod.id, pod.clone());
+        store.submissions.insert(local.id, local.clone());
+
+        project_imported_public_event(
+            &mut store,
+            &ctx,
+            &placement_event(origin_node_id, &pod, &remote),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.submissions.get(&local.id).unwrap().canonical_url,
+            local.canonical_url
+        );
+        let mapped = store
+            .federated_content_item_ids
+            .get(&FederatedContentItemKey::new(
+                Some(tenant_id),
+                origin_node_id,
+                ContentItemId::from(origin_id),
+            ))
+            .copied()
+            .unwrap();
+        assert_ne!(Uuid::from(mapped), origin_id);
+        assert_eq!(
+            store
+                .submissions
+                .get(&Uuid::from(mapped))
+                .unwrap()
+                .canonical_url,
+            remote.canonical_url
+        );
+    }
+
+    #[test]
+    fn federated_content_id_collision_cannot_overwrite_another_tenant() {
+        let tenant_a = Uuid::now_v7();
+        let tenant_b = Uuid::now_v7();
+        let ctx_b = context(tenant_b);
+        let origin_node_id = Uuid::now_v7();
+        let mut pod_b = public_pod(tenant_b, "tenant-b-remote-pod");
+        pod_b.origin_node_id = Some(origin_node_id);
+        let origin_id = Uuid::now_v7();
+        let tenant_a_item = submission(origin_id, tenant_a, "https://tenant-a.example/item");
+        let remote = submission(origin_id, tenant_b, "https://remote.example/tenant-b-item");
+        let mut store = InMemoryStore::default();
+        store.pods.insert(pod_b.id, pod_b.clone());
+        store
+            .submissions
+            .insert(tenant_a_item.id, tenant_a_item.clone());
+
+        project_imported_public_event(
+            &mut store,
+            &ctx_b,
+            &placement_event(origin_node_id, &pod_b, &remote),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.submissions.get(&tenant_a_item.id).unwrap().tenant_id,
+            Some(tenant_a)
+        );
+        let tenant_b_item = store
+            .submissions
+            .values()
+            .find(|item| {
+                item.tenant_id == Some(tenant_b) && item.canonical_url == remote.canonical_url
+            })
+            .unwrap();
+        assert_ne!(tenant_b_item.id, origin_id);
+    }
+
+    #[test]
+    fn federated_content_deduplicates_canonical_urls_only_within_the_tenant() {
+        let tenant_id = Uuid::now_v7();
+        let ctx = context(tenant_id);
+        let origin_node_id = Uuid::now_v7();
+        let mut pod = public_pod(tenant_id, "canonical-dedupe-pod");
+        pod.origin_node_id = Some(origin_node_id);
+        let local = submission(Uuid::now_v7(), tenant_id, "https://canonical.example/item");
+        let remote = submission(Uuid::now_v7(), tenant_id, "https://canonical.example/item");
+        let mut store = InMemoryStore::default();
+        store.pods.insert(pod.id, pod.clone());
+        store.submissions.insert(local.id, local.clone());
+
+        project_imported_public_event(
+            &mut store,
+            &ctx,
+            &placement_event(origin_node_id, &pod, &remote),
+        )
+        .unwrap();
+
+        assert_eq!(store.submissions.len(), 1);
+        assert_eq!(
+            store
+                .federated_content_item_ids
+                .get(&FederatedContentItemKey::new(
+                    Some(tenant_id),
+                    origin_node_id,
+                    ContentItemId::from(remote.id),
+                ))
+                .copied(),
+            Some(ContentItemId::from(local.id))
+        );
     }
 }

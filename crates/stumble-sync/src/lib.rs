@@ -20,6 +20,157 @@ pub struct HubRefreshReport {
     pub errors: Vec<String>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum DirectSubscriptionError {
+    #[error("invalid public Pod URL {url}")]
+    InvalidUrl {
+        url: String,
+        #[source]
+        source: url::ParseError,
+    },
+    #[error("invalid public Pod address")]
+    InvalidAddress(#[source] AgentToolsError),
+    #[error("failed to fetch public Pod artifacts from {url}")]
+    Request {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("origin node no longer recognizes the stored synchronization cursor")]
+    UnknownCursor,
+    #[error(transparent)]
+    Core(#[from] AgentToolsError),
+}
+
+/// Fetches a directly addressed public Pod and creates a local Subscription.
+///
+/// # Errors
+///
+/// Returns an error when the URL is invalid, the Origin Node is unavailable or
+/// returns invalid JSON, signed artifacts fail validation, or persistence fails.
+pub async fn subscribe_pod_from_url(
+    tools: &AgentTools,
+    ctx: &AuthContext,
+    public_pod_url: &str,
+) -> Result<SynchronizationResult, DirectSubscriptionError> {
+    let public_pod_url = canonical_public_pod_url(public_pod_url)
+        .map_err(DirectSubscriptionError::InvalidAddress)?;
+    let client = origin_client(&public_pod_url)?;
+    let snapshot = fetch_pod_snapshot(&client, &public_pod_url, None).await?;
+    Ok(tools.subscribe_public_pod(
+        ctx,
+        SubscribePublicPodRequest::new(public_pod_url, snapshot),
+        chrono::Utc::now(),
+    )?)
+}
+
+/// Fetches and applies only events after a Subscription's stored cursor.
+///
+/// # Errors
+///
+/// Returns an error when the Subscription is inaccessible, the Origin Node is
+/// unavailable, its cursor is unknown, artifact validation fails, or persistence fails.
+pub async fn synchronize_subscription_from_origin(
+    tools: &AgentTools,
+    ctx: &AuthContext,
+    subscription_id: SubscriptionId,
+) -> Result<SynchronizationResult, DirectSubscriptionError> {
+    let subscription = tools.subscription(ctx, subscription_id)?;
+    let public_pod_url = canonical_public_pod_url(&subscription.public_pod_url)
+        .map_err(DirectSubscriptionError::InvalidAddress)?;
+    let client = origin_client(&public_pod_url)?;
+    let snapshot = fetch_pod_snapshot(
+        &client,
+        &public_pod_url,
+        subscription.last_event_hash.as_deref(),
+    )
+    .await?;
+    Ok(tools.synchronize_subscription(ctx, subscription_id, snapshot)?)
+}
+
+fn origin_client(public_pod_url: &str) -> Result<reqwest::Client, DirectSubscriptionError> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|source| DirectSubscriptionError::Request {
+            url: public_pod_url.to_string(),
+            source,
+        })
+}
+
+async fn fetch_pod_snapshot(
+    client: &reqwest::Client,
+    public_pod_url: &str,
+    after_event_hash: Option<&str>,
+) -> Result<FederationPodSnapshot, DirectSubscriptionError> {
+    let pod_url = reqwest::Url::parse(public_pod_url).map_err(|source| {
+        DirectSubscriptionError::InvalidUrl {
+            url: public_pod_url.to_string(),
+            source,
+        }
+    })?;
+    let mut origin_url = pod_url.clone();
+    origin_url.set_path("");
+    origin_url.set_query(None);
+    origin_url.set_fragment(None);
+    let node_url = format!(
+        "{}/.well-known/stumble-node",
+        origin_url.as_str().trim_end_matches('/')
+    );
+    let node = client
+        .get(&node_url)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|source| DirectSubscriptionError::Request {
+            url: node_url.clone(),
+            source,
+        })?
+        .json::<WellKnownNode>()
+        .await
+        .map_err(|source| DirectSubscriptionError::Request {
+            url: node_url,
+            source,
+        })?
+        .node;
+    let manifest_url = format!("{}/manifest", public_pod_url.trim_end_matches('/'));
+    let manifest = fetch_json(client, &manifest_url).await?;
+    let events_url = format!("{}/events", public_pod_url.trim_end_matches('/'));
+    let all_events = fetch_json::<Vec<EventLog>>(client, &events_url).await?;
+    let events = match after_event_hash {
+        Some(cursor) => {
+            let index = all_events
+                .iter()
+                .position(|event| event.content_hash == cursor)
+                .ok_or(DirectSubscriptionError::UnknownCursor)?;
+            all_events.into_iter().skip(index + 1).collect()
+        }
+        None => all_events,
+    };
+    Ok(FederationPodSnapshot::new(node, manifest, events))
+}
+
+async fn fetch_json<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<T, DirectSubscriptionError> {
+    client
+        .get(url)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|source| DirectSubscriptionError::Request {
+            url: url.to_string(),
+            source,
+        })?
+        .json::<T>()
+        .await
+        .map_err(|source| DirectSubscriptionError::Request {
+            url: url.to_string(),
+            source,
+        })
+}
+
 pub async fn sync_pod_from_peer(
     tools: &AgentTools,
     ctx: &AuthContext,

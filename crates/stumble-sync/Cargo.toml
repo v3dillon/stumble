@@ -6,9 +6,12 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 stumble-core = { path = "../stumble-core" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
+url.workspace = true
 uuid.workspace = true

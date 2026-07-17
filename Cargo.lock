@@ -1464,6 +1464,7 @@ dependencies = [
  "stumble-api",
  "stumble-core",
  "stumble-mcp",
+ "stumble-sync",
  "tokio",
  "tower",
  "uuid",
@@ -1518,11 +1519,14 @@ name = "stumble-sync"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "reqwest",
  "serde",
  "serde_json",
  "stumble-core",
+ "thiserror 1.0.69",
  "tokio",
+ "url",
  "uuid",
 ]
 

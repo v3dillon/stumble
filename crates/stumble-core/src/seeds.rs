@@ -531,11 +531,28 @@ mod tests {
         );
         let tools = AgentTools::new(store.clone());
         let context = ctx(&store);
+        let submission = Submission {
+            id: Uuid::now_v7(),
+            tenant_id: None,
+            url: "https://x.test".to_string(),
+            canonical_url: "https://x.test/".to_string(),
+            title: "Trusted peer link".to_string(),
+            description: None,
+            domain: "x.test".to_string(),
+            submitted_by: None,
+            discovered_by_crawler: false,
+            submitter_note: None,
+            summary: None,
+            tags: vec![],
+            embedding: None,
+            created_at: Utc::now(),
+            origin_event_id: None,
+        };
         let event = sign_public_event(
             &peer_node,
             "link_submitted",
-            "beautiful-interfaces",
-            json!({"url":"https://x.test"}),
+            "trusted-peer-pod",
+            json!({"submission": submission}),
             None,
         )
         .unwrap();
@@ -764,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn crawler_candidate_promotion_creates_public_event() {
+    fn crawler_candidate_promotion_does_not_federate_an_unaccepted_submission() {
         let mut store = seed_store();
         add_beautiful_interfaces(&mut store);
         let tools = AgentTools::new(store.clone());
@@ -799,7 +816,7 @@ mod tests {
         let events = tools
             .export_pod_events(&context, "beautiful-interfaces")
             .unwrap();
-        assert!(events
+        assert!(!events
             .iter()
             .any(|event| event.event_type == "link_submitted"));
     }
@@ -1055,7 +1072,10 @@ mod tests {
             &remote_node,
             "pod_created",
             &remote_pod.slug,
-            json!({"pod": remote_pod.clone()}),
+            json!({
+                "pod": remote_pod.clone(),
+                "package": default_skill_pack(&remote_pod),
+            }),
             None,
         )
         .unwrap();
