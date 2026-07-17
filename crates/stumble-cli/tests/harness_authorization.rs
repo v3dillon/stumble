@@ -84,6 +84,65 @@ async fn representative_adapters_return_equivalent_authorization_denials() {
     assert!(String::from_utf8_lossy(&body).contains(expected));
 }
 
+#[tokio::test]
+async fn discovery_task_adapters_return_equivalent_authorization_denials() {
+    let data_dir = TestDataDir::new();
+    let tools = AgentTools::open_home_node(data_dir.path(), seed_store).unwrap();
+    let issued = tools
+        .register_agent_harness(
+            &tools.default_auth_context().unwrap(),
+            RegisterAgentHarnessRequest {
+                label: "feed reader".into(),
+                kind: AgentHarnessKind::Interactive,
+                capabilities: vec![HarnessCapability::FeedRead],
+                pod_ids: None,
+            },
+        )
+        .unwrap();
+    let token = issued.token.expose().to_string();
+    drop(tools);
+    let expected = "harness grant lacks discovery_tasks";
+
+    let cli = Command::new(env!("CARGO_BIN_EXE_podctl"))
+        .args([
+            "--data-dir",
+            data_dir.path().to_str().unwrap(),
+            "--token",
+            &token,
+            "list-discovery-tasks",
+        ])
+        .output()
+        .unwrap();
+    assert!(!cli.status.success());
+    assert!(String::from_utf8_lossy(&cli.stderr).contains(expected));
+
+    let tools = AgentTools::open_home_node(data_dir.path(), seed_store).unwrap();
+    let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
+    assert!(mcp
+        .call(McpToolCall {
+            tool: "list_discovery_tasks".into(),
+            arguments: json!({}),
+        })
+        .unwrap_err()
+        .to_string()
+        .contains(expected));
+
+    let response = router(tools)
+        .oneshot(
+            Request::get("/discovery-tasks")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&body).contains(expected));
+}
+
 fn package_contents() -> PodPackageContents {
     PodPackageContents {
         context_md: "# Systems\n\n## Scope\n\nReliable systems.\n".into(),

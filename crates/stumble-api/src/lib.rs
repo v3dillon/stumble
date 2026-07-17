@@ -148,6 +148,23 @@ pub fn router_with_options(
         .route("/api-tokens/:id", delete(revoke_api_token))
         .route("/harnesses", post(register_agent_harness))
         .route("/harnesses/:id", delete(revoke_agent_harness))
+        .route(
+            "/discovery-tasks",
+            get(list_discovery_tasks).post(materialize_discovery_tasks),
+        )
+        .route(
+            "/discovery-tasks/immediate",
+            post(create_immediate_discovery_task),
+        )
+        .route("/discovery-tasks/ready", get(list_ready_discovery_tasks))
+        .route("/discovery-tasks/:id", get(discovery_task_status))
+        .route("/discovery-tasks/:id/claim", post(claim_discovery_task))
+        .route("/discovery-tasks/:id/renew", post(renew_discovery_task))
+        .route(
+            "/discovery-tasks/:id/complete",
+            post(complete_discovery_task),
+        )
+        .route("/discovery-tasks/:id/fail", post(fail_discovery_task))
         .route("/federation/node", get(federation_node))
         .route("/federation/pods", get(federation_pods))
         .route("/federation/pods/:slug/manifest", get(federation_manifest))
@@ -560,6 +577,133 @@ async fn add_source(
         &slug,
         request.source_type,
         request.url,
+    )?))
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscoveryTaskLeaseRequest {
+    lease_seconds: DiscoveryLeaseSeconds,
+}
+
+#[derive(Debug, Deserialize)]
+struct FailDiscoveryTaskRequest {
+    reason: String,
+}
+
+async fn materialize_discovery_tasks(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<DiscoveryTask>>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.materialize_due_discovery_tasks(
+        &ctx,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn list_discovery_tasks(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<DiscoveryTask>>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(
+        state.tools.list_discovery_tasks(&ctx, chrono::Utc::now())?,
+    ))
+}
+
+async fn list_ready_discovery_tasks(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<DiscoveryTask>>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(
+        state
+            .tools
+            .list_ready_discovery_tasks(&ctx, chrono::Utc::now())?,
+    ))
+}
+
+async fn create_immediate_discovery_task(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateImmediateDiscoveryTaskRequest>,
+) -> Result<Json<DiscoveryTask>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.create_immediate_discovery_task(
+        &ctx,
+        request,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn discovery_task_status(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<DiscoveryTaskId>,
+) -> Result<Json<DiscoveryTask>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.discovery_task_status(
+        &ctx,
+        id,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn claim_discovery_task(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<DiscoveryTaskId>,
+    Json(request): Json<DiscoveryTaskLeaseRequest>,
+) -> Result<Json<DiscoveryTask>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.claim_discovery_task(
+        &ctx,
+        id,
+        chrono::Utc::now(),
+        request.lease_seconds,
+    )?))
+}
+
+async fn renew_discovery_task(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<DiscoveryTaskId>,
+    Json(request): Json<DiscoveryTaskLeaseRequest>,
+) -> Result<Json<DiscoveryTask>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.renew_discovery_task_lease(
+        &ctx,
+        id,
+        chrono::Utc::now(),
+        request.lease_seconds,
+    )?))
+}
+
+async fn complete_discovery_task(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<DiscoveryTaskId>,
+) -> Result<Json<DiscoveryTask>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.complete_discovery_task(
+        &ctx,
+        id,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn fail_discovery_task(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<DiscoveryTaskId>,
+    Json(request): Json<FailDiscoveryTaskRequest>,
+) -> Result<Json<DiscoveryTask>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.fail_discovery_task(
+        &ctx,
+        id,
+        chrono::Utc::now(),
+        request.reason,
     )?))
 }
 

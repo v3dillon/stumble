@@ -10,6 +10,81 @@ pub type PodId = Uuid;
 pub type SubmissionId = Uuid;
 pub type PeerId = Uuid;
 pub type NodeIdentityId = Uuid;
+/// Stable local identity of a [`DiscoveryTask`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DiscoveryTaskId(Uuid);
+
+impl From<Uuid> for DiscoveryTaskId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl std::fmt::Display for DiscoveryTaskId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::str::FromStr for DiscoveryTaskId {
+    type Err = uuid::Error;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse().map(Self)
+    }
+}
+
+/// Positive, bounded duration of a Discovery Task lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct DiscoveryLeaseSeconds(std::num::NonZeroU32);
+
+impl DiscoveryLeaseSeconds {
+    /// Maximum supported lease duration: seven days.
+    pub const MAX: u32 = 604_800;
+
+    /// Parses a lease duration of at most seven days.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the value is zero, exceeds seven days, or does not fit `u32`.
+    pub fn new(value: u64) -> Result<Self, DiscoveryLeaseSecondsError> {
+        let value = u32::try_from(value).map_err(|_| DiscoveryLeaseSecondsError(value))?;
+        let value = std::num::NonZeroU32::new(value).ok_or(DiscoveryLeaseSecondsError(0))?;
+        if value.get() > Self::MAX {
+            return Err(DiscoveryLeaseSecondsError(u64::from(value.get())));
+        }
+        Ok(Self(value))
+    }
+
+    pub(crate) fn as_duration(self) -> chrono::Duration {
+        chrono::Duration::seconds(i64::from(self.0.get()))
+    }
+}
+
+impl<'de> Deserialize<'de> for DiscoveryLeaseSeconds {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::new(u64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+impl std::str::FromStr for DiscoveryLeaseSeconds {
+    type Err = DiscoveryLeaseSecondsError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse::<u64>()
+            .map_err(|_| DiscoveryLeaseSecondsError(0))
+            .and_then(Self::new)
+    }
+}
+
+/// Error returned for a zero or overlong Discovery Task lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("lease duration must be between 1 and 604800 seconds, got {0}")]
+pub struct DiscoveryLeaseSecondsError(u64);
 
 /// Positive, immutable version number of a Pod Package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -340,6 +415,117 @@ pub enum HarnessWriteOperation {
     BlockSource,
     BlockTopic,
     UpdatePreferences,
+    CreateDiscoveryTask,
+    ClaimDiscoveryTask,
+    RenewDiscoveryTaskLease,
+    CompleteDiscoveryTask,
+    FailDiscoveryTask,
+}
+
+/// Current lifecycle state with state-specific lease data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "lease", rename_all = "snake_case")]
+pub enum DiscoveryTaskState {
+    /// Available to an authorized harness.
+    Pending,
+    /// Exclusively owned until the embedded lease expires.
+    Leased(DiscoveryTaskLease),
+    /// Successfully completed and immutable.
+    Completed,
+    /// Exhausted the permitted attempts.
+    TerminalFailure,
+}
+
+/// Provenance and instructions that created a Discovery Task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DiscoveryTaskOrigin {
+    /// Due work derived from one versioned Source Rule.
+    Scheduled {
+        /// Zero-based position in the Pod Package Source Rules.
+        source_rule_index: usize,
+    },
+    /// Immediate work requested during a conversation.
+    Immediate {
+        /// Discovery intent that a later claiming harness must follow.
+        instructions: String,
+        /// Retry-safe key unique to the requesting harness.
+        idempotency_key: String,
+        /// Harness that supplied the intent.
+        requested_by: AgentHarnessId,
+    },
+}
+
+/// Exclusive, expiring ownership of a Discovery Task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryTaskLease {
+    /// Harness with exclusive execution authority.
+    pub harness_id: AgentHarnessId,
+    /// Time at which this attempt began.
+    pub claimed_at: DateTime<Utc>,
+    /// Time after which another harness may safely claim the task.
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Inspectable outcome of one claimed task attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryTaskAttemptOutcome {
+    /// Harness completed the task successfully.
+    Completed,
+    /// Harness explicitly failed the attempt with an inspectable reason.
+    Failed {
+        /// Harness-supplied explanation.
+        reason: String,
+    },
+    /// Harness abandoned the task until its lease expired.
+    LeaseExpired,
+}
+
+/// Immutable history entry for a completed or failed lease attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryTaskAttempt {
+    /// Harness responsible for this attempt.
+    pub harness_id: AgentHarnessId,
+    /// Lease claim time.
+    pub started_at: DateTime<Utc>,
+    /// Completion, failure, or expiry time.
+    pub finished_at: DateTime<Utc>,
+    /// Inspectable terminal result of this attempt.
+    pub outcome: DiscoveryTaskAttemptOutcome,
+}
+
+/// Leaseable discovery work derived from a Source Rule or immediate request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryTask {
+    /// Stable task identity.
+    pub id: DiscoveryTaskId,
+    /// Pod whose Package governs this work.
+    pub pod_id: PodId,
+    /// Immutable Package version used by the worker.
+    pub package_version: PackageVersion,
+    /// Scheduled or conversational provenance.
+    pub origin: DiscoveryTaskOrigin,
+    /// Earliest claim time.
+    pub due_at: DateTime<Utc>,
+    /// Current lifecycle state.
+    pub state: DiscoveryTaskState,
+    /// Completed, failed, and expired attempt history.
+    pub attempts: Vec<DiscoveryTaskAttempt>,
+    /// Time at which Stumble created the task.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Request for immediate conversational discovery with retry-safe identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateImmediateDiscoveryTaskRequest {
+    /// Pod to discover for.
+    pub pod_id: PodId,
+    /// Conversation-derived discovery intent.
+    pub instructions: String,
+    /// Retry-safe caller key.
+    pub idempotency_key: String,
 }
 
 /// Local-only attribution record for a successful harness write.

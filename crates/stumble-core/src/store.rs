@@ -52,6 +52,7 @@ pub struct InMemoryStore {
     pub api_tokens: HashMap<Uuid, ApiToken>,
     pub agent_harnesses: HashMap<AgentHarnessId, AgentHarness>,
     pub harness_write_audit: Vec<HarnessWriteAudit>,
+    pub discovery_tasks: HashMap<DiscoveryTaskId, DiscoveryTask>,
     pub node_identities: HashMap<NodeIdentityId, NodeIdentity>,
     pub trusted_peers: HashMap<PeerId, TrustedPeer>,
     pub pods: HashMap<PodId, Pod>,
@@ -87,6 +88,8 @@ struct PersistedStore {
     agent_harnesses: Vec<AgentHarness>,
     #[serde(default)]
     harness_write_audit: Vec<HarnessWriteAudit>,
+    #[serde(default)]
+    discovery_tasks: Vec<DiscoveryTask>,
     node_identities: Vec<NodeIdentity>,
     trusted_peers: Vec<TrustedPeer>,
     pods: Vec<Pod>,
@@ -134,6 +137,7 @@ impl From<&InMemoryStore> for PersistedStore {
             api_tokens: store.api_tokens.values().cloned().collect(),
             agent_harnesses: store.agent_harnesses.values().cloned().collect(),
             harness_write_audit: store.harness_write_audit.clone(),
+            discovery_tasks: store.discovery_tasks.values().cloned().collect(),
             node_identities: store.node_identities.values().cloned().collect(),
             trusted_peers: store.trusted_peers.values().cloned().collect(),
             pods: store.pods.values().cloned().collect(),
@@ -222,6 +226,11 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .map(|harness| (harness.id, harness))
                 .collect(),
             harness_write_audit: snapshot.harness_write_audit,
+            discovery_tasks: snapshot
+                .discovery_tasks
+                .into_iter()
+                .map(|task| (task.id, task))
+                .collect(),
             node_identities: snapshot
                 .node_identities
                 .into_iter()
@@ -352,6 +361,7 @@ const STORE_COLLECTIONS: &[&str] = &[
     "api_tokens",
     "agent_harnesses",
     "harness_write_audit",
+    "discovery_tasks",
     "node_identities",
     "trusted_peers",
     "pods",

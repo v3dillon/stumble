@@ -261,14 +261,64 @@ struct ScheduleSuggestion {
     cadence: SourceRuleCadence,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum SourceRuleCadence {
+pub(crate) enum SourceRuleCadence {
     OnDemand,
     Hourly,
     Daily,
     Weekly,
     Monthly,
+}
+
+impl SourceRuleCadence {
+    pub(crate) fn period_start(
+        self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> chrono::DateTime<chrono::Utc> {
+        use chrono::{Datelike, Timelike};
+        match self {
+            Self::OnDemand => now,
+            Self::Hourly => now
+                .with_minute(0)
+                .and_then(|value| value.with_second(0))
+                .and_then(|value| value.with_nanosecond(0))
+                .expect("BUG: zero is a valid time component"),
+            Self::Daily => now
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .expect("BUG: midnight is valid")
+                .and_utc(),
+            Self::Weekly => {
+                let monday = now.date_naive()
+                    - chrono::Duration::days(i64::from(now.weekday().num_days_from_monday()));
+                monday
+                    .and_hms_opt(0, 0, 0)
+                    .expect("BUG: midnight is valid")
+                    .and_utc()
+            }
+            Self::Monthly => chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .expect("BUG: first day of a valid month is valid")
+                .and_utc(),
+        }
+    }
+}
+
+/// Returns the validated cadence of each Source Rule in package order.
+pub(crate) fn source_rule_cadences(
+    sources_yaml: &str,
+) -> Result<Vec<SourceRuleCadence>, PodPackageValidationError> {
+    let document = serde_yaml::from_str::<SourceRulesDocument>(sources_yaml).map_err(|error| {
+        PodPackageValidationError::InvalidSourceRules {
+            reason: error.to_string(),
+        }
+    })?;
+    Ok(document
+        .source_rules
+        .into_iter()
+        .map(|rule| rule.schedule.cadence)
+        .collect())
 }
 
 /// Validates all required portable package components and their trust boundary.

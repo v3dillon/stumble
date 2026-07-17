@@ -146,6 +146,37 @@ enum Command {
     RevokeHarness {
         id: AgentHarnessId,
     },
+    MaterializeDiscoveryTasks,
+    ListDiscoveryTasks,
+    ListReadyDiscoveryTasks,
+    CreateDiscoveryTask {
+        pod_id: PodId,
+        #[arg(long)]
+        instructions: String,
+        #[arg(long)]
+        idempotency_key: String,
+    },
+    DiscoveryTaskStatus {
+        id: DiscoveryTaskId,
+    },
+    ClaimDiscoveryTask {
+        id: DiscoveryTaskId,
+        #[arg(long, default_value = "300")]
+        lease_seconds: DiscoveryLeaseSeconds,
+    },
+    RenewDiscoveryTask {
+        id: DiscoveryTaskId,
+        #[arg(long, default_value = "300")]
+        lease_seconds: DiscoveryLeaseSeconds,
+    },
+    CompleteDiscoveryTask {
+        id: DiscoveryTaskId,
+    },
+    FailDiscoveryTask {
+        id: DiscoveryTaskId,
+        #[arg(long)]
+        reason: String,
+    },
     NodeInfo,
     AddPeer {
         #[arg(long)]
@@ -451,6 +482,43 @@ async fn main() -> anyhow::Result<()> {
         Command::RevokeHarness { id } => {
             tools.revoke_agent_harness(&ctx, id)?;
             println!("revoked {id}");
+        }
+        Command::MaterializeDiscoveryTasks => {
+            print_json(&tools.materialize_due_discovery_tasks(&ctx, chrono::Utc::now())?)?
+        }
+        Command::ListDiscoveryTasks => {
+            print_json(&tools.list_discovery_tasks(&ctx, chrono::Utc::now())?)?
+        }
+        Command::ListReadyDiscoveryTasks => {
+            print_json(&tools.list_ready_discovery_tasks(&ctx, chrono::Utc::now())?)?
+        }
+        Command::CreateDiscoveryTask {
+            pod_id,
+            instructions,
+            idempotency_key,
+        } => print_json(&tools.create_immediate_discovery_task(
+            &ctx,
+            CreateImmediateDiscoveryTaskRequest {
+                pod_id,
+                instructions,
+                idempotency_key,
+            },
+            chrono::Utc::now(),
+        )?)?,
+        Command::DiscoveryTaskStatus { id } => {
+            print_json(&tools.discovery_task_status(&ctx, id, chrono::Utc::now())?)?
+        }
+        Command::ClaimDiscoveryTask { id, lease_seconds } => {
+            print_json(&tools.claim_discovery_task(&ctx, id, chrono::Utc::now(), lease_seconds)?)?
+        }
+        Command::RenewDiscoveryTask { id, lease_seconds } => print_json(
+            &tools.renew_discovery_task_lease(&ctx, id, chrono::Utc::now(), lease_seconds)?,
+        )?,
+        Command::CompleteDiscoveryTask { id } => {
+            print_json(&tools.complete_discovery_task(&ctx, id, chrono::Utc::now())?)?
+        }
+        Command::FailDiscoveryTask { id, reason } => {
+            print_json(&tools.fail_discovery_task(&ctx, id, chrono::Utc::now(), reason)?)?
         }
         Command::NodeInfo => print_json(&tools.node_info(&ctx)?)?,
         Command::AddPeer {

@@ -43,6 +43,15 @@ impl McpToolRouter {
             "join_pod",
             "submit_link_to_pod",
             "add_source_to_pod",
+            "materialize_discovery_tasks",
+            "list_discovery_tasks",
+            "list_ready_discovery_tasks",
+            "create_immediate_discovery_task",
+            "discovery_task_status",
+            "claim_discovery_task",
+            "renew_discovery_task",
+            "complete_discovery_task",
+            "fail_discovery_task",
             "crawl_pod_sources",
             "discover_in_pod",
             "stumble_pod",
@@ -127,6 +136,67 @@ impl McpToolRouter {
                     &pod_slug,
                     CrawlerSourceType::Rss,
                     url
+                )?))
+            }
+            "materialize_discovery_tasks" => Ok(json!(self
+                .tools
+                .materialize_due_discovery_tasks(&self.ctx, chrono::Utc::now(),)?)),
+            "list_discovery_tasks" => Ok(json!(self
+                .tools
+                .list_discovery_tasks(&self.ctx, chrono::Utc::now())?)),
+            "list_ready_discovery_tasks" => Ok(json!(self
+                .tools
+                .list_ready_discovery_tasks(&self.ctx, chrono::Utc::now())?)),
+            "create_immediate_discovery_task" => {
+                let request = serde_json::from_value(call.arguments)?;
+                Ok(json!(self.tools.create_immediate_discovery_task(
+                    &self.ctx,
+                    request,
+                    chrono::Utc::now(),
+                )?))
+            }
+            "discovery_task_status" => {
+                let task_id = arg_string(&call.arguments, "task_id")?.parse()?;
+                Ok(json!(self.tools.discovery_task_status(
+                    &self.ctx,
+                    task_id,
+                    chrono::Utc::now(),
+                )?))
+            }
+            "claim_discovery_task" | "renew_discovery_task" => {
+                let task_id = arg_string(&call.arguments, "task_id")?.parse()?;
+                let lease_seconds = call
+                    .arguments
+                    .get("lease_seconds")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(300);
+                let lease_seconds = DiscoveryLeaseSeconds::new(lease_seconds)?;
+                let now = chrono::Utc::now();
+                let task = if call.tool == "claim_discovery_task" {
+                    self.tools
+                        .claim_discovery_task(&self.ctx, task_id, now, lease_seconds)?
+                } else {
+                    self.tools
+                        .renew_discovery_task_lease(&self.ctx, task_id, now, lease_seconds)?
+                };
+                Ok(json!(task))
+            }
+            "complete_discovery_task" => {
+                let task_id = arg_string(&call.arguments, "task_id")?.parse()?;
+                Ok(json!(self.tools.complete_discovery_task(
+                    &self.ctx,
+                    task_id,
+                    chrono::Utc::now()
+                )?))
+            }
+            "fail_discovery_task" => {
+                let task_id = arg_string(&call.arguments, "task_id")?.parse()?;
+                let reason = arg_string(&call.arguments, "reason")?;
+                Ok(json!(self.tools.fail_discovery_task(
+                    &self.ctx,
+                    task_id,
+                    chrono::Utc::now(),
+                    reason
                 )?))
             }
             "discover_in_pod" | "stumble_pod" => {

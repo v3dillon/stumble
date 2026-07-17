@@ -233,3 +233,9 @@ The MVP includes a clean MCP adapter boundary and tool dispatcher in `stumble-mc
 ```
 
 MCP limitation: this MVP does not bind to a full third-party MCP transport crate yet. The `McpToolRouter` isolates the adapter and can be mounted into a concrete stdio/HTTP MCP server without duplicating business logic.
+
+## Discovery Tasks and scheduling
+
+Agent Harnesses with the `discovery_tasks` capability can materialize due Source Rules, list and claim tasks, renew leases, and complete or fail attempts through HTTP, MCP, or `podctl`. Each scheduled task is idempotent for its Pod, Source Rule, Pod Package version, and due period; manual work uses `create-discovery-task` and enters the same lease contract.
+
+For a local fallback, build `podctl`, export a scoped `STUMBLE_DISCOVERY_TOKEN`, then run `scripts/install-discovery-launchd.sh`. The installed adapter periodically runs `scripts/wake-discovery.sh` against the running Home Node HTTP API, so HTTP and MCP consumers see the same newly materialized work. It atomically writes a mode-`0600` structured `discovery_ready` event to `$STUMBLE_DATA_DIR/discovery-ready.json`. If `STUMBLE_DISCOVERY_HARNESS_COMMAND` names an executable, the adapter also invokes that executable with the event on standard input; otherwise a harness can watch the event inbox. The adapter only wakes a harness and never opens or controls a browser. The same wake script can be invoked from cron on non-macOS systems; unset `STUMBLE_API_URL` to use fresh local `podctl` processes instead.

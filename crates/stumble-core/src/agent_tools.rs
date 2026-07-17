@@ -5,8 +5,8 @@ use crate::signing::{
 };
 use crate::skill_pack::{
     default_skill_pack, export_skill_pack, fork_skill_pack, import_skill_pack, patch_skill_pack,
-    pod_package_contents_from_files, validate_pod_package_contents,
-    validate_portable_package_files, validate_skill_pack,
+    pod_package_contents_from_files, source_rule_cadences, validate_pod_package_contents,
+    validate_portable_package_files, validate_skill_pack, SourceRuleCadence,
 };
 use crate::store::{
     load_or_initialize_sqlite_store, load_sqlite_store, persist_sqlite_store_changes,
@@ -35,7 +35,15 @@ pub enum AgentToolsError {
     BadUrl(String),
     #[error("harness authorization denied: {reason}")]
     Forbidden { reason: String },
+    #[error("Discovery Task lease is held by another harness")]
+    TaskLeaseConflict,
+    #[error("Discovery Task is terminal")]
+    TaskTerminal,
+    #[error("Discovery Task has no active lease owned by this harness")]
+    TaskLeaseRequired,
 }
+
+const MAX_DISCOVERY_TASK_ATTEMPTS: usize = 3;
 
 #[derive(Clone)]
 pub struct AgentTools {
@@ -690,6 +698,411 @@ impl AgentTools {
             .read()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         authorize_harness(&store, ctx, capability, None)
+    }
+
+    /// Creates one idempotent task for every scheduled Source Rule due in the current period.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when authorization, package parsing, locking, or persistence fails.
+    pub fn materialize_due_discovery_tasks(
+        &self,
+        ctx: &AuthContext,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Vec<DiscoveryTask>, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::DiscoveryTasks, None)?;
+        let scoped = harness_for_context(&store, ctx)?
+            .and_then(|harness| harness.grant.pod_ids.as_ref())
+            .cloned();
+        let packages = store
+            .pod_skill_packs
+            .values()
+            .filter(|package| {
+                scoped
+                    .as_ref()
+                    .is_none_or(|pods| pods.contains(&package.pod_id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut created = Vec::new();
+        for package in packages {
+            let version = PackageVersion::new(package.version)
+                .map_err(|error| StoreError::Validation(error.to_string()))?;
+            for (source_rule_index, cadence) in source_rule_cadences(&package.sources_yaml)
+                .map_err(|error| StoreError::Validation(error.to_string()))?
+                .into_iter()
+                .enumerate()
+            {
+                if cadence == SourceRuleCadence::OnDemand {
+                    continue;
+                }
+                let due_at = cadence.period_start(now);
+                let exists = store.discovery_tasks.values().any(|task| {
+                    matches!(task.origin, DiscoveryTaskOrigin::Scheduled { source_rule_index: index } if index == source_rule_index)
+                        && task.pod_id == package.pod_id
+                        && task.package_version == version
+                        && task.due_at == due_at
+                });
+                if exists {
+                    continue;
+                }
+                let task = DiscoveryTask {
+                    id: Uuid::now_v7().into(),
+                    pod_id: package.pod_id,
+                    package_version: version,
+                    origin: DiscoveryTaskOrigin::Scheduled { source_rule_index },
+                    due_at,
+                    state: DiscoveryTaskState::Pending,
+                    attempts: Vec::new(),
+                    created_at: now,
+                };
+                store.discovery_tasks.insert(task.id, task.clone());
+                record_harness_write(
+                    &mut store,
+                    ctx,
+                    HarnessWriteOperation::CreateDiscoveryTask,
+                    Some(task.pod_id),
+                );
+                created.push(task);
+            }
+        }
+        self.persist_locked(&mut store)?;
+        Ok(created)
+    }
+
+    /// Creates immediate conversational discovery work through the task contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Pod or Package is missing, authorization is denied,
+    /// or locking or persistence fails.
+    pub fn create_immediate_discovery_task(
+        &self,
+        ctx: &AuthContext,
+        request: CreateImmediateDiscoveryTaskRequest,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<DiscoveryTask, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(
+            &store,
+            ctx,
+            HarnessCapability::DiscoveryTasks,
+            Some(request.pod_id),
+        )?;
+        let requested_by = ctx.harness_id.ok_or_else(|| AgentToolsError::Forbidden {
+            reason: "immediate tasks require an Agent Harness".into(),
+        })?;
+        if request.instructions.trim().is_empty() || request.idempotency_key.trim().is_empty() {
+            return Err(StoreError::Validation(
+                "immediate task instructions and idempotency key must not be empty".into(),
+            )
+            .into());
+        }
+        if let Some(existing) = store.discovery_tasks.values().find(|task| {
+            matches!(&task.origin,
+            DiscoveryTaskOrigin::Immediate { idempotency_key, requested_by: creator, .. }
+                if creator == &requested_by && idempotency_key == &request.idempotency_key)
+        }) {
+            return Ok(existing.clone());
+        }
+        let package = store
+            .pod_skill_packs
+            .get(&request.pod_id)
+            .ok_or_else(|| StoreError::NotFound("Pod Package".into()))?;
+        let task = DiscoveryTask {
+            id: Uuid::now_v7().into(),
+            pod_id: request.pod_id,
+            package_version: PackageVersion::new(package.version)
+                .map_err(|error| StoreError::Validation(error.to_string()))?,
+            origin: DiscoveryTaskOrigin::Immediate {
+                instructions: request.instructions,
+                idempotency_key: request.idempotency_key,
+                requested_by,
+            },
+            due_at: now,
+            state: DiscoveryTaskState::Pending,
+            attempts: Vec::new(),
+            created_at: now,
+        };
+        store.discovery_tasks.insert(task.id, task.clone());
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::CreateDiscoveryTask,
+            Some(request.pod_id),
+        );
+        self.persist_locked(&mut store)?;
+        Ok(task)
+    }
+
+    /// Lists visible tasks, presenting expired leases as pending work.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when authorization is denied or the store lock is poisoned.
+    pub fn list_discovery_tasks(
+        &self,
+        ctx: &AuthContext,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Vec<DiscoveryTask>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::DiscoveryTasks, None)?;
+        let scoped =
+            harness_for_context(&store, ctx)?.and_then(|harness| harness.grant.pod_ids.as_ref());
+        Ok(store
+            .discovery_tasks
+            .values()
+            .filter(|task| scoped.is_none_or(|pods| pods.contains(&task.pod_id)))
+            .cloned()
+            .map(|task| task_with_expired_lease_recorded(task, now))
+            .collect())
+    }
+
+    /// Lists only tasks that can be claimed now, including safely expired leases.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when authorization is denied or the store lock is poisoned.
+    pub fn list_ready_discovery_tasks(
+        &self,
+        ctx: &AuthContext,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Vec<DiscoveryTask>, AgentToolsError> {
+        Ok(self
+            .list_discovery_tasks(ctx, now)?
+            .into_iter()
+            .filter(|task| task.state == DiscoveryTaskState::Pending && task.due_at <= now)
+            .collect())
+    }
+
+    /// Returns one visible task and its retry history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task is missing, authorization is denied, or the
+    /// store lock is poisoned.
+    pub fn discovery_task_status(
+        &self,
+        ctx: &AuthContext,
+        task_id: DiscoveryTaskId,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<DiscoveryTask, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let task = store
+            .discovery_tasks
+            .get(&task_id)
+            .ok_or_else(|| StoreError::NotFound("Discovery Task".into()))?;
+        authorize_harness(
+            &store,
+            ctx,
+            HarnessCapability::DiscoveryTasks,
+            Some(task.pod_id),
+        )?;
+        Ok(task_with_expired_lease_recorded(task.clone(), now))
+    }
+
+    /// Claims pending or safely expired work for one positive lease duration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid durations, missing or terminal tasks, active
+    /// competing leases, denied authorization, or persistence failures.
+    pub fn claim_discovery_task(
+        &self,
+        ctx: &AuthContext,
+        task_id: DiscoveryTaskId,
+        now: chrono::DateTime<Utc>,
+        lease_duration: DiscoveryLeaseSeconds,
+    ) -> Result<DiscoveryTask, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let (pod_id, harness_id) = authorized_discovery_task_mutation(&store, ctx, task_id)?;
+        let expires_at = now
+            .checked_add_signed(lease_duration.as_duration())
+            .ok_or_else(|| {
+                StoreError::Validation(
+                    "lease expiration is outside the supported time range".into(),
+                )
+            })?;
+        let task = store
+            .discovery_tasks
+            .get_mut(&task_id)
+            .expect("BUG: task exists after lookup");
+        record_expired_lease(task, now);
+        if matches!(
+            task.state,
+            DiscoveryTaskState::Completed | DiscoveryTaskState::TerminalFailure
+        ) {
+            return Err(AgentToolsError::TaskTerminal);
+        }
+        if matches!(&task.state, DiscoveryTaskState::Leased(lease) if lease.expires_at > now) {
+            return Err(AgentToolsError::TaskLeaseConflict);
+        }
+        task.state = DiscoveryTaskState::Leased(DiscoveryTaskLease {
+            harness_id,
+            claimed_at: now,
+            expires_at,
+        });
+        let result = task.clone();
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::ClaimDiscoveryTask,
+            Some(pod_id),
+        );
+        self.persist_locked(&mut store)?;
+        Ok(result)
+    }
+
+    /// Extends an active lease owned by the calling harness.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid durations, missing tasks, absent or foreign
+    /// leases, denied authorization, or persistence failures.
+    pub fn renew_discovery_task_lease(
+        &self,
+        ctx: &AuthContext,
+        task_id: DiscoveryTaskId,
+        now: chrono::DateTime<Utc>,
+        lease_duration: DiscoveryLeaseSeconds,
+    ) -> Result<DiscoveryTask, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let (pod_id, harness_id) = authorized_discovery_task_mutation(&store, ctx, task_id)?;
+        let expires_at = now
+            .checked_add_signed(lease_duration.as_duration())
+            .ok_or_else(|| {
+                StoreError::Validation(
+                    "lease expiration is outside the supported time range".into(),
+                )
+            })?;
+        let task = store
+            .discovery_tasks
+            .get_mut(&task_id)
+            .expect("BUG: task exists after lookup");
+        let DiscoveryTaskState::Leased(lease) = &mut task.state else {
+            return Err(AgentToolsError::TaskLeaseRequired);
+        };
+        if lease.harness_id != harness_id || lease.expires_at <= now {
+            return Err(AgentToolsError::TaskLeaseRequired);
+        }
+        lease.expires_at = expires_at;
+        let result = task.clone();
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::RenewDiscoveryTaskLease,
+            Some(pod_id),
+        );
+        self.persist_locked(&mut store)?;
+        Ok(result)
+    }
+
+    /// Completes an actively leased task and records its successful attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task or caller-owned lease is missing,
+    /// authorization is denied, or persistence fails.
+    pub fn complete_discovery_task(
+        &self,
+        ctx: &AuthContext,
+        task_id: DiscoveryTaskId,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<DiscoveryTask, AgentToolsError> {
+        self.finish_discovery_task(ctx, task_id, now, None)
+    }
+
+    /// Fails an actively leased task, making it retryable or terminal by history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty reason, missing task or caller-owned lease,
+    /// denied authorization, or persistence failure.
+    pub fn fail_discovery_task(
+        &self,
+        ctx: &AuthContext,
+        task_id: DiscoveryTaskId,
+        now: chrono::DateTime<Utc>,
+        reason: String,
+    ) -> Result<DiscoveryTask, AgentToolsError> {
+        if reason.trim().is_empty() {
+            return Err(StoreError::Validation("failure reason must not be empty".into()).into());
+        }
+        self.finish_discovery_task(ctx, task_id, now, Some(reason))
+    }
+
+    fn finish_discovery_task(
+        &self,
+        ctx: &AuthContext,
+        task_id: DiscoveryTaskId,
+        now: chrono::DateTime<Utc>,
+        failure: Option<String>,
+    ) -> Result<DiscoveryTask, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let (pod_id, harness_id) = authorized_discovery_task_mutation(&store, ctx, task_id)?;
+        let task = store
+            .discovery_tasks
+            .get_mut(&task_id)
+            .expect("BUG: task exists after lookup");
+        let DiscoveryTaskState::Leased(lease) = &task.state else {
+            return Err(AgentToolsError::TaskLeaseRequired);
+        };
+        if lease.harness_id != harness_id || lease.expires_at <= now {
+            return Err(AgentToolsError::TaskLeaseRequired);
+        }
+        let lease = lease.clone();
+        let outcome = if let Some(reason) = failure {
+            DiscoveryTaskAttemptOutcome::Failed { reason }
+        } else {
+            DiscoveryTaskAttemptOutcome::Completed
+        };
+        task.attempts.push(DiscoveryTaskAttempt {
+            harness_id,
+            started_at: lease.claimed_at,
+            finished_at: now,
+            outcome,
+        });
+        task.state = if matches!(
+            task.attempts.last().map(|attempt| &attempt.outcome),
+            Some(DiscoveryTaskAttemptOutcome::Completed)
+        ) {
+            DiscoveryTaskState::Completed
+        } else if task.attempts.len() >= MAX_DISCOVERY_TASK_ATTEMPTS {
+            DiscoveryTaskState::TerminalFailure
+        } else {
+            DiscoveryTaskState::Pending
+        };
+        let result = task.clone();
+        let operation = if result.state == DiscoveryTaskState::Completed {
+            HarnessWriteOperation::CompleteDiscoveryTask
+        } else {
+            HarnessWriteOperation::FailDiscoveryTask
+        };
+        record_harness_write(&mut store, ctx, operation, Some(pod_id));
+        self.persist_locked(&mut store)?;
+        Ok(result)
     }
 
     pub fn create_pod(
@@ -2405,6 +2818,35 @@ impl AgentTools {
     }
 }
 
+fn task_with_expired_lease_recorded(
+    mut task: DiscoveryTask,
+    now: chrono::DateTime<Utc>,
+) -> DiscoveryTask {
+    record_expired_lease(&mut task, now);
+    task
+}
+
+fn record_expired_lease(task: &mut DiscoveryTask, now: chrono::DateTime<Utc>) {
+    let DiscoveryTaskState::Leased(lease) = &task.state else {
+        return;
+    };
+    if lease.expires_at > now {
+        return;
+    }
+    let lease = lease.clone();
+    task.attempts.push(DiscoveryTaskAttempt {
+        harness_id: lease.harness_id,
+        started_at: lease.claimed_at,
+        finished_at: lease.expires_at,
+        outcome: DiscoveryTaskAttemptOutcome::LeaseExpired,
+    });
+    task.state = if task.attempts.len() >= MAX_DISCOVERY_TASK_ATTEMPTS {
+        DiscoveryTaskState::TerminalFailure
+    } else {
+        DiscoveryTaskState::Pending
+    };
+}
+
 pub fn canonicalize_url(value: &str) -> Result<String, AgentToolsError> {
     let mut url = Url::parse(value).map_err(|e| AgentToolsError::BadUrl(e.to_string()))?;
     url.set_fragment(None);
@@ -2946,6 +3388,23 @@ fn authorize_harness(
         }
     }
     Ok(())
+}
+
+fn authorized_discovery_task_mutation(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    task_id: DiscoveryTaskId,
+) -> Result<(PodId, AgentHarnessId), AgentToolsError> {
+    let pod_id = store
+        .discovery_tasks
+        .get(&task_id)
+        .ok_or_else(|| StoreError::NotFound("Discovery Task".into()))?
+        .pod_id;
+    authorize_harness(store, ctx, HarnessCapability::DiscoveryTasks, Some(pod_id))?;
+    let harness_id = ctx.harness_id.ok_or_else(|| AgentToolsError::Forbidden {
+        reason: "task mutation requires an Agent Harness".into(),
+    })?;
+    Ok((pod_id, harness_id))
 }
 
 fn authorize_harness_for_new_pod(

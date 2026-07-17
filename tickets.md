@@ -59,13 +59,13 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 **Blocked by:** Authorize Agent Harnesses with scoped grants; Create and exchange portable Pod Packages.
 
-- [ ] Due Source Rules create idempotent Discovery Tasks with the relevant Pod Package version.
-- [ ] Authorized harnesses can list, claim, renew, complete, and fail tasks.
-- [ ] Leases prevent concurrent duplicate execution and expire safely after abandoned work.
-- [ ] Retry history and terminal failure are inspectable through status tools.
-- [ ] A local launchd, cron, or equivalent adapter wakes due work when no harness scheduler exists.
-- [ ] The local scheduler may invoke an explicitly configured harness command or emit a Discovery-ready Event but never controls a browser itself.
-- [ ] Manual conversational discovery can create an immediate task through the same contract.
+- [x] Due Source Rules create idempotent Discovery Tasks with the relevant Pod Package version.
+- [x] Authorized harnesses can list, claim, renew, complete, and fail tasks.
+- [x] Leases prevent concurrent duplicate execution and expire safely after abandoned work.
+- [x] Retry history and terminal failure are inspectable through status tools.
+- [x] A local launchd, cron, or equivalent adapter wakes due work when no harness scheduler exists.
+- [x] The local scheduler may invoke an explicitly configured harness command or emit a Discovery-ready Event but never controls a browser itself.
+- [x] Manual conversational discovery can create an immediate task through the same contract.
 
 ## Submit provenance-bearing Candidates
 
