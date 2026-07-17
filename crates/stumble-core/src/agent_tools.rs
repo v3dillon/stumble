@@ -2794,6 +2794,8 @@ impl AgentTools {
                 reason: proposal.reason,
                 confidence: proposal.confidence,
                 source_submission_ids: proposal.source_submission_ids,
+                origin_placements: Vec::new(),
+                origin_withdrawals: Vec::new(),
                 status,
                 curation_path,
                 actor,
@@ -2964,6 +2966,8 @@ impl AgentTools {
             reason: request.reason,
             confidence: request.confidence,
             source_submission_ids: submissions.iter().map(|submission| submission.id).collect(),
+            origin_placements: Vec::new(),
+            origin_withdrawals: Vec::new(),
             status,
             curation_path,
             actor,
@@ -3017,6 +3021,12 @@ impl AgentTools {
             .filter(|item| item.tenant_id == ctx.tenant_id)
             .cloned()
             .ok_or_else(|| StoreError::NotFound("Content Item".into()))?;
+        let origin_placements = store
+            .accepted_placement_projections
+            .values()
+            .filter(|placement| placement.content_item_id == request.content_item_id)
+            .cloned()
+            .collect::<Vec<_>>();
         if let Some((key, existing)) = store.pod_placements.iter().find(|(_, placement)| {
             placement.pod_id == request.pod_id
                 && placement.content_item_id == Some(request.content_item_id)
@@ -3038,6 +3048,16 @@ impl AgentTools {
             placement.status = PodPlacementStatus::Accepted;
             placement.curation_path = CurationPath::AddToPod;
             placement.actor = actor;
+            let retained_origin_ids = placement
+                .origin_placements
+                .iter()
+                .map(origin_placement_identity)
+                .collect::<HashSet<_>>();
+            placement
+                .origin_placements
+                .extend(origin_placements.into_iter().filter(|origin_placement| {
+                    !retained_origin_ids.contains(&origin_placement_identity(origin_placement))
+                }));
             placement.reason = request
                 .curation_note
                 .clone()
@@ -3091,6 +3111,8 @@ impl AgentTools {
             confidence: CandidateConfidence::new(1.0)
                 .map_err(|error| StoreError::Validation(error.to_string()))?,
             source_submission_ids: Vec::new(),
+            origin_placements,
+            origin_withdrawals: Vec::new(),
             status: PodPlacementStatus::Accepted,
             curation_path: CurationPath::AddToPod,
             actor,
@@ -3253,6 +3275,72 @@ impl AgentTools {
             .collect::<Vec<_>>();
         placements.sort_by_key(|placement| (placement.accepted_at, placement.content_item_id));
         Ok(placements)
+    }
+
+    /// Reads one locally governed Pod Placement with retained origin provenance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when local Pod curation is denied, the placement is
+    /// missing, or the Home Node store lock is poisoned.
+    pub fn pod_placement(
+        &self,
+        ctx: &AuthContext,
+        candidate_id: CandidateId,
+        pod_id: PodId,
+    ) -> Result<PodPlacement, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_local_pod_curation(&store, ctx, pod_id)?;
+        store
+            .pod_placements
+            .get(&(candidate_id, pod_id))
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("Pod Placement".into()).into())
+    }
+
+    /// Lists private Saves with any signed origin-withdrawal provenance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when feedback access is denied, no User is authenticated,
+    /// or the Home Node store lock is poisoned.
+    pub fn saved_content_references(
+        &self,
+        ctx: &AuthContext,
+    ) -> Result<Vec<SavedContentReference>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Feedback, None)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Saved Content References require an authenticated User".into())
+        })?;
+        let mut saved = store
+            .saves
+            .iter()
+            .filter(|(saved_user_id, _)| *saved_user_id == user_id)
+            .filter_map(|(_, submission_id)| store.submissions.get(submission_id))
+            .map(|item| {
+                let content_item_id = ContentItemId::from(item.id);
+                SavedContentReference {
+                    content_reference: feed_content_reference(item),
+                    origin_withdrawals: store
+                        .placement_tombstones
+                        .iter()
+                        .filter(|tombstone| {
+                            tombstone.origin_placement.content_item_id == content_item_id
+                        })
+                        .cloned()
+                        .collect(),
+                }
+            })
+            .collect::<Vec<_>>();
+        saved.sort_by_key(|saved| saved.content_reference.content_item_id);
+        Ok(saved)
     }
 
     /// Remove a submission's association with a pod. If no pod references the
@@ -5209,26 +5297,33 @@ fn normalized_package_value(
 }
 
 fn validate_imported_event_payload(event: &EventLog) -> Result<(), AgentToolsError> {
-    match event.event_type.as_str() {
-        "pod_created" => {
+    let event_type = FederatedPodEventType::from_wire(&event.event_type)
+        .ok_or_else(|| StoreError::Validation("event is not synchronization-safe".to_string()))?;
+    match event_type {
+        FederatedPodEventType::PodCreated => {
             imported_event_payload::<Pod>(event, "pod")?;
             imported_event_payload::<PodPackage>(event, "package")?;
         }
-        "pod_published" => {
+        FederatedPodEventType::PodPublished => {
             imported_event_payload::<Pod>(event, "pod")?;
             imported_event_payload::<PodPackage>(event, "package")?;
         }
-        "pod_skill_pack_updated" | "pod_package_imported" | "pod_package_forked" => {
+        FederatedPodEventType::PodSkillPackUpdated
+        | FederatedPodEventType::PodPackageImported
+        | FederatedPodEventType::PodPackageForked => {
             imported_event_payload::<PodPackage>(event, "package")?;
         }
-        "content_item_placed" => {
+        FederatedPodEventType::ContentItemPlaced => {
             imported_event_payload::<ContentItem>(event, "content_item")?;
             imported_event_payload::<AcceptedPlacementProjection>(event, "accepted_placement")?;
         }
-        "link_removed" => {
+        FederatedPodEventType::PlacementTombstoned => {
+            imported_event_payload::<PlacementTombstone>(event, "placement_tombstone")?;
+        }
+        FederatedPodEventType::LegacyLinkRemoved => {
             imported_event_payload::<SubmissionId>(event, "submission_id")?;
         }
-        _ => {
+        FederatedPodEventType::LegacyLinkSubmitted => {
             return Err(
                 StoreError::Validation("event is not synchronization-safe".to_string()).into(),
             )
@@ -5264,13 +5359,16 @@ fn project_snapshot_events(
 
 fn is_subscription_projection_event(event_type: &str) -> bool {
     matches!(
-        event_type,
-        "pod_created"
-            | "pod_published"
-            | "pod_skill_pack_updated"
-            | "pod_package_imported"
-            | "pod_package_forked"
-            | "content_item_placed"
+        FederatedPodEventType::from_wire(event_type),
+        Some(
+            FederatedPodEventType::PodCreated
+                | FederatedPodEventType::PodPublished
+                | FederatedPodEventType::PodSkillPackUpdated
+                | FederatedPodEventType::PodPackageImported
+                | FederatedPodEventType::PodPackageForked
+                | FederatedPodEventType::ContentItemPlaced
+                | FederatedPodEventType::PlacementTombstoned
+        )
     )
 }
 
@@ -5279,20 +5377,25 @@ fn project_imported_public_event(
     ctx: &AuthContext,
     event: &EventLog,
 ) -> Result<(), AgentToolsError> {
-    match event.event_type.as_str() {
-        "pod_created" => {
+    let Some(event_type) = FederatedPodEventType::from_wire(&event.event_type) else {
+        return Ok(());
+    };
+    match event_type {
+        FederatedPodEventType::PodCreated => {
             let pod = imported_event_payload::<Pod>(event, "pod")?;
             let local_pod_id = project_imported_pod(store, ctx, event.author_node_id, pod)?;
             let mut package = imported_event_payload::<PodPackage>(event, "package")?;
             project_imported_package(store, local_pod_id, &mut package)?;
         }
-        "pod_published" => {
+        FederatedPodEventType::PodPublished => {
             let pod = imported_event_payload::<Pod>(event, "pod")?;
             let local_pod_id = project_imported_pod(store, ctx, event.author_node_id, pod)?;
             let mut package = imported_event_payload::<PodPackage>(event, "package")?;
             project_imported_package(store, local_pod_id, &mut package)?;
         }
-        "pod_skill_pack_updated" | "pod_package_imported" | "pod_package_forked" => {
+        FederatedPodEventType::PodSkillPackUpdated
+        | FederatedPodEventType::PodPackageImported
+        | FederatedPodEventType::PodPackageForked => {
             let mut package = imported_event_payload::<PodPackage>(event, "package")?;
             let local_pod_id = store
                 .pods
@@ -5306,11 +5409,11 @@ fn project_imported_public_event(
                 .ok_or_else(|| StoreError::NotFound("synchronized public Pod".to_string()))?;
             project_imported_package(store, local_pod_id, &mut package)?;
         }
-        "link_submitted" => {
+        FederatedPodEventType::LegacyLinkSubmitted => {
             let submission = imported_event_payload::<Submission>(event, "submission")?;
             project_imported_submission(store, ctx, event, submission)?;
         }
-        "content_item_placed" => {
+        FederatedPodEventType::ContentItemPlaced => {
             let content_item = imported_event_payload::<ContentItem>(event, "content_item")?;
             let content_item_id =
                 project_imported_submission(store, ctx, event, content_item.into_legacy_record())?;
@@ -5333,10 +5436,19 @@ fn project_imported_public_event(
                 .accepted_placement_projections
                 .insert((content_item_id, local_pod_id), projection);
         }
-        "link_removed" => {
-            let origin_content_item_id =
-                imported_event_payload::<SubmissionId>(event, "submission_id")?;
-            let origin_content_item_id = ContentItemId::from(origin_content_item_id);
+        FederatedPodEventType::PlacementTombstoned => {
+            let mut tombstone =
+                imported_event_payload::<PlacementTombstone>(event, "placement_tombstone")?;
+            if tombstone.origin_placement.origin_node_id != event.author_node_id
+                || tombstone.content_reference.content_item_id
+                    != tombstone.origin_placement.content_item_id
+            {
+                return Err(StoreError::Validation(
+                    "signed Placement Tombstone does not match its Origin Placement".into(),
+                )
+                .into());
+            }
+            let origin_content_item_id = tombstone.origin_placement.content_item_id;
             let key = FederatedContentItemKey::new(
                 ctx.tenant_id,
                 event.author_node_id,
@@ -5357,15 +5469,48 @@ fn project_imported_public_event(
                 })
                 .map(|pod| pod.id)
             {
+                let existing = store
+                    .accepted_placement_projections
+                    .get(&(local_content_item_id, pod_id))
+                    .ok_or_else(|| {
+                        StoreError::Validation(
+                            "Placement Tombstone has no matching accepted Origin Placement".into(),
+                        )
+                    })?;
+                let mut expected = tombstone.origin_placement.clone();
+                expected.content_item_id = local_content_item_id;
+                expected.pod_id = pod_id;
+                if existing != &expected {
+                    return Err(StoreError::Validation(
+                        "Placement Tombstone does not match accepted Origin Placement evidence"
+                            .into(),
+                    )
+                    .into());
+                }
                 store.submission_pods.retain(|link| {
                     !(link.pod_id == pod_id && link.submission_id == local_submission_id)
                 });
                 store
                     .accepted_placement_projections
                     .remove(&(local_content_item_id, pod_id));
+                tombstone.origin_placement = expected;
+                tombstone.content_reference.content_item_id = local_content_item_id;
+                let tombstoned_origin_id = origin_placement_identity(&tombstone.origin_placement);
+                for placement in store.pod_placements.values_mut().filter(|placement| {
+                    placement.content_item_id == Some(local_content_item_id)
+                        && placement
+                            .origin_placements
+                            .iter()
+                            .map(origin_placement_identity)
+                            .collect::<HashSet<_>>()
+                            .contains(&tombstoned_origin_id)
+                }) {
+                    placement.origin_withdrawals.push(tombstone.clone());
+                }
+                store.placement_tombstones.push(tombstone);
             }
         }
-        _ => {}
+        FederatedPodEventType::LegacyLinkRemoved => {}
     }
     Ok(())
 }
@@ -6630,6 +6775,30 @@ struct FeedItemSelection {
     reasons: Vec<String>,
 }
 
+fn feed_content_reference(item: &Submission) -> FeedContentReference {
+    FeedContentReference {
+        content_item_id: ContentItemId::from(item.id),
+        source_url: item.url.clone(),
+        canonical_url: item.canonical_url.clone(),
+        title: item.title.clone(),
+        permitted_description: item.description.clone(),
+        summary: item.summary.clone(),
+        source: item.domain.clone(),
+        tags: item.tags.clone(),
+    }
+}
+
+fn origin_placement_identity(
+    placement: &AcceptedPlacementProjection,
+) -> (ContentItemId, PodId, NodeIdentityId, chrono::DateTime<Utc>) {
+    (
+        placement.content_item_id,
+        placement.pod_id,
+        placement.origin_node_id,
+        placement.accepted_at,
+    )
+}
+
 fn feed_batch_item(
     store: &InMemoryStore,
     user_id: UserId,
@@ -6678,16 +6847,7 @@ fn feed_batch_item(
         reasons.push("Clearly labeled exploration from an unsubscribed public Pod".into());
     }
     FeedBatchItem {
-        content_reference: FeedContentReference {
-            content_item_id,
-            source_url: item.url.clone(),
-            canonical_url: item.canonical_url.clone(),
-            title: item.title.clone(),
-            permitted_description: item.description.clone(),
-            summary: item.summary.clone(),
-            source: item.domain.clone(),
-            tags: item.tags.clone(),
-        },
+        content_reference: feed_content_reference(item),
         placements,
         provenance,
         ranking_evidence: FeedRankingEvidence {
@@ -7440,6 +7600,12 @@ fn apply_sensitive_change(
                 .cloned()
                 .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
             store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+            let content_item_id = ContentItemId::from(*submission_id);
+            let node = store.node_for_tenant(ctx.tenant_id)?;
+            let origin_placement = store
+                .accepted_placement_projections
+                .get(&(content_item_id, *pod_id))
+                .cloned();
             let before = store.submission_pods.len();
             store.submission_pods.retain(|placement| {
                 !(placement.pod_id == *pod_id && placement.submission_id == *submission_id)
@@ -7450,17 +7616,17 @@ fn apply_sensitive_change(
                 )
                 .into());
             }
+            let withdrawn_at = Utc::now();
             if let Some(placement) = store.pod_placements.values_mut().find(|placement| {
                 placement.pod_id == *pod_id
                     && placement.content_item_id == Some((*submission_id).into())
                     && placement.status == PodPlacementStatus::Accepted
             }) {
                 let actor = curation_actor(ctx);
-                let now = Utc::now();
                 placement.status = PodPlacementStatus::Reversed;
                 placement.curation_path = CurationPath::ManualReview;
                 placement.actor = actor;
-                placement.updated_at = now;
+                placement.updated_at = withdrawn_at;
                 placement.audit_history.push(PlacementAuditEntry {
                     status: PodPlacementStatus::Reversed,
                     curation_path: CurationPath::ManualReview,
@@ -7468,20 +7634,52 @@ fn apply_sensitive_change(
                     note: Some(CurationRationale::new(
                         "approved public placement reversal",
                     )?),
-                    occurred_at: now,
+                    occurred_at: withdrawn_at,
                 });
+            }
+            let event = if let Some(origin_placement) = origin_placement {
+                let content_reference = store
+                    .submissions
+                    .get(submission_id)
+                    .map(feed_content_reference)
+                    .ok_or_else(|| StoreError::NotFound("Content Reference".into()))?;
+                let tombstone = PlacementTombstone {
+                    content_reference,
+                    origin_placement,
+                    withdrawn_at,
+                };
+                let tombstoned_origin_id = origin_placement_identity(&tombstone.origin_placement);
+                for placement in store.pod_placements.values_mut().filter(|placement| {
+                    placement.content_item_id == Some(content_item_id)
+                        && placement
+                            .origin_placements
+                            .iter()
+                            .map(origin_placement_identity)
+                            .collect::<HashSet<_>>()
+                            .contains(&tombstoned_origin_id)
+                }) {
+                    placement.origin_withdrawals.push(tombstone.clone());
+                }
                 store
                     .accepted_placement_projections
-                    .remove(&((*submission_id).into(), *pod_id));
-            }
-            let node = store.node_for_tenant(ctx.tenant_id)?;
-            let event = sign_public_event(
-                &node,
-                "link_removed",
-                &pod.slug,
-                json!({"submission_id": submission_id, "submission_purged": false}),
-                store.latest_event_hash(&pod.slug),
-            )?;
+                    .remove(&(content_item_id, *pod_id));
+                store.placement_tombstones.push(tombstone.clone());
+                sign_public_event(
+                    &node,
+                    FederatedPodEventType::PlacementTombstoned.as_wire(),
+                    &pod.slug,
+                    json!({"placement_tombstone": tombstone}),
+                    store.latest_event_hash(&pod.slug),
+                )?
+            } else {
+                sign_public_event(
+                    &node,
+                    FederatedPodEventType::LegacyLinkRemoved.as_wire(),
+                    &pod.slug,
+                    json!({"submission_id": submission_id, "submission_purged": false}),
+                    store.latest_event_hash(&pod.slug),
+                )?
+            };
             store.event_log.push(event);
         }
         SensitiveChange::EnableAutonomousCuration {
@@ -7666,17 +7864,37 @@ mod federation_projection_tests {
 
     fn removal_event(
         origin_node_id: NodeIdentityId,
-        pod_slug: &str,
-        origin_submission_id: SubmissionId,
+        pod: &Pod,
+        origin_submission: &Submission,
+        placed: Option<&EventLog>,
     ) -> EventLog {
+        let origin_placement = placed
+            .and_then(|event| {
+                serde_json::from_value(event.payload_json["accepted_placement"].clone()).ok()
+            })
+            .unwrap_or(AcceptedPlacementProjection {
+                content_item_id: origin_submission.id.into(),
+                pod_id: pod.id,
+                reason: CurationRationale::new("Federated acceptance").unwrap(),
+                curation_path: CurationPath::ManualReview,
+                origin_node_id,
+                accepted_at: Utc::now(),
+            });
+        let tombstone = PlacementTombstone {
+            content_reference: feed_content_reference(origin_submission),
+            origin_placement,
+            withdrawn_at: Utc::now(),
+        };
         EventLog {
             event_id: Uuid::now_v7(),
             tenant_id: None,
-            event_type: "link_removed".to_string(),
-            pod_slug: pod_slug.to_string(),
+            event_type: FederatedPodEventType::PlacementTombstoned
+                .as_wire()
+                .to_string(),
+            pod_slug: pod.slug.clone(),
             author_node_id: origin_node_id,
             author_display_name: None,
-            payload_json: json!({ "submission_id": origin_submission_id }),
+            payload_json: json!({ "placement_tombstone": tombstone }),
             created_at: Utc::now(),
             previous_event_hash: None,
             content_hash: String::new(),
@@ -7714,7 +7932,7 @@ mod federation_projection_tests {
         project_imported_public_event(
             &mut store,
             &ctx_a,
-            &removal_event(origin_node_id, &pod_a.slug, origin_submission_id),
+            &removal_event(origin_node_id, &pod_a, &origin_submission, Some(&placed)),
         )
         .unwrap();
 
@@ -7748,7 +7966,7 @@ mod federation_projection_tests {
         project_imported_public_event(
             &mut store,
             &ctx,
-            &removal_event(origin_node_id, &pod.slug, coincident_id),
+            &removal_event(origin_node_id, &pod, &local, None),
         )
         .unwrap();
 

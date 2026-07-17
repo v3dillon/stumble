@@ -26,3 +26,14 @@ private Home Node state are never exposed from a remote Pod's federation
 surface, and synchronized Pods are not re-published by the Home Node.
 Origin Pod identities are mapped to distinct local IDs, and a remote slug or ID
 collision cannot alias or overwrite a locally authoritative Pod.
+
+Public placement withdrawal follows the same verified event chain. An Origin
+Node first creates a Pending Proposal; independent approval appends a signed
+`placement_tombstoned` Pod Event containing the withdrawn Accepted Placement
+and its reference-first audit snapshot. A subscriber removes only that Origin
+Pod's Feed eligibility. An independent local Save remains available through
+`saved_content_references`, and an Add to Pod placement remains accepted with
+its original `origin_placements` plus the later `origin_withdrawals` evidence.
+The signed acceptance and tombstone events remain append-only. A Content
+Reference is retained whenever an active placement, private Save, or required
+withdrawal audit still refers to it.

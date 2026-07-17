@@ -169,19 +169,19 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 ## Apply tombstones without erasing local curation
 
-**Status:** ready-for-agent
+**Status:** complete
 
 **What to build:** Synchronize Origin Pod withdrawals as Placement Tombstones while preserving independent local Saves and Accepted Placements with accurate provenance.
 
 **Blocked by:** Subscribe and synchronize across two nodes.
 
-- [ ] An Origin Node can propose and approve withdrawal of a public placement.
-- [ ] Subscribers verify and apply the signed Placement Tombstone incrementally.
-- [ ] The withdrawn origin placement stops contributing Feed eligibility.
-- [ ] A local Save survives and records the origin withdrawal.
-- [ ] A local Add to Pod placement survives and retains its original provenance chain.
-- [ ] Orphaned Content References are purged only when no placement, Save, or required audit record retains them.
-- [ ] Synchronization never silently rewrites or deletes origin history.
+- [x] An Origin Node can propose and approve withdrawal of a public placement.
+- [x] Subscribers verify and apply the signed Placement Tombstone incrementally.
+- [x] The withdrawn origin placement stops contributing Feed eligibility.
+- [x] A local Save survives and records the origin withdrawal.
+- [x] A local Add to Pod placement survives and retains its original provenance chain.
+- [x] Orphaned Content References are purged only when no placement, Save, or required audit record retains them.
+- [x] Synchronization never silently rewrites or deletes origin history.
 
 ## Discover Pods through the Stumble Substrate
 

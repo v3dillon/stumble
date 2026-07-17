@@ -60,6 +60,7 @@ pub struct InMemoryStore {
     pub pod_placements: HashMap<(CandidateId, PodId), PodPlacement>,
     pub accepted_placement_projections:
         HashMap<(ContentItemId, PodId), AcceptedPlacementProjection>,
+    pub(crate) placement_tombstones: Vec<PlacementTombstone>,
     pub(crate) federated_content_item_ids: HashMap<FederatedContentItemKey, ContentItemId>,
     pub node_identities: HashMap<NodeIdentityId, NodeIdentity>,
     pub trusted_peers: HashMap<PeerId, TrustedPeer>,
@@ -113,6 +114,8 @@ struct PersistedStore {
     pod_placements: Vec<PodPlacement>,
     #[serde(default)]
     accepted_placement_projections: Vec<AcceptedPlacementProjection>,
+    #[serde(default)]
+    placement_tombstones: Vec<PlacementTombstone>,
     #[serde(default)]
     federated_content_item_ids: Vec<PersistedFederatedContentItemId>,
     node_identities: Vec<NodeIdentity>,
@@ -222,6 +225,7 @@ impl From<&InMemoryStore> for PersistedStore {
                 .values()
                 .cloned()
                 .collect(),
+            placement_tombstones: store.placement_tombstones.clone(),
             federated_content_item_ids: store
                 .federated_content_item_ids
                 .iter()
@@ -360,6 +364,7 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .into_iter()
                 .map(|projection| ((projection.content_item_id, projection.pod_id), projection))
                 .collect(),
+            placement_tombstones: snapshot.placement_tombstones,
             federated_content_item_ids: snapshot
                 .federated_content_item_ids
                 .into_iter()
@@ -522,6 +527,7 @@ const STORE_COLLECTIONS: &[&str] = &[
     "pod_curation_policies",
     "pod_placements",
     "accepted_placement_projections",
+    "placement_tombstones",
     "federated_content_item_ids",
     "node_identities",
     "trusted_peers",
@@ -788,6 +794,7 @@ fn record_key(
         "pod_curation_policies" => &["pod_id"],
         "pod_placements" => &["candidate_id", "pod_id"],
         "accepted_placement_projections" => &["content_item_id", "pod_id"],
+        "placement_tombstones" => return Ok(serde_json::to_string(value)?),
         "federated_content_item_ids" => &["tenant_id", "origin_node_id", "origin_content_item_id"],
         "pod_package_versions" => &["pod_id", "version"],
         "event_log" => &["event_id"],
@@ -960,16 +967,7 @@ pub fn is_private_event(event_type: &str) -> bool {
 }
 
 pub fn is_federated_pod_event(event_type: &str) -> bool {
-    matches!(
-        event_type,
-        "pod_created"
-            | "pod_published"
-            | "pod_skill_pack_updated"
-            | "pod_package_imported"
-            | "pod_package_forked"
-            | "content_item_placed"
-            | "link_removed"
-    )
+    FederatedPodEventType::from_wire(event_type).is_some_and(FederatedPodEventType::is_federated)
 }
 
 #[cfg(test)]

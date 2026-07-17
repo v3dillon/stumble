@@ -569,7 +569,7 @@ pub enum RecurrencePenaltyDaysParseError {
 pub struct FeedBatchRequestError;
 
 /// Source reference returned without mirroring third-party content.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeedContentReference {
     /// Stable canonical Content Item identity.
     pub content_item_id: ContentItemId,
@@ -1202,6 +1202,64 @@ pub struct PodSkillPack {
 /// `PodSkillPack`. The legacy name remains for wire and source compatibility.
 pub type PodPackage = PodSkillPack;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FederatedPodEventType {
+    PodCreated,
+    PodPublished,
+    PodSkillPackUpdated,
+    PodPackageImported,
+    PodPackageForked,
+    ContentItemPlaced,
+    PlacementTombstoned,
+    LegacyLinkRemoved,
+    LegacyLinkSubmitted,
+}
+
+impl FederatedPodEventType {
+    pub(crate) fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "pod_created" => Some(Self::PodCreated),
+            "pod_published" => Some(Self::PodPublished),
+            "pod_skill_pack_updated" => Some(Self::PodSkillPackUpdated),
+            "pod_package_imported" => Some(Self::PodPackageImported),
+            "pod_package_forked" => Some(Self::PodPackageForked),
+            "content_item_placed" => Some(Self::ContentItemPlaced),
+            "placement_tombstoned" => Some(Self::PlacementTombstoned),
+            "link_removed" => Some(Self::LegacyLinkRemoved),
+            "link_submitted" => Some(Self::LegacyLinkSubmitted),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn as_wire(self) -> &'static str {
+        match self {
+            Self::PodCreated => "pod_created",
+            Self::PodPublished => "pod_published",
+            Self::PodSkillPackUpdated => "pod_skill_pack_updated",
+            Self::PodPackageImported => "pod_package_imported",
+            Self::PodPackageForked => "pod_package_forked",
+            Self::ContentItemPlaced => "content_item_placed",
+            Self::PlacementTombstoned => "placement_tombstoned",
+            Self::LegacyLinkRemoved => "link_removed",
+            Self::LegacyLinkSubmitted => "link_submitted",
+        }
+    }
+
+    pub(crate) const fn is_federated(self) -> bool {
+        match self {
+            Self::PodCreated
+            | Self::PodPublished
+            | Self::PodSkillPackUpdated
+            | Self::PodPackageImported
+            | Self::PodPackageForked
+            | Self::ContentItemPlaced
+            | Self::PlacementTombstoned
+            | Self::LegacyLinkRemoved => true,
+            Self::LegacyLinkSubmitted => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventLog {
     pub event_id: Uuid,
@@ -1355,6 +1413,12 @@ pub struct PodPlacement {
     pub confidence: CandidateConfidence,
     /// Immutable Candidate Submissions supporting this association.
     pub source_submission_ids: Vec<CandidateSubmissionId>,
+    /// Origin placements visible when an explicit Add to Pod action preserved this item.
+    #[serde(default)]
+    pub origin_placements: Vec<AcceptedPlacementProjection>,
+    /// Later signed withdrawals affecting preserved origin placements.
+    #[serde(default)]
+    pub origin_withdrawals: Vec<PlacementTombstone>,
     /// Current authoritative lifecycle state.
     pub status: PodPlacementStatus,
     /// Path that produced the current state.
@@ -1493,6 +1557,28 @@ pub struct AcceptedPlacementProjection {
     pub origin_node_id: NodeIdentityId,
     /// Time at which the placement became accepted.
     pub accepted_at: DateTime<Utc>,
+}
+
+/// Signed withdrawal of one Origin Pod's previously accepted placement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct PlacementTombstone {
+    /// Reference-first content snapshot retained for required withdrawal audit.
+    pub content_reference: FeedContentReference,
+    /// Immutable placement evidence that existed before withdrawal.
+    pub origin_placement: AcceptedPlacementProjection,
+    /// Time at which approval committed the withdrawal.
+    pub withdrawn_at: DateTime<Utc>,
+}
+
+/// One private Save together with any signed origin withdrawals recorded for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SavedContentReference {
+    /// Locally retained reference-first content representation.
+    pub content_reference: FeedContentReference,
+    /// Signed origin withdrawals retained without cancelling the Save.
+    pub origin_withdrawals: Vec<PlacementTombstone>,
 }
 
 /// Result of evaluating all proposed placements for a Candidate.
