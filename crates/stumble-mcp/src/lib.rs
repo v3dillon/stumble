@@ -42,6 +42,8 @@ impl McpToolRouter {
             "create_private_pod_with_package",
             "join_pod",
             "submit_link_to_pod",
+            "submit_candidate",
+            "inspect_candidate",
             "add_source_to_pod",
             "materialize_discovery_tasks",
             "list_discovery_tasks",
@@ -127,6 +129,16 @@ impl McpToolRouter {
                     "pod_skill_read": skill_read_receipt(&skill_context),
                     "submission": submission
                 }))
+            }
+            "submit_candidate" => {
+                let request = serde_json::from_value(call.arguments)?;
+                Ok(json!(self.tools.submit_candidate(&self.ctx, request)?))
+            }
+            "inspect_candidate" => {
+                let candidate_id = arg_string(&call.arguments, "candidate_id")?.parse()?;
+                Ok(json!(self
+                    .tools
+                    .inspect_candidate(&self.ctx, candidate_id)?))
             }
             "add_source_to_pod" => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;

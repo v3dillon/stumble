@@ -53,6 +53,8 @@ pub struct InMemoryStore {
     pub agent_harnesses: HashMap<AgentHarnessId, AgentHarness>,
     pub harness_write_audit: Vec<HarnessWriteAudit>,
     pub discovery_tasks: HashMap<DiscoveryTaskId, DiscoveryTask>,
+    pub candidates: HashMap<CandidateId, Candidate>,
+    pub candidate_submissions: HashMap<CandidateSubmissionId, CandidateSubmission>,
     pub node_identities: HashMap<NodeIdentityId, NodeIdentity>,
     pub trusted_peers: HashMap<PeerId, TrustedPeer>,
     pub pods: HashMap<PodId, Pod>,
@@ -90,6 +92,10 @@ struct PersistedStore {
     harness_write_audit: Vec<HarnessWriteAudit>,
     #[serde(default)]
     discovery_tasks: Vec<DiscoveryTask>,
+    #[serde(default)]
+    candidates: Vec<Candidate>,
+    #[serde(default)]
+    candidate_submissions: Vec<CandidateSubmission>,
     node_identities: Vec<NodeIdentity>,
     trusted_peers: Vec<TrustedPeer>,
     pods: Vec<Pod>,
@@ -138,6 +144,8 @@ impl From<&InMemoryStore> for PersistedStore {
             agent_harnesses: store.agent_harnesses.values().cloned().collect(),
             harness_write_audit: store.harness_write_audit.clone(),
             discovery_tasks: store.discovery_tasks.values().cloned().collect(),
+            candidates: store.candidates.values().cloned().collect(),
+            candidate_submissions: store.candidate_submissions.values().cloned().collect(),
             node_identities: store.node_identities.values().cloned().collect(),
             trusted_peers: store.trusted_peers.values().cloned().collect(),
             pods: store.pods.values().cloned().collect(),
@@ -230,6 +238,16 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .discovery_tasks
                 .into_iter()
                 .map(|task| (task.id, task))
+                .collect(),
+            candidates: snapshot
+                .candidates
+                .into_iter()
+                .map(|candidate| (candidate.id, candidate))
+                .collect(),
+            candidate_submissions: snapshot
+                .candidate_submissions
+                .into_iter()
+                .map(|submission| (submission.id, submission))
                 .collect(),
             node_identities: snapshot
                 .node_identities
@@ -362,6 +380,8 @@ const STORE_COLLECTIONS: &[&str] = &[
     "agent_harnesses",
     "harness_write_audit",
     "discovery_tasks",
+    "candidates",
+    "candidate_submissions",
     "node_identities",
     "trusted_peers",
     "pods",

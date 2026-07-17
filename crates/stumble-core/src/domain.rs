@@ -10,6 +10,56 @@ pub type PodId = Uuid;
 pub type SubmissionId = Uuid;
 pub type PeerId = Uuid;
 pub type NodeIdentityId = Uuid;
+
+/// Stable local identity of a private [`Candidate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CandidateId(Uuid);
+
+impl From<Uuid> for CandidateId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl std::fmt::Display for CandidateId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::str::FromStr for CandidateId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse().map(Self)
+    }
+}
+
+/// Stable local identity of one provenance-bearing Candidate Submission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CandidateSubmissionId(Uuid);
+
+impl From<Uuid> for CandidateSubmissionId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl std::fmt::Display for CandidateSubmissionId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::str::FromStr for CandidateSubmissionId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse().map(Self)
+    }
+}
 /// Stable local identity of a [`DiscoveryTask`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -402,6 +452,7 @@ pub enum HarnessWriteOperation {
     CreatePod,
     JoinPod,
     SubmitLinkToPod,
+    SubmitCandidate,
     RemoveSubmissionFromPod,
     AddSubmissionAsset,
     GenerateBrief,
@@ -670,6 +721,220 @@ pub struct Submission {
     pub embedding: Option<Vec<f32>>,
     pub created_at: DateTime<Utc>,
     pub origin_event_id: Option<Uuid>,
+}
+
+/// Review lifecycle of a private Candidate before curation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CandidateReviewState {
+    /// No authoritative Pod Placement has been created.
+    Pending,
+}
+
+/// Coarse external media type supplied by an Agent Harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CandidateContentType {
+    Article,
+    Video,
+    Audio,
+    Image,
+    Podcast,
+    Repository,
+    Dataset,
+    Other,
+}
+
+/// Harness confidence retained as bounded evidence, never authority.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct CandidateConfidence(f32);
+
+impl CandidateConfidence {
+    /// Creates finite confidence evidence in the inclusive range `0.0..=1.0`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for non-finite or out-of-range values.
+    pub fn new(value: f32) -> Result<Self, CandidateConfidenceError> {
+        if value.is_finite() && (0.0..=1.0).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(CandidateConfidenceError(value))
+        }
+    }
+
+    /// Returns the wire-compatible confidence value.
+    #[must_use]
+    pub const fn value(self) -> f32 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for CandidateConfidence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::new(f32::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Error returned for invalid Candidate confidence evidence.
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+#[error("candidate confidence must be finite and between 0 and 1, got {0}")]
+pub struct CandidateConfidenceError(f32);
+
+/// Canonical private discovery identity shared by independent submissions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Candidate {
+    /// Stable local identity.
+    pub id: CandidateId,
+    /// Optional hosted tenant boundary.
+    pub tenant_id: Option<TenantId>,
+    /// Source URL exactly as first submitted.
+    pub source_url: String,
+    /// Stumble-normalized identity used for deduplication.
+    pub canonical_url: String,
+    /// Non-authoritative review lifecycle.
+    pub review_state: CandidateReviewState,
+    /// Time at which Stumble first encountered this canonical identity.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Source metadata known to the submitting Agent Harness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct CandidateSourceMetadata {
+    /// Known source title, when supplied.
+    pub title: Option<String>,
+    /// Known source author or publisher, when supplied.
+    pub author: Option<String>,
+    /// Known source publication time, when supplied.
+    pub published_at: Option<DateTime<Utc>>,
+}
+
+/// Inspectable evidence describing how an Agent Harness found a Candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct CandidateProvenance {
+    /// Time at which the harness discovered the source.
+    pub discovered_at: DateTime<Utc>,
+    /// Harness-defined method such as `browser_search` or `api_query`.
+    pub discovery_method: String,
+    /// Page or result from which the source was discovered, when applicable.
+    pub referrer_url: Option<String>,
+}
+
+/// Evidence proposing that a Candidate belongs in one authorized local Pod.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct ProposedCandidatePlacement {
+    /// Authorized local Pod proposed by the harness.
+    pub pod_id: PodId,
+    /// Evidence explaining why the Candidate belongs in this Pod.
+    pub reason: String,
+    /// Bounded harness confidence retained only as evidence.
+    pub confidence: CandidateConfidence,
+}
+
+/// Discovery Task and immutable Pod Package version used by a worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct CandidateTaskContext {
+    /// Claimed Discovery Task used for this submission.
+    pub task_id: DiscoveryTaskId,
+    /// Immutable Pod Package version used during discovery.
+    pub package_version: PackageVersion,
+}
+
+/// Complete provenance and placement evidence supplied by an Agent Harness.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct CandidateSubmissionEvidence {
+    /// External source reference proposed by the harness.
+    pub source_url: String,
+    /// Metadata already known without Stumble fetching the source.
+    pub source_metadata: CandidateSourceMetadata,
+    /// Excerpt that source policy permits Stumble to retain.
+    pub permitted_excerpt: Option<String>,
+    /// Harness-generated understanding of the source.
+    pub summary: Option<String>,
+    /// Coarse external media type.
+    pub content_type: CandidateContentType,
+    /// Harness-proposed descriptive tags.
+    pub tags: Vec<String>,
+    /// Evidence describing how the harness found the source.
+    pub provenance: CandidateProvenance,
+    /// One or more separately evidenced authorized local Pods.
+    pub proposed_placements: Vec<ProposedCandidatePlacement>,
+    /// Claimed task and Package version for task-driven discovery.
+    pub task_context: Option<CandidateTaskContext>,
+    /// Retry-safe key assigned by the executing harness workflow.
+    pub harness_idempotency_key: String,
+    /// Retry-safe key assigned by the harness's calling client.
+    pub client_idempotency_key: String,
+}
+
+/// Strict structured input through which an Agent Harness proposes a Candidate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CandidateSubmissionRequest {
+    /// Validated evidence serialized directly as the request object.
+    pub evidence: CandidateSubmissionEvidence,
+}
+
+/// Immutable private evidence retained for one Candidate Submission.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CandidateSubmission {
+    /// Stable identity of this evidence record.
+    pub id: CandidateSubmissionId,
+    /// Canonical private Candidate proposed by this record.
+    pub candidate_id: CandidateId,
+    /// Optional hosted tenant boundary.
+    pub tenant_id: Option<TenantId>,
+    /// Authenticated harness responsible for the submission.
+    pub submitted_by: AgentHarnessId,
+    /// Complete immutable evidence, flattened for wire compatibility.
+    #[serde(flatten)]
+    pub evidence: CandidateSubmissionEvidence,
+    /// Time at which Stumble committed this evidence.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Operation the authenticated harness may perform after receiving Candidate data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CandidateAllowedAction {
+    /// Inspect the canonical Candidate and all in-scope evidence.
+    InspectCandidate,
+    /// Submit another independently provenance-bearing evidence record.
+    SubmitCandidateEvidence,
+}
+
+/// Result of an idempotent Candidate Submission operation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubmittedCandidate {
+    /// Canonical private Candidate, reused on canonical deduplication.
+    pub candidate: Candidate,
+    /// New or idempotently reused evidence record.
+    pub submission: CandidateSubmission,
+    /// Permission-derived operations the harness can perform next.
+    pub allowed_actions: Vec<CandidateAllowedAction>,
+}
+
+/// Private Candidate plus every independent provenance-bearing submission.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CandidateInspection {
+    /// Canonical private Candidate and review state.
+    pub candidate: Candidate,
+    /// Independent submissions retained for this canonical identity.
+    pub submissions: Vec<CandidateSubmission>,
+    /// Permission-derived operations the harness can perform next.
+    pub allowed_actions: Vec<CandidateAllowedAction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

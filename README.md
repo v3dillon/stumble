@@ -239,3 +239,25 @@ MCP limitation: this MVP does not bind to a full third-party MCP transport crate
 Agent Harnesses with the `discovery_tasks` capability can materialize due Source Rules, list and claim tasks, renew leases, and complete or fail attempts through HTTP, MCP, or `podctl`. Each scheduled task is idempotent for its Pod, Source Rule, Pod Package version, and due period; manual work uses `create-discovery-task` and enters the same lease contract.
 
 For a local fallback, build `podctl`, export a scoped `STUMBLE_DISCOVERY_TOKEN`, then run `scripts/install-discovery-launchd.sh`. The installed adapter periodically runs `scripts/wake-discovery.sh` against the running Home Node HTTP API, so HTTP and MCP consumers see the same newly materialized work. It atomically writes a mode-`0600` structured `discovery_ready` event to `$STUMBLE_DATA_DIR/discovery-ready.json`. If `STUMBLE_DISCOVERY_HARNESS_COMMAND` names an executable, the adapter also invokes that executable with the event on standard input; otherwise a harness can watch the event inbox. The adapter only wakes a harness and never opens or controls a browser. The same wake script can be invoked from cron on non-macOS systems; unset `STUMBLE_API_URL` to use fresh local `podctl` processes instead.
+
+## Candidate Submissions
+
+External discovery enters through authenticated Candidate Submissions. Each JSON
+request includes the source URL and known metadata, permitted excerpt and
+summary, content type and tags, provenance, separate placement reasons and
+bounded confidence values, both harness and client idempotency keys, and—when
+task-driven—the claimed Discovery Task and pinned Pod Package version.
+
+```bash
+podctl --data-dir ~/.stumble/nodes/default --token "$STUMBLE_DISCOVERY_TOKEN" \
+  submit-candidate --from ./candidate.json
+podctl --data-dir ~/.stumble/nodes/default --token "$STUMBLE_DISCOVERY_TOKEN" \
+  inspect-candidate <candidate-uuid>
+```
+
+HTTP exposes `POST /candidates` and `GET /candidates/:id`; MCP exposes
+`submit_candidate` and `inspect_candidate`. Repeated canonical URLs share one
+private Candidate while retaining each independent submission and proposed
+placement as evidence. Candidate review remains pending: confidence never
+creates an authoritative Pod Placement, and Candidates never enter Pod event or
+federation exports.

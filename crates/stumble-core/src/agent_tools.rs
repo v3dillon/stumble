@@ -14,6 +14,7 @@ use crate::store::{
 };
 use chrono::{Duration, Utc};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -41,6 +42,16 @@ pub enum AgentToolsError {
     TaskTerminal,
     #[error("Discovery Task has no active lease owned by this harness")]
     TaskLeaseRequired,
+    #[error("candidate submission requires an authenticated Agent Harness")]
+    CandidateHarnessRequired,
+    #[error("unattended candidate submission requires a Discovery Task")]
+    CandidateTaskRequired,
+    #[error("candidate submission requires the submitting harness to own the active task lease")]
+    CandidateTaskLeaseRequired,
+    #[error("candidate submission Pod Package version does not match its Discovery Task")]
+    CandidatePackageVersionMismatch,
+    #[error("candidate submission idempotency key was reused with different input")]
+    CandidateIdempotencyConflict,
 }
 
 const MAX_DISCOVERY_TASK_ATTEMPTS: usize = 3;
@@ -1394,6 +1405,151 @@ impl AgentTools {
         );
         self.persist_locked(&mut store)?;
         Ok(submission)
+    }
+
+    /// Authenticates, validates, canonicalizes, and privately records external discovery evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when authorization, task ownership, input validation,
+    /// idempotency, canonicalization, persistence, or locking fails.
+    pub fn submit_candidate(
+        &self,
+        ctx: &AuthContext,
+        request: CandidateSubmissionRequest,
+    ) -> Result<SubmittedCandidate, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let harness_id = ctx
+            .harness_id
+            .ok_or(AgentToolsError::CandidateHarnessRequired)?;
+        let harness =
+            harness_for_context(&store, ctx)?.ok_or(AgentToolsError::CandidateHarnessRequired)?;
+        validate_candidate_submission(&store, ctx, &request)?;
+
+        if let Some(existing) = idempotent_candidate_submission(&store, harness_id, &request)? {
+            let candidate = store
+                .candidates
+                .get(&existing.candidate_id)
+                .cloned()
+                .ok_or_else(|| StoreError::NotFound("Candidate".into()))?;
+            return Ok(SubmittedCandidate {
+                candidate,
+                submission: existing,
+                allowed_actions: vec![CandidateAllowedAction::InspectCandidate],
+            });
+        }
+        validate_candidate_task_context(&store, ctx, harness, &request)?;
+
+        let canonical_url = canonicalize_url(&request.evidence.source_url)?;
+        let candidate = store
+            .candidates
+            .values()
+            .find(|candidate| {
+                candidate.tenant_id == ctx.tenant_id && candidate.canonical_url == canonical_url
+            })
+            .cloned()
+            .unwrap_or_else(|| Candidate {
+                id: stable_candidate_uuid(
+                    "candidate",
+                    &[
+                        &ctx.tenant_id
+                            .map_or_else(|| "local".into(), |id| id.to_string()),
+                        &canonical_url,
+                    ],
+                )
+                .into(),
+                tenant_id: ctx.tenant_id,
+                source_url: request.evidence.source_url.clone(),
+                canonical_url,
+                review_state: CandidateReviewState::Pending,
+                created_at: Utc::now(),
+            });
+        store.candidates.insert(candidate.id, candidate.clone());
+
+        let submission = CandidateSubmission {
+            id: stable_candidate_uuid(
+                "candidate-submission",
+                &[
+                    &harness_id.to_string(),
+                    &request.evidence.harness_idempotency_key,
+                    &request.evidence.client_idempotency_key,
+                ],
+            )
+            .into(),
+            candidate_id: candidate.id,
+            tenant_id: ctx.tenant_id,
+            submitted_by: harness_id,
+            evidence: request.evidence,
+            created_at: Utc::now(),
+        };
+        store
+            .candidate_submissions
+            .insert(submission.id, submission.clone());
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::SubmitCandidate,
+            None,
+        );
+        self.persist_locked(&mut store)?;
+        Ok(SubmittedCandidate {
+            candidate,
+            submission,
+            allowed_actions: vec![CandidateAllowedAction::InspectCandidate],
+        })
+    }
+
+    /// Inspects a private Candidate and all independently retained evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Candidate is missing, outside the caller's
+    /// tenant or Pod scope, or the Home Node lock is poisoned.
+    pub fn inspect_candidate(
+        &self,
+        ctx: &AuthContext,
+        candidate_id: CandidateId,
+    ) -> Result<CandidateInspection, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let candidate = store
+            .candidates
+            .get(&candidate_id)
+            .filter(|candidate| candidate.tenant_id == ctx.tenant_id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("Candidate".into()))?;
+        let mut submissions: Vec<_> = store
+            .candidate_submissions
+            .values()
+            .filter(|submission| submission.candidate_id == candidate_id)
+            .cloned()
+            .collect();
+        for submission in &submissions {
+            for placement in &submission.evidence.proposed_placements {
+                authorize_harness(
+                    &store,
+                    ctx,
+                    HarnessCapability::CandidateSubmission,
+                    Some(placement.pod_id),
+                )?;
+            }
+        }
+        submissions.sort_by_key(|submission| (submission.created_at, submission.id));
+        let allowed_actions = if harness_for_context(&store, ctx)?.is_some() {
+            vec![CandidateAllowedAction::SubmitCandidateEvidence]
+        } else {
+            Vec::new()
+        };
+        Ok(CandidateInspection {
+            candidate,
+            submissions,
+            allowed_actions,
+        })
     }
 
     /// Remove a submission's association with a pod. If no pod references the
@@ -3388,6 +3544,172 @@ fn authorize_harness(
         }
     }
     Ok(())
+}
+
+fn validate_candidate_submission(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    request: &CandidateSubmissionRequest,
+) -> Result<(), AgentToolsError> {
+    let evidence = &request.evidence;
+    if evidence.harness_idempotency_key.trim().is_empty()
+        || evidence.client_idempotency_key.trim().is_empty()
+    {
+        return Err(StoreError::Validation(
+            "Candidate Submission idempotency keys must not be empty".into(),
+        )
+        .into());
+    }
+    if evidence.provenance.discovery_method.trim().is_empty() {
+        return Err(StoreError::Validation(
+            "Candidate Submission discovery method must not be empty".into(),
+        )
+        .into());
+    }
+    if evidence.proposed_placements.is_empty() {
+        return Err(StoreError::Validation(
+            "Candidate Submission requires at least one proposed Pod Placement".into(),
+        )
+        .into());
+    }
+    canonicalize_url(&evidence.source_url)?;
+    if let Some(referrer_url) = &evidence.provenance.referrer_url {
+        canonicalize_url(referrer_url)?;
+    }
+
+    let mut pod_ids = HashSet::with_capacity(evidence.proposed_placements.len());
+    let local_node_id = store.node_for_tenant(ctx.tenant_id)?.id;
+    for placement in &evidence.proposed_placements {
+        if !pod_ids.insert(placement.pod_id) {
+            return Err(StoreError::Validation(
+                "Candidate Submission cannot propose the same Pod twice".into(),
+            )
+            .into());
+        }
+        if placement.reason.trim().is_empty() {
+            return Err(StoreError::Validation(
+                "Candidate Placement reason must not be empty".into(),
+            )
+            .into());
+        }
+        let pod = store
+            .pods
+            .get(&placement.pod_id)
+            .ok_or_else(|| StoreError::NotFound("Pod".into()))?;
+        store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+        if pod
+            .origin_node_id
+            .is_some_and(|origin_node_id| origin_node_id != local_node_id)
+        {
+            return Err(AgentToolsError::Forbidden {
+                reason: format!(
+                    "Candidate Submission cannot propose remote Pod {} as a local placement",
+                    placement.pod_id
+                ),
+            });
+        }
+        authorize_harness(
+            store,
+            ctx,
+            HarnessCapability::CandidateSubmission,
+            Some(placement.pod_id),
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_candidate_task_context(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    harness: &AgentHarness,
+    request: &CandidateSubmissionRequest,
+) -> Result<(), AgentToolsError> {
+    match request.evidence.task_context {
+        Some(task_context) => {
+            let task = store
+                .discovery_tasks
+                .get(&task_context.task_id)
+                .ok_or_else(|| StoreError::NotFound("Discovery Task".into()))?;
+            authorize_harness(
+                store,
+                ctx,
+                HarnessCapability::DiscoveryTasks,
+                Some(task.pod_id),
+            )?;
+            if task.package_version != task_context.package_version {
+                return Err(AgentToolsError::CandidatePackageVersionMismatch);
+            }
+            if !request
+                .evidence
+                .proposed_placements
+                .iter()
+                .any(|placement| placement.pod_id == task.pod_id)
+            {
+                return Err(StoreError::Validation(
+                    "task-driven Candidate Submission must propose its task Pod".into(),
+                )
+                .into());
+            }
+            if !matches!(
+                &task.state,
+                DiscoveryTaskState::Leased(lease)
+                    if lease.harness_id == harness.id && lease.expires_at > Utc::now()
+            ) {
+                return Err(AgentToolsError::CandidateTaskLeaseRequired);
+            }
+        }
+        None if harness.kind == AgentHarnessKind::Unattended => {
+            return Err(AgentToolsError::CandidateTaskRequired)
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+fn idempotent_candidate_submission(
+    store: &InMemoryStore,
+    harness_id: AgentHarnessId,
+    request: &CandidateSubmissionRequest,
+) -> Result<Option<CandidateSubmission>, AgentToolsError> {
+    let matching_key = store.candidate_submissions.values().find(|submission| {
+        submission.submitted_by == harness_id
+            && (submission.evidence.harness_idempotency_key
+                == request.evidence.harness_idempotency_key
+                || submission.evidence.client_idempotency_key
+                    == request.evidence.client_idempotency_key)
+    });
+    let Some(existing) = matching_key else {
+        return Ok(None);
+    };
+    if candidate_submission_matches_request(existing, request) {
+        Ok(Some(existing.clone()))
+    } else {
+        Err(AgentToolsError::CandidateIdempotencyConflict)
+    }
+}
+
+fn candidate_submission_matches_request(
+    submission: &CandidateSubmission,
+    request: &CandidateSubmissionRequest,
+) -> bool {
+    submission.evidence == request.evidence
+}
+
+fn stable_candidate_uuid(namespace: &str, parts: &[&str]) -> Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(namespace.len().to_be_bytes());
+    hasher.update(namespace.as_bytes());
+    for part in parts {
+        hasher.update(part.len().to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 fn authorized_discovery_task_mutation(

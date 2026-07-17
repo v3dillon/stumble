@@ -148,6 +148,8 @@ pub fn router_with_options(
         .route("/api-tokens/:id", delete(revoke_api_token))
         .route("/harnesses", post(register_agent_harness))
         .route("/harnesses/:id", delete(revoke_agent_harness))
+        .route("/candidates", post(submit_candidate))
+        .route("/candidates/:id", get(inspect_candidate))
         .route(
             "/discovery-tasks",
             get(list_discovery_tasks).post(materialize_discovery_tasks),
@@ -212,6 +214,16 @@ fn route_docs() -> Vec<ApiRouteDoc> {
             method: "POST",
             path: "/pods",
             description: "create a pod and default skill pack",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/candidates",
+            description: "submit an authenticated provenance-bearing Candidate",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/candidates/:id",
+            description: "inspect a private Candidate and its independent evidence",
         },
         ApiRouteDoc {
             method: "POST",
@@ -705,6 +717,24 @@ async fn fail_discovery_task(
         chrono::Utc::now(),
         request.reason,
     )?))
+}
+
+async fn submit_candidate(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<CandidateSubmissionRequest>,
+) -> Result<Json<SubmittedCandidate>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.submit_candidate(&ctx, request)?))
+}
+
+async fn inspect_candidate(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<CandidateId>,
+) -> Result<Json<CandidateInspection>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.inspect_candidate(&ctx, id)?))
 }
 
 async fn crawl_pod(

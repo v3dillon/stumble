@@ -60,6 +60,13 @@ enum Command {
         #[arg(long)]
         note: Option<String>,
     },
+    SubmitCandidate {
+        #[arg(long)]
+        from: PathBuf,
+    },
+    InspectCandidate {
+        id: CandidateId,
+    },
     AddSource {
         #[arg(long)]
         pod: String,
@@ -354,6 +361,15 @@ async fn main() -> anyhow::Result<()> {
                 },
             )?;
             print_json(&submission)?;
+        }
+        Command::SubmitCandidate { from } => {
+            let request = serde_json::from_str::<CandidateSubmissionRequest>(
+                &std::fs::read_to_string(from)?,
+            )?;
+            print_json(&tools.submit_candidate(&ctx, request)?)?;
+        }
+        Command::InspectCandidate { id } => {
+            print_json(&tools.inspect_candidate(&ctx, id)?)?;
         }
         Command::AddSource { pod, url } => {
             print_json(&tools.add_source_to_pod(&ctx, &pod, CrawlerSourceType::Rss, url)?)?;
