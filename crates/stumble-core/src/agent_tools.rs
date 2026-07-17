@@ -1,7 +1,8 @@
 use crate::domain::*;
 use crate::ranking::{rank_discovery, RankingInput};
 use crate::signing::{
-    hash_api_token, new_plaintext_api_token, sign_public_event, verify_event, SigningError,
+    hash_api_token, new_plaintext_api_token, sign_pod_announcement, sign_pod_endorsement,
+    sign_pod_explore_samples, sign_public_event, verify_event, SigningError,
 };
 use crate::skill_pack::{
     default_skill_pack, export_skill_pack, fork_skill_pack, import_skill_pack, patch_skill_pack,
@@ -23,7 +24,11 @@ use url::Url;
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AgentToolsError {
+    /// The Explore request's bounds are invalid.
+    #[error(transparent)]
+    ExploreRequest(#[from] ExploreRequestError),
     #[error(transparent)]
     CurationRationale(#[from] CurationRationaleError),
     #[error(transparent)]
@@ -1476,6 +1481,51 @@ impl AgentTools {
                             "trust_level": TrustLevel::ReadOnly,
                             "enabled": true,
                         }),
+                    }],
+                )
+            }
+            SensitiveChange::RemoveTrustedPeer { peer_id } => {
+                authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+                let peer = store
+                    .trusted_peers
+                    .get(peer_id)
+                    .ok_or_else(|| StoreError::NotFound(format!("trusted peer {peer_id}")))?;
+                store.assert_tenant(peer.tenant_id, ctx.tenant_id)?;
+                if !peer.enabled {
+                    return Err(
+                        StoreError::Validation("trusted peer is already disabled".into()).into(),
+                    );
+                }
+                let resource = ProposalResource::TrustedPeerUrl(peer.base_url.clone());
+                let mut disabled = peer.clone();
+                disabled.enabled = false;
+                (
+                    vec![resource.clone()],
+                    vec!["The peer can no longer exchange signed public discovery data with this Home Node.".into()],
+                    vec![ProposalResourceDiff {
+                        resource,
+                        before: json!(peer),
+                        after: json!(disabled),
+                    }],
+                )
+            }
+            SensitiveChange::ChangeTrustPolicy { change } => {
+                authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+                let current = store
+                    .trust_policies
+                    .get(&(proposer_user_id, proposer_tenant_id))
+                    .cloned()
+                    .unwrap_or_else(|| TrustPolicy::new(proposer_user_id, proposer_tenant_id));
+                let mut prospective = current.clone();
+                apply_trust_policy_change(&mut prospective, change)?;
+                let resource = ProposalResource::TrustPolicy(proposer_user_id);
+                (
+                    vec![resource.clone()],
+                    vec!["The Home Node's local public Pod discovery rules change.".into()],
+                    vec![ProposalResourceDiff {
+                        resource,
+                        before: json!(current),
+                        after: json!(prospective),
                     }],
                 )
             }
@@ -4485,6 +4535,70 @@ impl AgentTools {
         )
     }
 
+    /// Requests an independently approved local Trust Policy change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when proposal authorization, validation, or persistence fails.
+    pub fn request_trust_policy_change(
+        &self,
+        ctx: &AuthContext,
+        change: TrustPolicyChange,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PendingProposal, AgentToolsError> {
+        self.create_pending_proposal_from_request(
+            ctx,
+            CreatePendingProposalRequest {
+                requested_change: SensitiveChange::ChangeTrustPolicy { change },
+                expires_in_seconds: DEFAULT_PENDING_PROPOSAL_SECONDS,
+            },
+            now,
+        )
+    }
+
+    /// Requests independent approval to disable one trusted peer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when proposal authorization, validation, or persistence fails.
+    pub fn request_remove_trusted_peer(
+        &self,
+        ctx: &AuthContext,
+        peer_id: PeerId,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PendingProposal, AgentToolsError> {
+        self.create_pending_proposal_from_request(
+            ctx,
+            CreatePendingProposalRequest {
+                requested_change: SensitiveChange::RemoveTrustedPeer { peer_id },
+                expires_in_seconds: DEFAULT_PENDING_PROPOSAL_SECONDS,
+            },
+            now,
+        )
+    }
+
+    /// Returns the authenticated User's local public discovery Trust Policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Feed reads are denied, no User is authenticated,
+    /// or local state is unavailable.
+    pub fn trust_policy(&self, ctx: &AuthContext) -> Result<TrustPolicy, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::FeedRead, None)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Trust Policy requires an authenticated User".into())
+        })?;
+        Ok(store
+            .trust_policies
+            .get(&(user_id, ctx.tenant_id))
+            .cloned()
+            .unwrap_or_else(|| TrustPolicy::new(user_id, ctx.tenant_id)))
+    }
+
     pub fn well_known_node(
         &self,
         ctx: &AuthContext,
@@ -4541,6 +4655,735 @@ impl AgentTools {
             skill_pack_version: pack.version,
             public_source_summary,
         })
+    }
+
+    /// Produces a compact signed advertisement for a public Origin Pod.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Pod is not public or authoritative at this
+    /// node, the direct address is invalid, signing fails, or state is unavailable.
+    pub fn pod_announcement(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+        public_pod_url: &str,
+    ) -> Result<PodAnnouncement, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        authorize_harness_pod_scope(&store, ctx, pod.id)?;
+        if pod.visibility != Visibility::Public {
+            return Err(StoreError::NotFound(format!("public Pod {pod_slug}")).into());
+        }
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        if pod
+            .origin_node_id
+            .is_some_and(|origin_node_id| origin_node_id != node.id)
+        {
+            return Err(StoreError::Validation(
+                "only an Origin Node can announce its public Pod".into(),
+            )
+            .into());
+        }
+        let public_pod_url = validate_public_pod_url(public_pod_url, &pod.slug)?;
+        let package = store
+            .pod_skill_packs
+            .get(&pod.id)
+            .ok_or_else(|| StoreError::NotFound("Pod Package".into()))?;
+        sign_pod_announcement(
+            &node,
+            PodAnnouncement {
+                id: Uuid::now_v7(),
+                origin_node_id: node.id,
+                signer: NodeInfo {
+                    node_id: node.id,
+                    display_name: node.display_name.clone(),
+                    public_key: node.public_key.clone(),
+                    supported_protocol_version: "stumble/0.1".into(),
+                },
+                pod_slug: pod.slug.clone(),
+                pod_name: pod.name.clone(),
+                subject: pod.description.clone(),
+                public_pod_url,
+                package_version: PackageVersion::new(package.version)
+                    .map_err(|error| StoreError::Validation(error.to_string()))?,
+                latest_event_hash: store.latest_federated_event_hash(&pod.slug),
+                announced_at: Utc::now(),
+                signature: String::new(),
+            },
+        )
+        .map_err(Into::into)
+    }
+
+    /// Produces bounded Origin-signed Content Reference samples for Explore.
+    ///
+    /// The sample artifact is separate from Pod synchronization and does not
+    /// create or require a Subscription.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the announcement is invalid or stale, the Pod is
+    /// not locally authoritative and public, the limit exceeds ten, signing
+    /// fails, or state is unavailable.
+    pub fn pod_explore_samples(
+        &self,
+        ctx: &AuthContext,
+        announcement: &PodAnnouncement,
+        limit: usize,
+    ) -> Result<PodExploreSamples, AgentToolsError> {
+        if limit > 10 {
+            return Err(StoreError::Validation(
+                "Pod Explore sample limit must not exceed 10".into(),
+            )
+            .into());
+        }
+        if !announcement.verify()? {
+            return Err(StoreError::InvalidSignature.into());
+        }
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        if announcement.origin_node_id != node.id
+            || announcement.signer.public_key != node.public_key
+        {
+            return Err(StoreError::Validation(
+                "Explore samples must be produced by the Pod's Origin Node".into(),
+            )
+            .into());
+        }
+        let pod = store.pod_by_slug(&announcement.pod_slug, ctx.tenant_id)?;
+        authorize_harness_pod_scope(&store, ctx, pod.id)?;
+        if pod.visibility != Visibility::Public
+            || pod.origin_node_id.is_some_and(|origin| origin != node.id)
+        {
+            return Err(
+                StoreError::NotFound(format!("public Pod {}", announcement.pod_slug)).into(),
+            );
+        }
+        let package = store
+            .pod_skill_packs
+            .get(&pod.id)
+            .ok_or_else(|| StoreError::NotFound("Pod Package".into()))?;
+        let package_version = PackageVersion::new(package.version)
+            .map_err(|error| StoreError::Validation(error.to_string()))?;
+        if announcement.pod_name != pod.name
+            || announcement.subject != pod.description
+            || announcement.package_version != package_version
+            || announcement.latest_event_hash != store.latest_federated_event_hash(&pod.slug)
+        {
+            return Err(StoreError::Validation(
+                "Explore samples require the current Pod Announcement".into(),
+            )
+            .into());
+        }
+        let empty_policy = TrustPolicy::new(Uuid::nil(), ctx.tenant_id);
+        let samples = explore_content_samples(
+            &store,
+            ctx.tenant_id,
+            node.id,
+            announcement,
+            &empty_policy,
+            limit,
+        );
+        sign_pod_explore_samples(
+            &node,
+            PodExploreSamples {
+                id: Uuid::now_v7(),
+                announcement_id: announcement.id,
+                origin_node_id: node.id,
+                signer: announcement.signer.clone(),
+                pod_slug: announcement.pod_slug.clone(),
+                samples,
+                sampled_at: Utc::now(),
+                signature: String::new(),
+            },
+        )
+        .map_err(Into::into)
+    }
+
+    /// Lists peers explicitly enabled by this Home Node's local Trust Policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when administration is denied or state is unavailable.
+    pub fn trusted_peers(&self, ctx: &AuthContext) -> Result<Vec<TrustedPeer>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        let mut peers = store
+            .trusted_peers
+            .values()
+            .filter(|peer| peer.tenant_id == ctx.tenant_id && peer.enabled)
+            .cloned()
+            .collect::<Vec<_>>();
+        peers.sort_by(|left, right| left.base_url.cmp(&right.base_url));
+        Ok(peers)
+    }
+
+    /// Serves retained Origin-signed announcements to an explicitly trusted peer.
+    ///
+    /// The relay returns the Origin's bytes and signature unchanged, so it never
+    /// becomes authoritative for the advertised Pod.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when administration is denied, the requesting peer is
+    /// not trusted, retained signature verification fails, or state is unavailable.
+    pub fn relay_pod_announcements(
+        &self,
+        ctx: &AuthContext,
+        peer_id: PeerId,
+    ) -> Result<Vec<PodAnnouncement>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        let peer = store
+            .trusted_peers
+            .get(&peer_id)
+            .ok_or(StoreError::UntrustedPeer)?;
+        if peer.tenant_id != ctx.tenant_id || !peer.enabled {
+            return Err(StoreError::UntrustedPeer.into());
+        }
+        let mut announcements = Vec::with_capacity(store.known_pod_announcements.len());
+        for known in store.known_pod_announcements.values() {
+            if !known.announcement.verify()? {
+                return Err(StoreError::InvalidSignature.into());
+            }
+            announcements.push(known.announcement.clone());
+        }
+        announcements.sort_by(|left, right| {
+            left.origin_node_id
+                .cmp(&right.origin_node_id)
+                .then_with(|| left.pod_slug.cmp(&right.pod_slug))
+        });
+        Ok(announcements)
+    }
+
+    /// Verifies and retains an Origin-signed announcement delivered by a trusted peer.
+    ///
+    /// The immediate peer remains delivery provenance only and cannot replace the
+    /// announcement's signer or alter its authoritative fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an untrusted peer, invalid signature, stale package
+    /// version, malformed direct address, denied administration, or persistence failure.
+    pub fn receive_pod_announcement(
+        &self,
+        ctx: &AuthContext,
+        peer_id: PeerId,
+        announcement: PodAnnouncement,
+    ) -> Result<KnownPodAnnouncement, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        let peer = store
+            .trusted_peers
+            .get(&peer_id)
+            .ok_or(StoreError::UntrustedPeer)?;
+        if peer.tenant_id != ctx.tenant_id || !peer.enabled {
+            return Err(StoreError::UntrustedPeer.into());
+        }
+        let known =
+            retain_verified_pod_announcement(&mut store, announcement, Some(peer_id), None)?;
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::ReceivePodAnnouncement,
+            None,
+        );
+        self.persist_locked(&mut store)?;
+        Ok(known)
+    }
+
+    /// Aggregates a verified announcement on an optional, non-authoritative Index Node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the signature or direct address is invalid, the
+    /// announcement is stale, or persistence fails.
+    pub fn index_pod_announcement(
+        &self,
+        announcement: PodAnnouncement,
+    ) -> Result<KnownPodAnnouncement, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let known = retain_verified_pod_announcement(&mut store, announcement, None, None)?;
+        self.persist_locked(&mut store)?;
+        Ok(known)
+    }
+
+    /// Searches verified announcements held by this optional Index Node.
+    ///
+    /// Relevance reflects only the caller's query and never represents global
+    /// Pod quality, trust, or authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when local state is unavailable.
+    pub fn search_pod_announcements(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<PodAnnouncementSearchResponse, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let query = query.trim().to_lowercase();
+        let query_tokens = route_tokens(&query);
+        let mut results = store
+            .known_pod_announcements
+            .values()
+            .filter_map(|known| {
+                let searchable = format!(
+                    "{} {} {}",
+                    known.announcement.pod_slug,
+                    known.announcement.pod_name,
+                    known.announcement.subject
+                )
+                .to_lowercase();
+                let matched = query_tokens
+                    .iter()
+                    .filter(|token| searchable.contains(token.as_str()))
+                    .count();
+                if !query_tokens.is_empty() && matched == 0 {
+                    return None;
+                }
+                let relevance = if query_tokens.is_empty() {
+                    1.0
+                } else {
+                    let matched = u16::try_from(matched).unwrap_or(u16::MAX);
+                    let token_count = u16::try_from(query_tokens.len()).unwrap_or(u16::MAX);
+                    f32::from(matched) / f32::from(token_count)
+                };
+                Some(PodAnnouncementSearchResult {
+                    announcement: known.announcement.clone(),
+                    relevance,
+                    reasons: vec![if query_tokens.is_empty() {
+                        "Public Pod Announcement is available from this Index Node".into()
+                    } else {
+                        "Pod subject matches the explicit Explore query".into()
+                    }],
+                })
+            })
+            .collect::<Vec<_>>();
+        results.sort_by(|left, right| {
+            right
+                .relevance
+                .total_cmp(&left.relevance)
+                .then_with(|| left.announcement.pod_slug.cmp(&right.announcement.pod_slug))
+        });
+        results.truncate(limit.clamp(1, 50));
+        Ok(PodAnnouncementSearchResponse { query, results })
+    }
+
+    /// Accepts verified results fetched from one configured optional Index Node.
+    ///
+    /// The Index Node's relevance is discarded; Explore recomputes ordering
+    /// under the User's local Trust Policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Feed reads are denied, the Index Node is not in
+    /// the User's Trust Policy, any announcement is invalid, or persistence fails.
+    pub fn accept_index_search_results(
+        &self,
+        ctx: &AuthContext,
+        index_base_url: &str,
+        response: PodAnnouncementSearchResponse,
+    ) -> Result<usize, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::FeedRead, None)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Index Node results require an authenticated User".into())
+        })?;
+        let index_base_url = normalized_url(validate_hub_base_url(index_base_url, "base_url")?);
+        let policy = store
+            .trust_policies
+            .get(&(user_id, ctx.tenant_id))
+            .ok_or_else(|| StoreError::Validation("Index Node is not configured".into()))?;
+        if !policy
+            .index_nodes
+            .iter()
+            .any(|index| index.base_url == index_base_url)
+        {
+            return Err(StoreError::Validation("Index Node is not configured".into()).into());
+        }
+        let result_count = response.results.len();
+        let before_import = store.known_pod_announcements.clone();
+        for result in response.results {
+            if let Err(error) = retain_verified_pod_announcement(
+                &mut store,
+                result.announcement,
+                None,
+                Some(index_base_url.clone()),
+            ) {
+                store.known_pod_announcements = before_import;
+                return Err(error);
+            }
+        }
+        self.persist_locked(&mut store)?;
+        Ok(result_count)
+    }
+
+    /// Retains Origin-signed remote samples for a known current announcement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Feed reads are denied, the announcement is unknown
+    /// or stale, the Origin signature is invalid, the artifact exceeds ten
+    /// samples, or persistence fails.
+    pub fn accept_pod_explore_samples(
+        &self,
+        ctx: &AuthContext,
+        samples: PodExploreSamples,
+    ) -> Result<PodExploreSamples, AgentToolsError> {
+        if samples.samples.len() > 10 {
+            return Err(StoreError::Validation(
+                "Pod Explore sample artifact must not exceed 10 references".into(),
+            )
+            .into());
+        }
+        if !samples.verify()? {
+            return Err(StoreError::InvalidSignature.into());
+        }
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::FeedRead, None)?;
+        let known = store
+            .known_pod_announcements
+            .get(&(samples.origin_node_id, samples.pod_slug.clone()))
+            .ok_or_else(|| StoreError::NotFound("current Pod Announcement".into()))?;
+        if known.announcement.id != samples.announcement_id
+            || known.announcement.signer.public_key != samples.signer.public_key
+        {
+            return Err(StoreError::Validation(
+                "Explore samples do not match the current Pod Announcement".into(),
+            )
+            .into());
+        }
+        store
+            .pod_explore_sample_sets
+            .insert(samples.announcement_id, samples.clone());
+        self.persist_locked(&mut store)?;
+        Ok(samples)
+    }
+
+    /// Signs an optional recommendation from one locally curated public Pod.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when curation is denied, either Pod identity is invalid,
+    /// the reason is empty, signing fails, or persistence fails.
+    pub fn endorse_public_pod(
+        &self,
+        ctx: &AuthContext,
+        endorsing: &PodAnnouncement,
+        endorsed: &PodAnnouncement,
+        reason: String,
+    ) -> Result<PodEndorsement, AgentToolsError> {
+        if reason.trim().is_empty() {
+            return Err(
+                StoreError::Validation("Pod Endorsement reason must not be empty".into()).into(),
+            );
+        }
+        if !endorsing.verify()? || !endorsed.verify()? {
+            return Err(StoreError::InvalidSignature.into());
+        }
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let endorsing_pod = store
+            .pod_by_slug(&endorsing.pod_slug, ctx.tenant_id)?
+            .clone();
+        authorize_local_pod_curation(&store, ctx, endorsing_pod.id)?;
+        if endorsing_pod.visibility != Visibility::Public {
+            return Err(
+                StoreError::Validation("only a public Pod can endorse another Pod".into()).into(),
+            );
+        }
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        if endorsing_pod
+            .origin_node_id
+            .is_some_and(|origin_node_id| origin_node_id != node.id)
+        {
+            return Err(StoreError::Validation(
+                "only an Origin Node can sign its Pod Endorsement".into(),
+            )
+            .into());
+        }
+        if endorsing.origin_node_id != node.id || endorsing.pod_slug != endorsing_pod.slug {
+            return Err(StoreError::Validation(
+                "endorsing announcement does not identify the local public Pod".into(),
+            )
+            .into());
+        }
+        let endorsement = sign_pod_endorsement(
+            &node,
+            PodEndorsement {
+                id: Uuid::now_v7(),
+                endorsing_node_id: node.id,
+                signer: NodeInfo {
+                    node_id: node.id,
+                    display_name: node.display_name.clone(),
+                    public_key: node.public_key.clone(),
+                    supported_protocol_version: "stumble/0.1".into(),
+                },
+                endorsing_pod_slug: endorsing_pod.slug,
+                endorsing_announcement_id: endorsing.id,
+                endorsed_node_id: endorsed.origin_node_id,
+                endorsed_pod_slug: endorsed.pod_slug.clone(),
+                endorsed_announcement_id: endorsed.id,
+                reason: reason.trim().to_string(),
+                endorsed_at: Utc::now(),
+                signature: String::new(),
+            },
+        )?;
+        store
+            .pod_endorsements
+            .insert(endorsement.id, endorsement.clone());
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::EndorsePublicPod,
+            Some(endorsing_pod.id),
+        );
+        self.persist_locked(&mut store)?;
+        Ok(endorsement)
+    }
+
+    /// Aggregates a valid Pod Endorsement without treating it as authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the endorsement signature is invalid or persistence fails.
+    pub fn index_pod_endorsement(
+        &self,
+        endorsement: PodEndorsement,
+    ) -> Result<PodEndorsement, AgentToolsError> {
+        if !endorsement.verify()? {
+            return Err(StoreError::InvalidSignature.into());
+        }
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let endorsing_is_known = store
+            .known_pod_announcements
+            .get(&(
+                endorsement.endorsing_node_id,
+                endorsement.endorsing_pod_slug.clone(),
+            ))
+            .is_some_and(|known| {
+                known.announcement.id == endorsement.endorsing_announcement_id
+                    && known.announcement.signer.public_key == endorsement.signer.public_key
+            });
+        let endorsed_is_known = store
+            .known_pod_announcements
+            .get(&(
+                endorsement.endorsed_node_id,
+                endorsement.endorsed_pod_slug.clone(),
+            ))
+            .is_some_and(|known| known.announcement.id == endorsement.endorsed_announcement_id);
+        if !endorsing_is_known || !endorsed_is_known {
+            return Err(StoreError::Validation(
+                "Pod Endorsement must bind two known current Pod Announcements".into(),
+            )
+            .into());
+        }
+        if store
+            .pod_endorsements
+            .get(&endorsement.id)
+            .is_some_and(|existing| existing != &endorsement)
+        {
+            return Err(
+                StoreError::Duplicate(format!("Pod Endorsement {}", endorsement.id)).into(),
+            );
+        }
+        store
+            .pod_endorsements
+            .insert(endorsement.id, endorsement.clone());
+        self.persist_locked(&mut store)?;
+        Ok(endorsement)
+    }
+
+    /// Intentionally discovers public Pods under the User's local Trust Policy.
+    ///
+    /// Explore does not create Subscriptions. Endorsements contribute bounded,
+    /// inspectable local evidence and never become a universal quality score.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Feed reads are denied, no User is authenticated,
+    /// the request is out of range, or local state is unavailable.
+    pub fn explore_public_pods(
+        &self,
+        ctx: &AuthContext,
+        request: ExploreRequest,
+    ) -> Result<ExploreResponse, AgentToolsError> {
+        if !(1..=50).contains(&request.limit) || request.sample_size > 10 {
+            return Err(ExploreRequestError.into());
+        }
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::FeedRead, None)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Explore requires an authenticated User".into())
+        })?;
+        let policy = store
+            .trust_policies
+            .get(&(user_id, ctx.tenant_id))
+            .cloned()
+            .unwrap_or_else(|| TrustPolicy::new(user_id, ctx.tenant_id));
+        let local_node_id = store.node_for_tenant(ctx.tenant_id)?.id;
+        let query = request.query.trim().to_lowercase();
+        let query_tokens = route_tokens(&query);
+        let mut results = store
+            .known_pod_announcements
+            .values()
+            .filter_map(|known| {
+                let announcement = &known.announcement;
+                if known
+                    .received_from_index_url
+                    .as_ref()
+                    .is_some_and(|source| {
+                        !policy
+                            .index_nodes
+                            .iter()
+                            .any(|index| index.base_url == *source)
+                    })
+                {
+                    return None;
+                }
+                if trust_policy_blocks_announcement(&policy, announcement) {
+                    return None;
+                }
+                let searchable = format!(
+                    "{} {} {}",
+                    announcement.pod_slug, announcement.pod_name, announcement.subject
+                )
+                .to_lowercase();
+                let matched = query_tokens
+                    .iter()
+                    .filter(|token| searchable.contains(token.as_str()))
+                    .count();
+                if !query_tokens.is_empty() && matched == 0 {
+                    return None;
+                }
+                let mut endorsements = store
+                    .pod_endorsements
+                    .values()
+                    .filter(|endorsement| {
+                        endorsement.endorsed_node_id == announcement.origin_node_id
+                            && endorsement.endorsed_pod_slug == announcement.pod_slug
+                            && endorsement.endorsed_announcement_id == announcement.id
+                            && store
+                                .known_pod_announcements
+                                .get(&(
+                                    endorsement.endorsing_node_id,
+                                    endorsement.endorsing_pod_slug.clone(),
+                                ))
+                                .is_some_and(|known| {
+                                    known.announcement.id == endorsement.endorsing_announcement_id
+                                })
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                endorsements.sort_by(|left, right| {
+                    left.endorsing_pod_slug
+                        .cmp(&right.endorsing_pod_slug)
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+                let matched = u16::try_from(matched).unwrap_or(u16::MAX);
+                let token_count = u16::try_from(query_tokens.len()).unwrap_or(u16::MAX);
+                let mut relevance = if token_count == 0 {
+                    1.0
+                } else {
+                    f32::from(matched) / f32::from(token_count)
+                };
+                let endorsement_count = u16::try_from(endorsements.len().min(5)).unwrap_or(5);
+                relevance += f32::from(endorsement_count) * 0.1;
+                let mut reasons = vec![if query_tokens.is_empty() {
+                    "Public Pod is available through the configured Stumble Substrate".into()
+                } else {
+                    "Pod subject matches the explicit Explore query".into()
+                }];
+                if !endorsements.is_empty() {
+                    reasons.push(format!(
+                        "{} optional Pod Endorsement(s) used as local ranking evidence",
+                        endorsements.len()
+                    ));
+                }
+                let samples = store
+                    .pod_explore_sample_sets
+                    .get(&announcement.id)
+                    .map(|sample_set| {
+                        sample_set
+                            .samples
+                            .iter()
+                            .filter(|sample| {
+                                !trust_policy_blocks_content_reference(&policy, sample)
+                            })
+                            .take(request.sample_size)
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_else(|| {
+                        explore_content_samples(
+                            &store,
+                            ctx.tenant_id,
+                            local_node_id,
+                            announcement,
+                            &policy,
+                            request.sample_size,
+                        )
+                    });
+                let is_subscribed = store.subscriptions.values().any(|subscription| {
+                    subscription.user_id == user_id
+                        && subscription.tenant_id == ctx.tenant_id
+                        && subscription.origin_node_id == announcement.origin_node_id
+                        && subscription.pod_slug == announcement.pod_slug
+                });
+                Some(ExplorePodResult {
+                    announcement: announcement.clone(),
+                    relevance,
+                    reasons,
+                    endorsements,
+                    sample_content_references: samples,
+                    is_subscribed,
+                })
+            })
+            .collect::<Vec<_>>();
+        results.sort_by(|left, right| {
+            right
+                .relevance
+                .total_cmp(&left.relevance)
+                .then_with(|| left.announcement.pod_slug.cmp(&right.announcement.pod_slug))
+        });
+        results.truncate(request.limit);
+        Ok(ExploreResponse { query, results })
     }
 
     pub fn register_hub_node(
@@ -5716,6 +6559,83 @@ fn validate_hub_base_url(value: &str, field: &str) -> Result<Url, AgentToolsErro
     Ok(url)
 }
 
+fn apply_trust_policy_change(
+    policy: &mut TrustPolicy,
+    change: &TrustPolicyChange,
+) -> Result<(), AgentToolsError> {
+    match change {
+        TrustPolicyChange::AddIndexNode { label, base_url } => {
+            let label = label.trim();
+            if label.is_empty() {
+                return Err(
+                    StoreError::Validation("Index Node label must not be empty".into()).into(),
+                );
+            }
+            let base_url = normalized_url(validate_hub_base_url(base_url, "base_url")?);
+            if !policy
+                .index_nodes
+                .iter()
+                .any(|node| node.base_url == base_url)
+            {
+                policy.index_nodes.push(IndexNode {
+                    label: label.to_string(),
+                    base_url,
+                });
+                policy
+                    .index_nodes
+                    .sort_by(|left, right| left.base_url.cmp(&right.base_url));
+            }
+        }
+        TrustPolicyChange::RemoveIndexNode { base_url } => {
+            let base_url = normalized_url(validate_hub_base_url(base_url, "base_url")?);
+            let original_len = policy.index_nodes.len();
+            policy
+                .index_nodes
+                .retain(|index| index.base_url != base_url);
+            if policy.index_nodes.len() == original_len {
+                return Err(StoreError::NotFound(format!("Index Node {base_url}")).into());
+            }
+        }
+        TrustPolicyChange::BlockPod {
+            origin_node_id,
+            pod_slug,
+        } => {
+            let pod_slug = pod_slug.trim().to_lowercase();
+            if pod_slug.is_empty() {
+                return Err(
+                    StoreError::Validation("blocked Pod slug must not be empty".into()).into(),
+                );
+            }
+            policy
+                .blocked_pods
+                .insert(BlockedPod::new(*origin_node_id, pod_slug));
+        }
+        TrustPolicyChange::BlockNode { node_id } => {
+            policy.blocked_nodes.insert(*node_id);
+        }
+        TrustPolicyChange::BlockSource { source } => {
+            insert_normalized_policy_term(&mut policy.blocked_sources, source, "blocked source")?;
+        }
+        TrustPolicyChange::BlockTopic { topic } => {
+            insert_normalized_policy_term(&mut policy.blocked_topics, topic, "blocked topic")?;
+        }
+    }
+    Ok(())
+}
+
+fn insert_normalized_policy_term(
+    values: &mut std::collections::BTreeSet<String>,
+    value: &str,
+    field: &str,
+) -> Result<(), AgentToolsError> {
+    let value = value.trim().to_lowercase();
+    if value.is_empty() {
+        return Err(StoreError::Validation(format!("{field} must not be empty")).into());
+    }
+    values.insert(value);
+    Ok(())
+}
+
 fn validate_hub_endpoint_url(
     value: &str,
     field: &str,
@@ -6788,6 +7708,127 @@ fn feed_content_reference(item: &Submission) -> FeedContentReference {
     }
 }
 
+fn trust_policy_blocks_announcement(policy: &TrustPolicy, announcement: &PodAnnouncement) -> bool {
+    policy.blocked_nodes.contains(&announcement.origin_node_id)
+        || policy.blocked_pods.iter().any(|blocked| {
+            blocked.origin_node_id == announcement.origin_node_id
+                && blocked
+                    .pod_slug
+                    .eq_ignore_ascii_case(&announcement.pod_slug)
+        })
+        || policy.blocked_topics.iter().any(|topic| {
+            announcement.subject.to_lowercase().contains(topic)
+                || announcement.pod_name.to_lowercase().contains(topic)
+                || announcement.pod_slug.to_lowercase().contains(topic)
+        })
+}
+
+fn trust_policy_blocks_content_reference(
+    policy: &TrustPolicy,
+    reference: &FeedContentReference,
+) -> bool {
+    policy
+        .blocked_sources
+        .iter()
+        .any(|source| source.eq_ignore_ascii_case(&reference.source))
+        || policy.blocked_topics.iter().any(|topic| {
+            reference
+                .tags
+                .iter()
+                .any(|tag| tag.eq_ignore_ascii_case(topic))
+                || reference.title.to_lowercase().contains(topic)
+                || reference
+                    .summary
+                    .as_ref()
+                    .is_some_and(|summary| summary.to_lowercase().contains(topic))
+        })
+}
+
+fn retain_verified_pod_announcement(
+    store: &mut InMemoryStore,
+    announcement: PodAnnouncement,
+    received_from_peer_id: Option<PeerId>,
+    received_from_index_url: Option<String>,
+) -> Result<KnownPodAnnouncement, AgentToolsError> {
+    if !announcement.verify()? {
+        return Err(StoreError::InvalidSignature.into());
+    }
+    validate_public_pod_url(&announcement.public_pod_url, &announcement.pod_slug)?;
+    let key = (announcement.origin_node_id, announcement.pod_slug.clone());
+    if store
+        .known_pod_announcements
+        .get(&key)
+        .is_some_and(|known| {
+            known.announcement.package_version > announcement.package_version
+                || (known.announcement.package_version == announcement.package_version
+                    && known.announcement.announced_at > announcement.announced_at)
+        })
+    {
+        return Err(StoreError::Validation("Pod Announcement is stale".into()).into());
+    }
+    let known = KnownPodAnnouncement {
+        announcement,
+        received_from_peer_id,
+        received_from_index_url,
+        received_at: Utc::now(),
+    };
+    store.known_pod_announcements.insert(key, known.clone());
+    Ok(known)
+}
+
+fn explore_content_samples(
+    store: &InMemoryStore,
+    tenant_id: Option<TenantId>,
+    local_node_id: NodeIdentityId,
+    announcement: &PodAnnouncement,
+    policy: &TrustPolicy,
+    sample_size: usize,
+) -> Vec<FeedContentReference> {
+    let Some(pod) = store.pods.values().find(|pod| {
+        pod.tenant_id == tenant_id
+            && pod.visibility == Visibility::Public
+            && pod.slug == announcement.pod_slug
+            && pod.origin_node_id.unwrap_or(local_node_id) == announcement.origin_node_id
+    }) else {
+        return Vec::new();
+    };
+    let mut samples = store
+        .submissions
+        .values()
+        .filter(|item| item.tenant_id == tenant_id)
+        .filter(|item| {
+            store
+                .accepted_placement_projections
+                .contains_key(&(ContentItemId::from(item.id), pod.id))
+        })
+        .filter(|item| {
+            !policy
+                .blocked_sources
+                .iter()
+                .any(|source| source.eq_ignore_ascii_case(&item.domain))
+                && !policy.blocked_topics.iter().any(|topic| {
+                    item.tags.iter().any(|tag| tag.eq_ignore_ascii_case(topic))
+                        || item.title.to_lowercase().contains(topic)
+                        || item
+                            .summary
+                            .as_ref()
+                            .is_some_and(|summary| summary.to_lowercase().contains(topic))
+                })
+        })
+        .collect::<Vec<_>>();
+    samples.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| left.canonical_url.cmp(&right.canonical_url))
+    });
+    samples
+        .into_iter()
+        .take(sample_size)
+        .map(feed_content_reference)
+        .collect()
+}
+
 fn origin_placement_identity(
     placement: &AcceptedPlacementProjection,
 ) -> (ContentItemId, PodId, NodeIdentityId, chrono::DateTime<Utc>) {
@@ -7323,7 +8364,8 @@ fn approval_scope_allows(harness: &AgentHarness, proposal: &PendingProposal) -> 
                 .is_none_or(|pod_ids| pod_ids.contains(pod_id)),
             ProposalResource::PodSlug(_)
             | ProposalResource::AgentHarness(_)
-            | ProposalResource::TrustedPeerUrl(_) => harness.grant.pod_ids.is_none(),
+            | ProposalResource::TrustedPeerUrl(_)
+            | ProposalResource::TrustPolicy(_) => harness.grant.pod_ids.is_none(),
         })
 }
 
@@ -7367,6 +8409,11 @@ fn validate_structured_diff(
                 .values()
                 .find(|peer| peer.tenant_id == proposal.tenant_id && peer.base_url == *base_url)
                 .map_or(serde_json::Value::Null, |peer| json!(peer)),
+            ProposalResource::TrustPolicy(user_id) => json!(store
+                .trust_policies
+                .get(&(*user_id, proposal.tenant_id))
+                .cloned()
+                .unwrap_or_else(|| TrustPolicy::new(*user_id, proposal.tenant_id))),
             ProposalResource::PodPackage(pod_id) => store
                 .pod_skill_packs
                 .get(pod_id)
@@ -7545,6 +8592,36 @@ fn apply_sensitive_change(
                 created_at: Utc::now(),
             };
             store.trusted_peers.insert(peer.id, peer);
+        }
+        SensitiveChange::RemoveTrustedPeer { peer_id } => {
+            let peer = store
+                .trusted_peers
+                .get_mut(peer_id)
+                .ok_or_else(|| StoreError::NotFound(format!("trusted peer {peer_id}")))?;
+            if peer.tenant_id != ctx.tenant_id {
+                return Err(StoreError::TenantBoundary.into());
+            }
+            if !peer.enabled {
+                return Err(
+                    StoreError::Validation("trusted peer is already disabled".into()).into(),
+                );
+            }
+            peer.enabled = false;
+        }
+        SensitiveChange::ChangeTrustPolicy { change } => {
+            let user_id = store
+                .agent_harnesses
+                .get(&proposer)
+                .map(|harness| harness.user_id)
+                .ok_or_else(|| StoreError::NotFound(format!("Agent Harness {proposer}")))?;
+            let key = (user_id, ctx.tenant_id);
+            let mut policy = store
+                .trust_policies
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| TrustPolicy::new(user_id, ctx.tenant_id));
+            apply_trust_policy_change(&mut policy, change)?;
+            store.trust_policies.insert(key, policy);
         }
         SensitiveChange::RevisePublicPodPackage {
             pod_id,

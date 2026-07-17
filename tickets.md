@@ -185,20 +185,20 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 ## Discover Pods through the Stumble Substrate
 
-**Status:** ready-for-agent
+**Status:** complete
 
 **What to build:** Let Users discover public Pods through direct addresses, signed Pod Announcements, optional Index Nodes, endorsements, and local Trust Policies without introducing a mandatory central registry.
 
 **Blocked by:** Subscribe and synchronize across two nodes.
 
-- [ ] Public Origin Nodes produce compact signed Pod Announcements without exporting full Pod content.
-- [ ] Trusted peers can exchange and relay announcements without becoming authoritative.
-- [ ] Optional Index Nodes aggregate announcements and expose replaceable search results.
-- [ ] Direct Pod URLs continue to work when Index Nodes are absent.
-- [ ] Users can configure trusted peers and Index Nodes and locally block Pods, nodes, sources, and topics.
-- [ ] Signatures prove origin without assigning a global quality score.
-- [ ] Pod Endorsements are optional local ranking evidence rather than universal reputation.
-- [ ] Explore can return public Pods and sample Content References beyond current Subscriptions.
+- [x] Public Origin Nodes produce compact signed Pod Announcements without exporting full Pod content.
+- [x] Trusted peers can exchange and relay announcements without becoming authoritative.
+- [x] Optional Index Nodes aggregate announcements and expose replaceable search results.
+- [x] Direct Pod URLs continue to work when Index Nodes are absent.
+- [x] Users can configure trusted peers and Index Nodes and locally block Pods, nodes, sources, and topics.
+- [x] Signatures prove origin without assigning a global quality score.
+- [x] Pod Endorsements are optional local ranking evidence rather than universal reputation.
+- [x] Explore can return public Pods and sample Content References beyond current Subscriptions.
 
 ## Complete the constrained Feed Mix
 

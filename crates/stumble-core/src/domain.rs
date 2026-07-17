@@ -327,6 +327,117 @@ pub enum TrustLevel {
     ReadWrite,
 }
 
+/// One public Pod identity excluded by a User's local Trust Policy.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct BlockedPod {
+    /// Origin whose Pod is excluded.
+    pub origin_node_id: NodeIdentityId,
+    /// Origin-local public Pod slug.
+    pub pod_slug: String,
+}
+
+impl BlockedPod {
+    /// Creates one local public Pod exclusion.
+    #[must_use]
+    pub fn new(origin_node_id: NodeIdentityId, pod_slug: impl Into<String>) -> Self {
+        Self {
+            origin_node_id,
+            pod_slug: pod_slug.into(),
+        }
+    }
+}
+
+/// Replaceable optional Index Node selected by a User.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct IndexNode {
+    /// Human-readable local label.
+    pub label: String,
+    /// Base address used for outbound announcement search.
+    pub base_url: String,
+}
+
+/// User-controlled local rules governing public Pod discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct TrustPolicy {
+    /// User whose discovery behavior this policy controls.
+    pub user_id: UserId,
+    /// Optional hosted tenant boundary.
+    pub tenant_id: Option<TenantId>,
+    /// Optional and replaceable announcement indexes.
+    pub index_nodes: Vec<IndexNode>,
+    /// Public Pods excluded from Explore.
+    pub blocked_pods: std::collections::BTreeSet<BlockedPod>,
+    /// Origin Nodes excluded from Explore.
+    pub blocked_nodes: std::collections::BTreeSet<NodeIdentityId>,
+    /// Content sources excluded from Explore samples.
+    pub blocked_sources: std::collections::BTreeSet<String>,
+    /// Topics excluded from Pod subjects and Explore samples.
+    pub blocked_topics: std::collections::BTreeSet<String>,
+}
+
+impl TrustPolicy {
+    /// Creates an empty local Trust Policy for one User.
+    #[must_use]
+    pub const fn new(user_id: UserId, tenant_id: Option<TenantId>) -> Self {
+        Self {
+            user_id,
+            tenant_id,
+            index_nodes: Vec::new(),
+            blocked_pods: std::collections::BTreeSet::new(),
+            blocked_nodes: std::collections::BTreeSet::new(),
+            blocked_sources: std::collections::BTreeSet::new(),
+            blocked_topics: std::collections::BTreeSet::new(),
+        }
+    }
+}
+
+/// Sensitive local Trust Policy edit requiring independent approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TrustPolicyChange {
+    /// Add a replaceable Index Node used for outbound discovery queries.
+    AddIndexNode {
+        /// Local operator label.
+        label: String,
+        /// HTTPS base address, with loopback HTTP allowed for local operation.
+        base_url: String,
+    },
+    /// Remove one Index Node and stop considering results received only from it.
+    RemoveIndexNode {
+        /// Configured Index Node base address.
+        base_url: String,
+    },
+    /// Exclude one public Pod from local discovery.
+    BlockPod {
+        /// Origin hosting the excluded Pod.
+        origin_node_id: NodeIdentityId,
+        /// Origin-local Pod slug.
+        pod_slug: String,
+    },
+    /// Exclude every announcement from one Origin Node.
+    BlockNode {
+        /// Excluded Origin identity.
+        node_id: NodeIdentityId,
+    },
+    /// Exclude Content Reference samples from one source domain.
+    BlockSource {
+        /// Case-insensitive source domain.
+        source: String,
+    },
+    /// Exclude matching Pod subjects and Content Reference samples.
+    BlockTopic {
+        /// Case-insensitive topic phrase.
+        topic: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiscoveryMode {
@@ -786,6 +897,16 @@ pub enum SensitiveChange {
         base_url: String,
         public_key: String,
     },
+    /// Disable a peer in the local Trust Policy while retaining its audit state.
+    RemoveTrustedPeer {
+        /// Locally configured peer identity.
+        peer_id: PeerId,
+    },
+    /// Change public Pod discovery rules local to one User.
+    ChangeTrustPolicy {
+        /// Validated local policy edit.
+        change: TrustPolicyChange,
+    },
     /// Apply a validated Package Revision to a public Pod.
     RevisePublicPodPackage {
         pod_id: PodId,
@@ -870,6 +991,8 @@ pub enum ProposalResource {
     PodSlug(String),
     AgentHarness(AgentHarnessId),
     TrustedPeerUrl(String),
+    /// Local discovery rules owned by one User.
+    TrustPolicy(UserId),
     PodPackage(PodId),
     PodCurationPolicy(PodId),
     SubmissionPlacement {
@@ -951,6 +1074,10 @@ pub enum HarnessWriteOperation {
     CreateTenant,
     CreateDevToken,
     AddTrustedPeer,
+    /// Retain a verified announcement delivered by a trusted peer.
+    ReceivePodAnnouncement,
+    /// Publish a signed optional recommendation from a public Pod.
+    EndorsePublicPod,
     ImportPodEvents,
     IndexPublicPods,
     CreatePod,
@@ -2203,7 +2330,7 @@ pub struct DiscoveryItem {
     pub submission_id: SubmissionId,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeInfo {
     pub node_id: NodeIdentityId,
     pub display_name: String,
@@ -2217,6 +2344,207 @@ pub struct PodManifest {
     pub latest_known_event_hash: Option<String>,
     pub skill_pack_version: i32,
     pub public_source_summary: Vec<String>,
+}
+
+/// Compact signed advertisement for one public Pod on the Stumble Substrate.
+///
+/// Announcements identify where authoritative artifacts can be fetched without
+/// carrying the Pod Package, Pod Events, or Content Items themselves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct PodAnnouncement {
+    /// Stable identity of this signed advertisement.
+    pub id: Uuid,
+    /// Authoritative Origin Node.
+    pub origin_node_id: NodeIdentityId,
+    /// Origin identity and verification key.
+    pub signer: NodeInfo,
+    /// Public Pod identity at the Origin Node.
+    pub pod_slug: String,
+    /// Human-readable Pod name.
+    pub pod_name: String,
+    /// Compact subject description used for discovery.
+    pub subject: String,
+    /// Canonical direct address, independent of any Index Node.
+    pub public_pod_url: String,
+    /// Current signed Pod Package version.
+    pub package_version: PackageVersion,
+    /// Latest authoritative Pod Event pointer.
+    pub latest_event_hash: Option<String>,
+    /// Time at which the Origin Node signed this advertisement.
+    pub announced_at: DateTime<Utc>,
+    /// Ed25519 signature over every preceding field.
+    pub signature: String,
+}
+
+/// Locally retained verified announcement and its immediate delivery provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct KnownPodAnnouncement {
+    /// Origin-authored signed advertisement, unchanged by relays.
+    pub announcement: PodAnnouncement,
+    /// Trusted peer that delivered it, absent when indexed directly.
+    pub received_from_peer_id: Option<PeerId>,
+    /// Configured Index Node that returned it, absent for peer/direct indexing.
+    #[serde(default)]
+    pub received_from_index_url: Option<String>,
+    /// Time at which this node verified and retained it.
+    pub received_at: DateTime<Utc>,
+}
+
+/// One query match returned by a replaceable Index Node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct PodAnnouncementSearchResult {
+    /// Verified origin-authored announcement.
+    pub announcement: PodAnnouncement,
+    /// Query relevance computed by this Index Node, not a quality score.
+    pub relevance: f32,
+    /// Inspectable local reasons for the query match.
+    pub reasons: Vec<String>,
+}
+
+/// Non-authoritative Pod Announcement search response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct PodAnnouncementSearchResponse {
+    /// Normalized query used by this Index Node.
+    pub query: String,
+    /// Replaceable results backed by verified signed announcements.
+    pub results: Vec<PodAnnouncementSearchResult>,
+}
+
+/// Signed recommendation of one public Pod by another public Pod.
+///
+/// An endorsement is portable evidence only. Each Home Node decides whether
+/// and how much it affects local discovery ordering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct PodEndorsement {
+    /// Stable signed endorsement identity.
+    pub id: Uuid,
+    /// Origin Node of the endorsing Pod.
+    pub endorsing_node_id: NodeIdentityId,
+    /// Identity and key verifying the endorsement.
+    pub signer: NodeInfo,
+    /// Public Pod making the recommendation.
+    pub endorsing_pod_slug: String,
+    /// Exact signed announcement establishing the endorsing public Pod.
+    pub endorsing_announcement_id: Uuid,
+    /// Origin Node of the recommended Pod.
+    pub endorsed_node_id: NodeIdentityId,
+    /// Recommended public Pod slug.
+    pub endorsed_pod_slug: String,
+    /// Exact signed announcement considered by the endorser.
+    pub endorsed_announcement_id: Uuid,
+    /// Human-inspectable reason supplied by the curator.
+    pub reason: String,
+    /// Time at which the recommendation was signed.
+    pub endorsed_at: DateTime<Utc>,
+    /// Ed25519 signature over every preceding field.
+    pub signature: String,
+}
+
+/// Origin-signed permitted Content Reference samples for one announcement.
+///
+/// This bounded Explore artifact is separate from the compact announcement and
+/// does not synchronize the Pod or create a Subscription.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct PodExploreSamples {
+    /// Stable signed sample artifact identity.
+    pub id: Uuid,
+    /// Exact current announcement these samples describe.
+    pub announcement_id: Uuid,
+    /// Authoritative Origin Node.
+    pub origin_node_id: NodeIdentityId,
+    /// Origin identity and verification key.
+    pub signer: NodeInfo,
+    /// Public Pod identity at the Origin Node.
+    pub pod_slug: String,
+    /// Bounded reference-first public samples.
+    pub samples: Vec<FeedContentReference>,
+    /// Time at which the Origin Node selected the samples.
+    pub sampled_at: DateTime<Utc>,
+    /// Ed25519 signature over every preceding field.
+    pub signature: String,
+}
+
+/// Bounded request for intentional public Pod discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ExploreRequest {
+    /// Explicit subject query; an empty query returns the available public set.
+    pub query: String,
+    /// Maximum public Pods to return.
+    pub limit: usize,
+    /// Maximum permitted Content References sampled from each locally known Pod.
+    pub sample_size: usize,
+}
+
+impl ExploreRequest {
+    /// Creates a bounded Explore request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless `limit` is `1..=50` and `sample_size` is `0..=10`.
+    pub fn new(
+        query: impl Into<String>,
+        limit: usize,
+        sample_size: usize,
+    ) -> Result<Self, ExploreRequestError> {
+        if !(1..=50).contains(&limit) || sample_size > 10 {
+            return Err(ExploreRequestError);
+        }
+        Ok(Self {
+            query: query.into(),
+            limit,
+            sample_size,
+        })
+    }
+}
+
+/// Error returned for an out-of-range Explore request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("Explore limit must be 1 to 50 and sample size must be at most 10")]
+#[non_exhaustive]
+pub struct ExploreRequestError;
+
+/// One public Pod returned through intentional Explore.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ExplorePodResult {
+    /// Verified public Pod advertisement.
+    pub announcement: PodAnnouncement,
+    /// Query and local-evidence relevance, never universal reputation.
+    pub relevance: f32,
+    /// Inspectable reasons for this Home Node's ordering.
+    pub reasons: Vec<String>,
+    /// Optional signed evidence considered locally.
+    pub endorsements: Vec<PodEndorsement>,
+    /// Permitted local samples, filtered by the User's Trust Policy.
+    pub sample_content_references: Vec<FeedContentReference>,
+    /// Whether the User already has a Subscription to this public Pod.
+    pub is_subscribed: bool,
+}
+
+/// Structured response from intentional public Pod discovery.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ExploreResponse {
+    /// Normalized explicit query.
+    pub query: String,
+    /// Locally filtered, non-authoritative public Pod results.
+    pub results: Vec<ExplorePodResult>,
 }
 
 /// Signed public artifacts exported by an Origin Node for one Pod.

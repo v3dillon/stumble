@@ -64,6 +64,10 @@ pub struct InMemoryStore {
     pub(crate) federated_content_item_ids: HashMap<FederatedContentItemKey, ContentItemId>,
     pub node_identities: HashMap<NodeIdentityId, NodeIdentity>,
     pub trusted_peers: HashMap<PeerId, TrustedPeer>,
+    pub known_pod_announcements: HashMap<(NodeIdentityId, String), KnownPodAnnouncement>,
+    pub trust_policies: HashMap<(UserId, Option<TenantId>), TrustPolicy>,
+    pub pod_endorsements: HashMap<Uuid, PodEndorsement>,
+    pub pod_explore_sample_sets: HashMap<Uuid, PodExploreSamples>,
     pub subscriptions: HashMap<SubscriptionId, Subscription>,
     pub pods: HashMap<PodId, Pod>,
     pub pod_memberships: Vec<PodMembership>,
@@ -120,6 +124,14 @@ struct PersistedStore {
     federated_content_item_ids: Vec<PersistedFederatedContentItemId>,
     node_identities: Vec<NodeIdentity>,
     trusted_peers: Vec<TrustedPeer>,
+    #[serde(default)]
+    known_pod_announcements: Vec<KnownPodAnnouncement>,
+    #[serde(default)]
+    trust_policies: Vec<TrustPolicy>,
+    #[serde(default)]
+    pod_endorsements: Vec<PodEndorsement>,
+    #[serde(default)]
+    pod_explore_sample_sets: Vec<PodExploreSamples>,
     #[serde(default)]
     subscriptions: Vec<Subscription>,
     pods: Vec<Pod>,
@@ -240,6 +252,10 @@ impl From<&InMemoryStore> for PersistedStore {
                 .collect(),
             node_identities: store.node_identities.values().cloned().collect(),
             trusted_peers: store.trusted_peers.values().cloned().collect(),
+            known_pod_announcements: store.known_pod_announcements.values().cloned().collect(),
+            trust_policies: store.trust_policies.values().cloned().collect(),
+            pod_endorsements: store.pod_endorsements.values().cloned().collect(),
+            pod_explore_sample_sets: store.pod_explore_sample_sets.values().cloned().collect(),
             subscriptions: store.subscriptions.values().cloned().collect(),
             pods: store.pods.values().cloned().collect(),
             pod_memberships: store.pod_memberships.clone(),
@@ -389,6 +405,34 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .into_iter()
                 .map(|peer| (peer.id, peer))
                 .collect(),
+            known_pod_announcements: snapshot
+                .known_pod_announcements
+                .into_iter()
+                .map(|known| {
+                    (
+                        (
+                            known.announcement.origin_node_id,
+                            known.announcement.pod_slug.clone(),
+                        ),
+                        known,
+                    )
+                })
+                .collect(),
+            trust_policies: snapshot
+                .trust_policies
+                .into_iter()
+                .map(|policy| ((policy.user_id, policy.tenant_id), policy))
+                .collect(),
+            pod_endorsements: snapshot
+                .pod_endorsements
+                .into_iter()
+                .map(|endorsement| (endorsement.id, endorsement))
+                .collect(),
+            pod_explore_sample_sets: snapshot
+                .pod_explore_sample_sets
+                .into_iter()
+                .map(|samples| (samples.announcement_id, samples))
+                .collect(),
             subscriptions: snapshot
                 .subscriptions
                 .into_iter()
@@ -531,6 +575,10 @@ const STORE_COLLECTIONS: &[&str] = &[
     "federated_content_item_ids",
     "node_identities",
     "trusted_peers",
+    "known_pod_announcements",
+    "trust_policies",
+    "pod_endorsements",
+    "pod_explore_sample_sets",
     "subscriptions",
     "pods",
     "pod_memberships",
@@ -787,9 +835,25 @@ fn record_key(
         "pod_memberships" => &["user_id", "pod_id"],
         "submission_pods" => &["submission_id", "pod_id"],
         "user_preferences" => &["user_id", "tenant_id"],
+        "trust_policies" => &["user_id", "tenant_id"],
         "saves" | "private_notes" | "reading_history" => &["user_id", "submission_id"],
         "hub_pods" => &["node_id", "pod_slug"],
         "hub_nodes" => &["node_id"],
+        "known_pod_announcements" => {
+            let announcement = value
+                .get("announcement")
+                .unwrap_or(&serde_json::Value::Null);
+            return Ok(serde_json::to_string(&[
+                announcement
+                    .get("origin_node_id")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                announcement
+                    .get("pod_slug")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            ])?);
+        }
         "pod_rules" | "pod_skill_packs" => &["pod_id"],
         "pod_curation_policies" => &["pod_id"],
         "pod_placements" => &["candidate_id", "pod_id"],

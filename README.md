@@ -193,6 +193,8 @@ curl -X POST http://localhost:8787/federation/sync/peer_default_hosted
 
 ## Custom Discovery Hub Examples
 
+The canonical signed announcement, trusted-peer, replaceable Index Node, local Trust Policy, Pod Endorsement, and intentional Explore contracts are documented in [`docs/discovery.md`](docs/discovery.md). Direct Pod URLs remain authoritative and do not depend on the legacy custom-hub endpoints below.
+
 The discovery hub indexes public node and pod metadata so a user's home node can find public pods that match explicit interests. It does not export private preferences, saved links, notes, reading history, or private briefs.
 
 ```bash
