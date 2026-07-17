@@ -113,6 +113,7 @@ pub fn seed_store() -> InMemoryStore {
                 created_at: Utc::now(),
                 last_used_at: None,
                 revoked_at: None,
+                harness_id: None,
             },
         );
     }
@@ -181,6 +182,7 @@ mod tests {
             user_id: store.users.keys().next().copied(),
             tenant_id: None,
             node_id: store.default_node().unwrap().id,
+            harness_id: None,
         }
     }
 
@@ -1287,6 +1289,7 @@ mod tests {
             user_id: Some(token.user_id),
             tenant_id: Some(tenant.id),
             node_id: Uuid::now_v7(),
+            harness_id: None,
         };
         let pod = tools
             .create_pod(
@@ -1303,6 +1306,7 @@ mod tests {
             user_id: None,
             tenant_id: None,
             node_id: Uuid::now_v7(),
+            harness_id: None,
         };
         assert!(tools.get_skill_pack(&local_ctx, &pod.slug).is_err());
     }

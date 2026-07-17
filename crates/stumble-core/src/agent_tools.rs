@@ -32,6 +32,8 @@ pub enum AgentToolsError {
     LockPoisoned,
     #[error("bad url: {0}")]
     BadUrl(String),
+    #[error("harness authorization denied: {reason}")]
+    Forbidden { reason: String },
 }
 
 #[derive(Clone)]
@@ -106,6 +108,7 @@ impl AgentTools {
             user_id: None,
             tenant_id: node.tenant_id,
             node_id: node.id,
+            harness_id: None,
         })
     }
 
@@ -141,6 +144,27 @@ impl AgentTools {
             .collect())
     }
 
+    /// Lists only Pods visible within the caller's optional Harness Grant scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Home Node store lock is poisoned.
+    pub fn list_pods_for_harness(&self, ctx: &AuthContext) -> Result<Vec<Pod>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let scoped_pod_ids =
+            harness_for_context(&store, ctx)?.and_then(|harness| harness.grant.pod_ids.as_ref());
+        Ok(store
+            .pods
+            .values()
+            .filter(|pod| pod.tenant_id == ctx.tenant_id || pod.tenant_id.is_none())
+            .filter(|pod| scoped_pod_ids.is_none_or(|pod_ids| pod_ids.contains(&pod.id)))
+            .cloned()
+            .collect())
+    }
+
     /// Pods that are safe to expose on the unauthenticated federation surface.
     /// Only `Public` pods are returned; private and invite-only pods are withheld.
     pub fn list_public_pods(&self, ctx: &AuthContext) -> Result<Vec<Pod>, AgentToolsError> {
@@ -148,6 +172,7 @@ impl AgentTools {
             .store
             .read()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
+        harness_for_context(&store, ctx)?;
         let node = store.node_for_tenant(ctx.tenant_id)?;
         Ok(store
             .pods
@@ -243,10 +268,16 @@ impl AgentTools {
             .read()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let text = route_text(&request);
+        let harness = harness_for_context(&store, ctx)?;
         let mut candidates = store
             .pods
             .values()
             .filter(|pod| pod.tenant_id == ctx.tenant_id || pod.tenant_id.is_none())
+            .filter(|pod| {
+                harness
+                    .and_then(|harness| harness.grant.pod_ids.as_ref())
+                    .is_none_or(|pod_ids| pod_ids.contains(&pod.id))
+            })
             .map(|pod| {
                 score_pod_route(
                     pod,
@@ -292,10 +323,35 @@ impl AgentTools {
     }
 
     pub fn create_tenant(&self, request: CreateTenantRequest) -> Result<Tenant, AgentToolsError> {
+        self.create_tenant_inner(None, request)
+    }
+
+    /// Creates a tenant on behalf of an authorized administrative harness.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when administration is denied, the slug is duplicated,
+    /// the store lock is poisoned, signing fails, or persistence fails.
+    pub fn create_tenant_as(
+        &self,
+        ctx: &AuthContext,
+        request: CreateTenantRequest,
+    ) -> Result<Tenant, AgentToolsError> {
+        self.create_tenant_inner(Some(ctx), request)
+    }
+
+    fn create_tenant_inner(
+        &self,
+        ctx: Option<&AuthContext>,
+        request: CreateTenantRequest,
+    ) -> Result<Tenant, AgentToolsError> {
         let mut store = self
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
+        if let Some(ctx) = ctx {
+            authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        }
         if store
             .tenants
             .values()
@@ -315,6 +371,9 @@ impl AgentTools {
             Some(tenant.id),
         );
         store.node_identities.insert(node.id, node);
+        if let Some(ctx) = ctx {
+            record_harness_write(&mut store, ctx, HarnessWriteOperation::CreateTenant, None);
+        }
         self.persist_locked(&mut store)?;
         Ok(tenant)
     }
@@ -323,10 +382,35 @@ impl AgentTools {
         &self,
         request: DevTokenRequest,
     ) -> Result<DevTokenResponse, AgentToolsError> {
+        self.create_dev_token_inner(None, request)
+    }
+
+    /// Creates a legacy development token under administration authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when administration is denied, the tenant is missing,
+    /// the store lock is poisoned, or persistence fails.
+    pub fn create_dev_token_as(
+        &self,
+        ctx: &AuthContext,
+        request: DevTokenRequest,
+    ) -> Result<DevTokenResponse, AgentToolsError> {
+        self.create_dev_token_inner(Some(ctx), request)
+    }
+
+    fn create_dev_token_inner(
+        &self,
+        ctx: Option<&AuthContext>,
+        request: DevTokenRequest,
+    ) -> Result<DevTokenResponse, AgentToolsError> {
         let mut store = self
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
+        if let Some(ctx) = ctx {
+            authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        }
         let tenant_id = request
             .tenant_slug
             .as_deref()
@@ -354,6 +438,19 @@ impl AgentTools {
         }
         let token = new_plaintext_api_token();
         let token_hash = hash_api_token(&token);
+        let harness = AgentHarness {
+            id: AgentHarnessId::from(Uuid::now_v7()),
+            user_id,
+            tenant_id,
+            label: request.label.clone(),
+            kind: AgentHarnessKind::Interactive,
+            grant: HarnessGrant {
+                capabilities: vec![],
+                pod_ids: None,
+            },
+            created_at: Utc::now(),
+            revoked_at: None,
+        };
         let api_token = ApiToken {
             id: Uuid::now_v7(),
             user_id,
@@ -363,8 +460,13 @@ impl AgentTools {
             created_at: Utc::now(),
             last_used_at: None,
             revoked_at: None,
+            harness_id: Some(harness.id),
         };
+        store.agent_harnesses.insert(harness.id, harness);
         store.api_tokens.insert(api_token.id, api_token);
+        if let Some(ctx) = ctx {
+            record_harness_write(&mut store, ctx, HarnessWriteOperation::CreateDevToken, None);
+        }
         self.persist_locked(&mut store)?;
         Ok(DevTokenResponse {
             token,
@@ -380,11 +482,19 @@ impl AgentTools {
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let hash = hash_api_token(token);
-        let Some((token_id, user_id, tenant_id)) = store
+        let Some((token_id, user_id, tenant_id, harness_id)) = store
             .api_tokens
             .iter()
             .find(|(_, token)| token.token_hash == hash && token.revoked_at.is_none())
-            .map(|(id, token)| (*id, token.user_id, token.tenant_id))
+            .filter(|(_, token)| {
+                token.harness_id.is_none_or(|harness_id| {
+                    store
+                        .agent_harnesses
+                        .get(&harness_id)
+                        .is_some_and(|harness| harness.revoked_at.is_none())
+                })
+            })
+            .map(|(id, token)| (*id, token.user_id, token.tenant_id, token.harness_id))
         else {
             return Ok(None);
         };
@@ -399,7 +509,186 @@ impl AgentTools {
             user_id: Some(user_id),
             tenant_id,
             node_id: node.id,
+            harness_id,
         }))
+    }
+
+    /// Registers a harness and returns its bearer token exactly once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the caller lacks administration authority, a Pod
+    /// scope is invalid, no User exists, or persistence fails.
+    pub fn register_agent_harness(
+        &self,
+        ctx: &AuthContext,
+        request: RegisterAgentHarnessRequest,
+    ) -> Result<RegisterAgentHarnessResponse, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        if request.label.trim().is_empty() {
+            return Err(StoreError::Validation(
+                "Agent Harness label must not be empty".to_string(),
+            )
+            .into());
+        }
+        let user_id = ctx
+            .user_id
+            .or_else(|| store.users.keys().next().copied())
+            .ok_or_else(|| {
+                StoreError::Validation("an Agent Harness must belong to a User".to_string())
+            })?;
+        for pod_id in request.pod_ids.iter().flatten() {
+            let pod = store
+                .pods
+                .get(pod_id)
+                .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+            store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+        }
+        let capabilities = normalize_capabilities(request.capabilities);
+        if request.kind == AgentHarnessKind::Unattended
+            && capabilities.contains(&HarnessCapability::Administration)
+        {
+            return Err(AgentToolsError::Forbidden {
+                reason: "unattended harnesses cannot receive administration".to_string(),
+            });
+        }
+        if let Some(caller) = harness_for_context(&store, ctx)? {
+            if request.kind == AgentHarnessKind::Interactive
+                || capabilities.contains(&HarnessCapability::Administration)
+            {
+                return Err(AgentToolsError::Forbidden {
+                    reason: "a harness cannot delegate interactive or administration authority"
+                        .to_string(),
+                });
+            }
+            if capabilities
+                .iter()
+                .any(|capability| !caller.grant.capabilities.contains(capability))
+            {
+                return Err(AgentToolsError::Forbidden {
+                    reason: "a harness cannot delegate capabilities it does not hold".to_string(),
+                });
+            }
+            ensure_child_pod_scope(&caller.grant.pod_ids, &request.pod_ids)?;
+        }
+        let harness = AgentHarness {
+            id: AgentHarnessId::from(Uuid::now_v7()),
+            user_id,
+            tenant_id: ctx.tenant_id,
+            label: request.label,
+            kind: request.kind,
+            grant: HarnessGrant {
+                capabilities,
+                pod_ids: request.pod_ids.map(normalize_pod_ids),
+            },
+            created_at: Utc::now(),
+            revoked_at: None,
+        };
+        let token = new_plaintext_api_token();
+        let api_token = ApiToken {
+            id: Uuid::now_v7(),
+            user_id,
+            tenant_id: ctx.tenant_id,
+            token_hash: hash_api_token(&token),
+            label: format!("Harness: {}", harness.label),
+            created_at: Utc::now(),
+            last_used_at: None,
+            revoked_at: None,
+            harness_id: Some(harness.id),
+        };
+        store.agent_harnesses.insert(harness.id, harness.clone());
+        store.api_tokens.insert(api_token.id, api_token);
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::RegisterAgentHarness,
+            None,
+        );
+        self.persist_locked(&mut store)?;
+        Ok(RegisterAgentHarnessResponse {
+            harness,
+            token: HarnessToken::new(token),
+        })
+    }
+
+    /// Revokes a harness and all of its bearer tokens immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the caller lacks administration authority, the
+    /// harness does not exist, or persistence fails.
+    pub fn revoke_agent_harness(
+        &self,
+        ctx: &AuthContext,
+        harness_id: AgentHarnessId,
+    ) -> Result<(), AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        let now = Utc::now();
+        let harness = store
+            .agent_harnesses
+            .get_mut(&harness_id)
+            .ok_or_else(|| StoreError::NotFound(format!("agent harness {harness_id}")))?;
+        harness.revoked_at = Some(now);
+        for token in store
+            .api_tokens
+            .values_mut()
+            .filter(|token| token.harness_id == Some(harness_id))
+        {
+            token.revoked_at = Some(now);
+        }
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::RevokeAgentHarness,
+            None,
+        );
+        self.persist_locked(&mut store)?;
+        Ok(())
+    }
+
+    /// Returns local-only harness write attribution records.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the caller lacks administration authority or the
+    /// Home Node store lock is poisoned.
+    pub fn list_harness_write_audit(
+        &self,
+        ctx: &AuthContext,
+    ) -> Result<Vec<HarnessWriteAudit>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        Ok(store.harness_write_audit.clone())
+    }
+
+    /// Verifies a non-Pod-specific capability for the current harness context.
+    /// Local non-harness contexts remain unrestricted for compatibility.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the harness is revoked, mismatched, or lacks the
+    /// requested capability, or when the store lock is poisoned.
+    pub fn require_harness_capability(
+        &self,
+        ctx: &AuthContext,
+        capability: HarnessCapability,
+    ) -> Result<(), AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, capability, None)
     }
 
     pub fn create_pod(
@@ -411,6 +700,7 @@ impl AgentTools {
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness_for_new_pod(&store, ctx, HarnessCapability::PodCuration)?;
         if store
             .pods
             .values()
@@ -460,6 +750,12 @@ impl AgentTools {
             store.latest_event_hash(&pod.slug),
         )?;
         store.event_log.push(event);
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::CreatePod,
+            Some(pod.id),
+        );
         self.persist_locked(&mut store)?;
         Ok(pod)
     }
@@ -471,6 +767,12 @@ impl AgentTools {
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
         store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+        authorize_harness(
+            &store,
+            ctx,
+            HarnessCapability::SubscriptionManagement,
+            Some(pod.id),
+        )?;
         let Some(user_id) = ctx.user_id else {
             return Ok(());
         };
@@ -485,6 +787,12 @@ impl AgentTools {
                 role: PodRole::Member,
                 created_at: Utc::now(),
             });
+            record_harness_write(
+                &mut store,
+                ctx,
+                HarnessWriteOperation::JoinPod,
+                Some(pod.id),
+            );
             self.persist_locked(&mut store)?;
         }
         Ok(())
@@ -502,6 +810,12 @@ impl AgentTools {
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
         store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+        authorize_harness(
+            &store,
+            ctx,
+            HarnessCapability::CandidateSubmission,
+            Some(pod.id),
+        )?;
         let canonical_url = canonicalize_url(&request.url)?;
         let domain = Url::parse(&canonical_url)
             .map_err(|e| AgentToolsError::BadUrl(e.to_string()))?
@@ -557,6 +871,12 @@ impl AgentTools {
             store.latest_event_hash(&pod.slug),
         )?;
         store.event_log.push(event);
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::SubmitLinkToPod,
+            Some(pod.id),
+        );
         self.persist_locked(&mut store)?;
         Ok(submission)
     }
@@ -578,6 +898,7 @@ impl AgentTools {
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
         store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+        authorize_harness(&store, ctx, HarnessCapability::PodCuration, Some(pod.id))?;
 
         let before = store.submission_pods.len();
         store
@@ -618,6 +939,12 @@ impl AgentTools {
             store.latest_event_hash(&pod.slug),
         )?;
         store.event_log.push(event);
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::RemoveSubmissionFromPod,
+            Some(pod.id),
+        );
         self.persist_locked(&mut store)?;
         Ok(purged)
     }
@@ -637,6 +964,28 @@ impl AgentTools {
             .get(&submission_id)
             .ok_or_else(|| StoreError::NotFound("submission".to_string()))?;
         store.assert_tenant(submission.tenant_id, ctx.tenant_id)?;
+        for pod_id in store
+            .submission_pods
+            .iter()
+            .filter(|placement| placement.submission_id == submission_id)
+            .map(|placement| placement.pod_id)
+        {
+            authorize_harness_pod_scope(&store, ctx, pod_id)?;
+        }
+        let pod_ids = store
+            .submission_pods
+            .iter()
+            .filter(|placement| placement.submission_id == submission_id)
+            .map(|placement| placement.pod_id)
+            .collect::<Vec<_>>();
+        for pod_id in &pod_ids {
+            authorize_harness(
+                &store,
+                ctx,
+                HarnessCapability::CandidateSubmission,
+                Some(*pod_id),
+            )?;
+        }
         if request.url.is_none() && request.local_path.is_none() {
             return Err(StoreError::Validation(
                 "representative image requires url or local_path".to_string(),
@@ -665,6 +1014,12 @@ impl AgentTools {
             created_at: Utc::now(),
         };
         store.submission_assets.insert(asset.id, asset.clone());
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::AddSubmissionAsset,
+            None,
+        );
         self.persist_locked(&mut store)?;
         Ok(asset)
     }
@@ -683,6 +1038,7 @@ impl AgentTools {
             .get(&submission_id)
             .ok_or_else(|| StoreError::NotFound("submission".to_string()))?;
         store.assert_tenant(submission.tenant_id, ctx.tenant_id)?;
+        authorize_harness_submission_scope(&store, ctx, submission_id)?;
         Ok(store
             .submission_assets
             .values()
@@ -703,12 +1059,13 @@ impl AgentTools {
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
         store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+        authorize_harness(&store, ctx, HarnessCapability::FeedRead, Some(pod.id))?;
         let pack = store
             .pod_skill_packs
             .get(&pod.id)
             .ok_or_else(|| StoreError::NotFound("skill pack".to_string()))?;
         let submissions = store.submissions_for_pod(pod.id);
-        let user_id = request.user_id.or(ctx.user_id);
+        let user_id = effective_user_id(ctx, request.user_id);
         let preferences = user_id.and_then(|id| store.user_preferences.get(&(id, ctx.tenant_id)));
         let feedback = store
             .feedback_events
@@ -729,12 +1086,47 @@ impl AgentTools {
         }))
     }
 
+    /// Lists private briefs visible to the caller's User and Harness Grant.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Feed reads are denied, a brief falls outside the
+    /// harness Pod scope, or the store lock is poisoned.
+    pub fn list_briefs_for_harness(
+        &self,
+        ctx: &AuthContext,
+    ) -> Result<Vec<Brief>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::FeedRead, None)?;
+        let is_harness = ctx.harness_id.is_some();
+        let mut briefs = Vec::new();
+        'briefs: for brief in store
+            .briefs
+            .values()
+            .filter(|brief| brief.tenant_id == ctx.tenant_id)
+            .filter(|brief| !is_harness || brief.user_id == ctx.user_id)
+        {
+            for item in &brief.items {
+                match authorize_harness_submission_scope(&store, ctx, item.submission_id) {
+                    Ok(()) => {}
+                    Err(AgentToolsError::Forbidden { .. }) => continue 'briefs,
+                    Err(error) => return Err(error),
+                }
+            }
+            briefs.push(brief.clone());
+        }
+        Ok(briefs)
+    }
+
     pub fn generate_brief(
         &self,
         ctx: &AuthContext,
         request: GenerateBriefRequest,
     ) -> Result<Brief, AgentToolsError> {
-        let user_id = request.user_id.or(ctx.user_id);
+        let user_id = effective_user_id(ctx, request.user_id);
         let query = request
             .query
             .clone()
@@ -793,6 +1185,7 @@ impl AgentTools {
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         store.briefs.insert(brief.id, brief.clone());
+        record_harness_write(&mut store, ctx, HarnessWriteOperation::GenerateBrief, None);
         self.persist_locked(&mut store)?;
         Ok(brief)
     }
@@ -848,6 +1241,7 @@ impl AgentTools {
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
         store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+        authorize_harness_pod_scope(&store, ctx, pod.id)?;
         store
             .pod_skill_packs
             .get(&pod.id)
@@ -866,6 +1260,7 @@ impl AgentTools {
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
         store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+        authorize_harness_pod_scope(&store, ctx, pod.id)?;
         let pack = store
             .pod_skill_packs
             .get(&pod.id)
@@ -897,6 +1292,12 @@ impl AgentTools {
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        authorize_harness(
+            &store,
+            ctx,
+            HarnessCapability::PackageManagement,
+            Some(pod.id),
+        )?;
         let existing = store
             .pod_skill_packs
             .get(&pod.id)
@@ -913,6 +1314,12 @@ impl AgentTools {
         )?;
         store.pod_skill_packs.insert(pod.id, pack.clone());
         store.event_log.push(event);
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::PatchSkillPack,
+            Some(pod.id),
+        );
         self.persist_locked(&mut store)?;
         Ok(pack)
     }
@@ -927,6 +1334,7 @@ impl AgentTools {
             .read()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        authorize_harness_pod_scope(&store, ctx, pod.id)?;
         let pack = store
             .pod_skill_packs
             .get(&pod.id)
@@ -952,6 +1360,12 @@ impl AgentTools {
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        authorize_harness(
+            &store,
+            ctx,
+            HarnessCapability::PackageManagement,
+            Some(pod.id),
+        )?;
         let existing = store
             .pod_skill_packs
             .get(&pod.id)
@@ -963,6 +1377,12 @@ impl AgentTools {
             return Err(StoreError::Validation(report.errors.join(", ")).into());
         }
         store.pod_skill_packs.insert(pod.id, pack.clone());
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::ImportSkillPack,
+            Some(pod.id),
+        );
         self.persist_locked(&mut store)?;
         Ok(pack)
     }
@@ -981,6 +1401,12 @@ impl AgentTools {
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         store.pod_skill_packs.insert(target_pod.id, forked.clone());
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::ForkSkillPack,
+            Some(target_pod.id),
+        );
         self.persist_locked(&mut store)?;
         Ok(forked)
     }
@@ -1006,6 +1432,7 @@ impl AgentTools {
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        authorize_harness(&store, ctx, HarnessCapability::DiscoveryTasks, Some(pod.id))?;
         let source = CrawlerSource {
             id: Uuid::now_v7(),
             tenant_id: ctx.tenant_id,
@@ -1018,6 +1445,12 @@ impl AgentTools {
             origin_event_id: None,
         };
         store.crawler_sources.insert(source.id, source.clone());
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::AddSourceToPod,
+            Some(pod.id),
+        );
         self.persist_locked(&mut store)?;
         Ok(source)
     }
@@ -1034,6 +1467,7 @@ impl AgentTools {
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        authorize_harness(&store, ctx, HarnessCapability::DiscoveryTasks, Some(pod.id))?;
         let canonical_url = canonicalize_url(&request.url)?;
         let domain = Url::parse(&canonical_url)
             .map_err(|e| AgentToolsError::BadUrl(e.to_string()))?
@@ -1061,6 +1495,12 @@ impl AgentTools {
         store
             .crawl_candidates
             .insert(candidate.id, candidate.clone());
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::CreateCrawlCandidate,
+            Some(pod.id),
+        );
         self.persist_locked(&mut store)?;
         Ok(candidate)
     }
@@ -1077,10 +1517,26 @@ impl AgentTools {
                 .map_err(|_| AgentToolsError::LockPoisoned)?;
             let candidate = store
                 .crawl_candidates
+                .get(&candidate_id)
+                .ok_or_else(|| StoreError::NotFound("crawl candidate".to_string()))?;
+            authorize_harness(
+                &store,
+                ctx,
+                HarnessCapability::CandidateSubmission,
+                Some(candidate.pod_id),
+            )?;
+            let candidate = store
+                .crawl_candidates
                 .get_mut(&candidate_id)
                 .ok_or_else(|| StoreError::NotFound("crawl candidate".to_string()))?;
             candidate.status = CrawlCandidateStatus::Promoted;
             let candidate = candidate.clone();
+            record_harness_write(
+                &mut store,
+                ctx,
+                HarnessWriteOperation::PromoteCrawlCandidate,
+                Some(candidate.pod_id),
+            );
             self.persist_locked(&mut store)?;
             let pod = store
                 .pods
@@ -1107,13 +1563,20 @@ impl AgentTools {
         ctx: &AuthContext,
         submission_id: SubmissionId,
     ) -> Result<(), AgentToolsError> {
-        let Some(user_id) = ctx.user_id else {
-            return Ok(());
-        };
         let mut store = self
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Feedback, None)?;
+        let submission = store
+            .submissions
+            .get(&submission_id)
+            .ok_or_else(|| StoreError::NotFound("submission".to_string()))?;
+        store.assert_tenant(submission.tenant_id, ctx.tenant_id)?;
+        authorize_harness_submission_scope(&store, ctx, submission_id)?;
+        let Some(user_id) = ctx.user_id else {
+            return Ok(());
+        };
         store.saves.insert((user_id, submission_id));
         store.feedback_events.push(FeedbackEvent {
             user_id,
@@ -1124,18 +1587,20 @@ impl AgentTools {
             created_at: Utc::now(),
             local_only: true,
         });
+        record_harness_write(&mut store, ctx, HarnessWriteOperation::SaveLink, None);
         self.persist_locked(&mut store)?;
         Ok(())
     }
 
     pub fn block_source(&self, ctx: &AuthContext, source: String) -> Result<(), AgentToolsError> {
-        let Some(user_id) = ctx.user_id else {
-            return Ok(());
-        };
         let mut store = self
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Feedback, None)?;
+        let Some(user_id) = ctx.user_id else {
+            return Ok(());
+        };
         let prefs = store
             .user_preferences
             .entry((user_id, ctx.tenant_id))
@@ -1151,18 +1616,20 @@ impl AgentTools {
         if !prefs.blocked_sources.contains(&source) {
             prefs.blocked_sources.push(source);
         }
+        record_harness_write(&mut store, ctx, HarnessWriteOperation::BlockSource, None);
         self.persist_locked(&mut store)?;
         Ok(())
     }
 
     pub fn block_topic(&self, ctx: &AuthContext, topic: String) -> Result<(), AgentToolsError> {
-        let Some(user_id) = ctx.user_id else {
-            return Ok(());
-        };
         let mut store = self
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Feedback, None)?;
+        let Some(user_id) = ctx.user_id else {
+            return Ok(());
+        };
         let prefs = store
             .user_preferences
             .entry((user_id, ctx.tenant_id))
@@ -1178,6 +1645,7 @@ impl AgentTools {
         if !prefs.blocked_topics.contains(&topic) {
             prefs.blocked_topics.push(topic);
         }
+        record_harness_write(&mut store, ctx, HarnessWriteOperation::BlockTopic, None);
         self.persist_locked(&mut store)?;
         Ok(())
     }
@@ -1197,6 +1665,7 @@ impl AgentTools {
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Feedback, None)?;
         let prefs = store
             .user_preferences
             .entry((user_id, ctx.tenant_id))
@@ -1225,6 +1694,12 @@ impl AgentTools {
             prefs.preferred_discovery_mode = mode;
         }
         let prefs = prefs.clone();
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::UpdatePreferences,
+            None,
+        );
         self.persist_locked(&mut store)?;
         Ok(prefs)
     }
@@ -1234,6 +1709,7 @@ impl AgentTools {
             .store
             .read()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
+        harness_for_context(&store, ctx)?;
         let node = store.node_for_tenant(ctx.tenant_id)?;
         Ok(NodeInfo {
             node_id: node.id,
@@ -1241,6 +1717,40 @@ impl AgentTools {
             public_key: node.public_key,
             supported_protocol_version: "stumble/0.1".to_string(),
         })
+    }
+
+    /// Adds a trusted peer under node administration authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when administration is denied, the store lock is
+    /// poisoned, or persistence fails.
+    pub fn add_trusted_peer(
+        &self,
+        ctx: &AuthContext,
+        display_name: String,
+        base_url: String,
+        public_key: String,
+    ) -> Result<TrustedPeer, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        let peer = TrustedPeer {
+            id: Uuid::now_v7(),
+            tenant_id: ctx.tenant_id,
+            display_name,
+            base_url,
+            public_key,
+            trust_level: TrustLevel::ReadOnly,
+            enabled: true,
+            created_at: Utc::now(),
+        };
+        store.trusted_peers.insert(peer.id, peer.clone());
+        record_harness_write(&mut store, ctx, HarnessWriteOperation::AddTrustedPeer, None);
+        self.persist_locked(&mut store)?;
+        Ok(peer)
     }
 
     pub fn well_known_node(
@@ -1282,6 +1792,7 @@ impl AgentTools {
             .read()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        authorize_harness_pod_scope(&store, ctx, pod.id)?;
         let pack = store
             .pod_skill_packs
             .get(&pod.id)
@@ -1401,6 +1912,7 @@ impl AgentTools {
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
         let node = store.node_for_tenant(ctx.tenant_id)?;
         let now = Utc::now();
         let registered_node = HubRegisteredNode {
@@ -1479,6 +1991,12 @@ impl AgentTools {
             store.hub_pods.insert(key, registered_pod.clone());
             indexed.push(registered_pod);
         }
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::IndexPublicPods,
+            None,
+        );
         self.persist_locked(&mut store)?;
         Ok(indexed)
     }
@@ -1612,6 +2130,7 @@ impl AgentTools {
             .read()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        authorize_harness_pod_scope(&store, ctx, pod.id)?;
         Ok(store.public_events_for_pod(&pod.slug))
     }
 
@@ -1625,6 +2144,7 @@ impl AgentTools {
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
         let peer = store
             .trusted_peers
             .get(&peer_id)
@@ -1651,6 +2171,12 @@ impl AgentTools {
             imported += 1;
         }
         if imported > 0 {
+            record_harness_write(
+                &mut store,
+                ctx,
+                HarnessWriteOperation::ImportPodEvents,
+                None,
+            );
             self.persist_locked(&mut store)?;
         }
         Ok(imported)
@@ -1666,6 +2192,7 @@ impl AgentTools {
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
         let node = store
             .hub_nodes
             .get(&node_id)
@@ -1693,6 +2220,12 @@ impl AgentTools {
             imported += 1;
         }
         if imported > 0 {
+            record_harness_write(
+                &mut store,
+                ctx,
+                HarnessWriteOperation::ImportPodEvents,
+                None,
+            );
             self.persist_locked(&mut store)?;
         }
         Ok(imported)
@@ -2216,6 +2749,163 @@ fn sort_discovery_feed_items(items: &mut [PodDiscoveryFeedItem]) {
             .total_cmp(&a.score)
             .then_with(|| b.pod.updated_at.cmp(&a.pod.updated_at))
     });
+}
+
+fn authorize_harness(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    capability: HarnessCapability,
+    pod_id: Option<PodId>,
+) -> Result<(), AgentToolsError> {
+    let Some(harness) = harness_for_context(store, ctx)? else {
+        return Ok(());
+    };
+    if !harness.grant.capabilities.contains(&capability) {
+        return Err(AgentToolsError::Forbidden {
+            reason: format!("harness grant lacks {capability}"),
+        });
+    }
+    if let (Some(allowed), Some(pod_id)) = (&harness.grant.pod_ids, pod_id) {
+        if !allowed.contains(&pod_id) {
+            return Err(AgentToolsError::Forbidden {
+                reason: format!("harness grant does not include Pod {pod_id}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn authorize_harness_for_new_pod(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    capability: HarnessCapability,
+) -> Result<(), AgentToolsError> {
+    authorize_harness(store, ctx, capability, None)?;
+    if let Some(harness) = ctx
+        .harness_id
+        .and_then(|harness_id| store.agent_harnesses.get(&harness_id))
+    {
+        if harness.grant.pod_ids.is_some() {
+            return Err(AgentToolsError::Forbidden {
+                reason: "a Pod-scoped harness grant cannot create a new Pod".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn authorize_harness_pod_scope(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    pod_id: PodId,
+) -> Result<(), AgentToolsError> {
+    let Some(harness) = harness_for_context(store, ctx)? else {
+        return Ok(());
+    };
+    if harness
+        .grant
+        .pod_ids
+        .as_ref()
+        .is_some_and(|pod_ids| !pod_ids.contains(&pod_id))
+    {
+        return Err(AgentToolsError::Forbidden {
+            reason: format!("harness grant does not include Pod {pod_id}"),
+        });
+    }
+    Ok(())
+}
+
+fn authorize_harness_submission_scope(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    submission_id: SubmissionId,
+) -> Result<(), AgentToolsError> {
+    harness_for_context(store, ctx)?;
+    for pod_id in store
+        .submission_pods
+        .iter()
+        .filter(|placement| placement.submission_id == submission_id)
+        .map(|placement| placement.pod_id)
+    {
+        authorize_harness_pod_scope(store, ctx, pod_id)?;
+    }
+    Ok(())
+}
+
+fn harness_for_context<'a>(
+    store: &'a InMemoryStore,
+    ctx: &AuthContext,
+) -> Result<Option<&'a AgentHarness>, AgentToolsError> {
+    let Some(harness_id) = ctx.harness_id else {
+        return Ok(None);
+    };
+    let harness = store
+        .agent_harnesses
+        .get(&harness_id)
+        .filter(|harness| harness.revoked_at.is_none())
+        .ok_or_else(|| AgentToolsError::Forbidden {
+            reason: "harness grant is revoked or missing".to_string(),
+        })?;
+    if Some(harness.user_id) != ctx.user_id || harness.tenant_id != ctx.tenant_id {
+        return Err(AgentToolsError::Forbidden {
+            reason: "harness grant does not match the authorization context".to_string(),
+        });
+    }
+    Ok(Some(harness))
+}
+
+fn record_harness_write(
+    store: &mut InMemoryStore,
+    ctx: &AuthContext,
+    operation: HarnessWriteOperation,
+    pod_id: Option<PodId>,
+) {
+    if let Some(harness_id) = ctx.harness_id {
+        store.harness_write_audit.push(HarnessWriteAudit {
+            id: Uuid::now_v7(),
+            harness_id,
+            operation,
+            pod_id,
+            occurred_at: Utc::now(),
+        });
+    }
+}
+
+fn normalize_capabilities(mut capabilities: Vec<HarnessCapability>) -> Vec<HarnessCapability> {
+    capabilities.sort();
+    capabilities.dedup();
+    capabilities
+}
+
+fn ensure_child_pod_scope(
+    parent: &Option<Vec<PodId>>,
+    child: &Option<Vec<PodId>>,
+) -> Result<(), AgentToolsError> {
+    match (parent, child) {
+        (Some(_), None) => Err(AgentToolsError::Forbidden {
+            reason: "a harness cannot delegate a broader Pod scope".to_string(),
+        }),
+        (Some(parent), Some(child)) if child.iter().any(|pod_id| !parent.contains(pod_id)) => {
+            Err(AgentToolsError::Forbidden {
+                reason: "a harness cannot delegate a broader Pod scope".to_string(),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+fn effective_user_id(ctx: &AuthContext, requested: Option<UserId>) -> Option<UserId> {
+    if ctx.harness_id.is_some() {
+        ctx.user_id
+    } else {
+        requested.or(ctx.user_id)
+    }
+}
+
+fn normalize_pod_ids(mut pod_ids: Vec<PodId>) -> Vec<PodId> {
+    pod_ids.sort();
+    pod_ids.dedup();
+    pod_ids
 }
 
 fn route_tokens(text: &str) -> Vec<String> {

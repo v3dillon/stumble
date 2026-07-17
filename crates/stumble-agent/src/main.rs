@@ -3,9 +3,10 @@ use clap::Parser;
 use reqwest::{header, StatusCode};
 use serde_json::json;
 use stumble_core::{
-    CreatePodRequest, DevTokenRequest, DevTokenResponse, DiscoverRequest, DiscoveryItem,
-    DiscoveryMode, GenerateBriefRequest, PodSkillPack, SubmitLinkRequest, UpdatePreferencesRequest,
-    UserPreferences, Visibility,
+    AgentHarnessKind, CreatePodRequest, DiscoverRequest, DiscoveryItem, DiscoveryMode,
+    GenerateBriefRequest, HarnessCapability, PodSkillPack, RegisterAgentHarnessRequest,
+    RegisterAgentHarnessResponse, SubmitLinkRequest, UpdatePreferencesRequest, UserPreferences,
+    Visibility,
 };
 
 const POD_SLUG: &str = "dillon-tech-ai-aliens";
@@ -45,11 +46,11 @@ async fn main() -> Result<()> {
     let api = args.api.trim_end_matches('/').to_string();
 
     health_check(&client, &api).await?;
-    let token = create_token(&client, &api, &args.label).await?;
+    let harness = register_harness(&client, &api, &args.label).await?;
     let authed = AuthedClient {
         client,
         api,
-        token: token.token,
+        token: harness.token.expose().to_string(),
     };
 
     let preferences: UserPreferences = authed
@@ -163,24 +164,30 @@ async fn health_check(client: &reqwest::Client, api: &str) -> Result<()> {
     Ok(())
 }
 
-async fn create_token(
+async fn register_harness(
     client: &reqwest::Client,
     api: &str,
     label: &str,
-) -> Result<DevTokenResponse> {
+) -> Result<RegisterAgentHarnessResponse> {
     client
-        .post(format!("{api}/auth/dev-token"))
-        .json(&DevTokenRequest {
-            user_id: None,
-            tenant_slug: None,
+        .post(format!("{api}/harnesses"))
+        .json(&RegisterAgentHarnessRequest {
             label: label.to_string(),
+            kind: AgentHarnessKind::Unattended,
+            capabilities: vec![
+                HarnessCapability::FeedRead,
+                HarnessCapability::Feedback,
+                HarnessCapability::CandidateSubmission,
+                HarnessCapability::PodCuration,
+            ],
+            pod_ids: None,
         })
         .send()
         .await?
         .error_for_status()?
         .json()
         .await
-        .context("failed to create dev token")
+        .context("failed to register Agent Harness")
 }
 
 async fn ensure_pod(authed: &AuthedClient, pod_slug: &str) -> Result<()> {

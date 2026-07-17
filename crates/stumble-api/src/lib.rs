@@ -18,17 +18,22 @@ pub struct ApiState {
     pub tools: AgentTools,
     pub base_url: String,
     pub dev_tokens_allowed: bool,
+    /// Whether missing bearer tokens may use the loopback owner context.
+    pub owner_access_allowed: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct RouterOptions {
     pub dev_tokens_allowed: bool,
+    /// Whether missing bearer tokens may use the loopback owner context.
+    pub owner_access_allowed: bool,
 }
 
 impl Default for RouterOptions {
     fn default() -> Self {
         Self {
             dev_tokens_allowed: true,
+            owner_access_allowed: true,
         }
     }
 }
@@ -54,8 +59,13 @@ impl IntoResponse for ApiError {
 
 impl From<AgentToolsError> for ApiError {
     fn from(value: AgentToolsError) -> Self {
+        let status = if matches!(value, AgentToolsError::Forbidden { .. }) {
+            StatusCode::FORBIDDEN
+        } else {
+            StatusCode::BAD_REQUEST
+        };
         Self {
-            status: StatusCode::BAD_REQUEST,
+            status,
             message: value.to_string(),
         }
     }
@@ -85,6 +95,7 @@ pub fn router_with_options(
         tools,
         base_url: base_url.into(),
         dev_tokens_allowed: options.dev_tokens_allowed,
+        owner_access_allowed: options.owner_access_allowed,
     };
     Router::new()
         .route("/health", get(health))
@@ -134,6 +145,8 @@ pub fn router_with_options(
         .route("/tenants", get(list_tenants).post(create_tenant))
         .route("/api-tokens", post(create_api_token))
         .route("/api-tokens/:id", delete(revoke_api_token))
+        .route("/harnesses", post(register_agent_harness))
+        .route("/harnesses/:id", delete(revoke_agent_harness))
         .route("/federation/node", get(federation_node))
         .route("/federation/pods", get(federation_pods))
         .route("/federation/pods/:slug/manifest", get(federation_manifest))
@@ -285,9 +298,9 @@ async fn openapi_lite() -> Json<Vec<ApiRouteDoc>> {
 
 async fn well_known_node(
     State(state): State<ApiState>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
 ) -> Result<Json<WellKnownNode>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = state.tools.default_auth_context()?;
     Ok(Json(state.tools.well_known_node(&ctx, &state.base_url)?))
 }
 
@@ -295,8 +308,8 @@ async fn list_pods(
     State(state): State<ApiState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Pod>>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
-    Ok(Json(state.tools.list_pods(ctx.tenant_id)?))
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.list_pods_for_harness(&ctx)?))
 }
 
 async fn create_pod(
@@ -304,7 +317,7 @@ async fn create_pod(
     headers: HeaderMap,
     Json(request): Json<CreatePodRequest>,
 ) -> Result<Json<Pod>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     Ok(Json(state.tools.create_pod(&ctx, request)?))
 }
 
@@ -313,7 +326,7 @@ async fn join_pod(
     headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     state.tools.join_pod(&ctx, &slug)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -324,7 +337,7 @@ async fn submit_link(
     Path(slug): Path<String>,
     Json(request): Json<SubmitLinkRequest>,
 ) -> Result<Json<Submission>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     Ok(Json(state.tools.submit_link_to_pod(&ctx, &slug, request)?))
 }
 
@@ -333,7 +346,7 @@ async fn remove_submission_from_pod(
     headers: HeaderMap,
     Path((slug, submission_id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     let purged = state
         .tools
         .remove_submission_from_pod(&ctx, &slug, submission_id)?;
@@ -349,7 +362,7 @@ async fn route_link(
     headers: HeaderMap,
     Json(request): Json<RouteLinkRequest>,
 ) -> Result<Json<RouteLinkResponse>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     let metadata = fetch_page_metadata(&request.url).await?;
     Ok(Json(state.tools.route_link_to_pods(
         &ctx,
@@ -368,7 +381,7 @@ async fn auto_route_intake_link(
     headers: HeaderMap,
     Json(request): Json<AutoRouteIntakeRequest>,
 ) -> Result<Json<AutoRouteIntakeResponse>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     let metadata = fetch_page_metadata(&request.url).await?;
     let routing = state.tools.route_link_to_pods(
         &ctx,
@@ -410,7 +423,7 @@ async fn intake_link(
     Path(slug): Path<String>,
     Json(request): Json<LinkIntakeRequest>,
 ) -> Result<Json<LinkIntakeResponse>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     let metadata = fetch_page_metadata(&request.url).await?;
     Ok(Json(intake_link_with_metadata(
         &state.tools,
@@ -465,7 +478,7 @@ async fn get_skill_pack(
     headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> Result<Json<PodSkillPack>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     Ok(Json(state.tools.get_skill_pack(&ctx, &slug)?))
 }
 
@@ -475,7 +488,7 @@ async fn patch_skill_pack_handler(
     Path(slug): Path<String>,
     Json(patch): Json<SkillPackPatch>,
 ) -> Result<Json<PodSkillPack>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     Ok(Json(state.tools.patch_skill_pack(&ctx, &slug, patch)?))
 }
 
@@ -484,7 +497,7 @@ async fn export_skill_pack_handler(
     headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> Result<Json<ExportedSkillPack>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     Ok(Json(state.tools.export_skill_pack(&ctx, &slug)?))
 }
 
@@ -494,7 +507,7 @@ async fn import_skill_pack_handler(
     Path(slug): Path<String>,
     Json(files): Json<std::collections::BTreeMap<String, String>>,
 ) -> Result<Json<PodSkillPack>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     Ok(Json(state.tools.import_skill_pack(&ctx, &slug, files)?))
 }
 
@@ -504,7 +517,7 @@ async fn fork_skill_pack_handler(
     Path(slug): Path<String>,
     Json(request): Json<CreatePodRequest>,
 ) -> Result<Json<PodSkillPack>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     Ok(Json(state.tools.fork_skill_pack(&ctx, &slug, request)?))
 }
 
@@ -513,7 +526,7 @@ async fn validate_skill_pack_handler(
     headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> Result<Json<ValidationReport>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     Ok(Json(state.tools.validate_pod_skill_pack(&ctx, &slug)?))
 }
 
@@ -529,7 +542,7 @@ async fn add_source(
     Path(slug): Path<String>,
     Json(request): Json<AddSourceRequest>,
 ) -> Result<Json<CrawlerSource>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     Ok(Json(state.tools.add_source_to_pod(
         &ctx,
         &slug,
@@ -543,7 +556,7 @@ async fn crawl_pod(
     headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     let manifest = state.tools.pod_manifest(&ctx, &slug)?;
     Ok(Json(json!({
         "status": "queued",
@@ -558,7 +571,7 @@ async fn discover(
     Path(slug): Path<String>,
     Json(request): Json<DiscoverRequest>,
 ) -> Result<Json<Vec<DiscoveryItem>>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     Ok(Json(state.tools.discover_in_pod(&ctx, &slug, request)?))
 }
 
@@ -568,7 +581,7 @@ async fn stumble(
     Path(slug): Path<String>,
     Json(mut request): Json<DiscoverRequest>,
 ) -> Result<Json<Vec<DiscoveryItem>>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     request.mode = DiscoveryMode::Stumble;
     Ok(Json(state.tools.discover_in_pod(&ctx, &slug, request)?))
 }
@@ -577,20 +590,8 @@ async fn list_briefs(
     State(state): State<ApiState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Brief>>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
-    let store = state.tools.store();
-    let store = store.read().map_err(|_| ApiError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        message: "lock poisoned".to_string(),
-    })?;
-    Ok(Json(
-        store
-            .briefs
-            .values()
-            .filter(|b| b.tenant_id == ctx.tenant_id)
-            .cloned()
-            .collect(),
-    ))
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.list_briefs_for_harness(&ctx)?))
 }
 
 async fn generate_brief(
@@ -598,7 +599,7 @@ async fn generate_brief(
     headers: HeaderMap,
     Json(request): Json<GenerateBriefRequest>,
 ) -> Result<Json<Brief>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     Ok(Json(state.tools.generate_brief(&ctx, request)?))
 }
 
@@ -607,7 +608,7 @@ async fn save_link(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     state.tools.save_link(&ctx, id)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -617,7 +618,7 @@ async fn link_assets(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<SubmissionAsset>>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     Ok(Json(state.tools.assets_for_submission(&ctx, id)?))
 }
 
@@ -635,7 +636,7 @@ async fn update_preferences(
     headers: HeaderMap,
     Json(request): Json<UpdatePreferencesRequest>,
 ) -> Result<Json<UserPreferences>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     Ok(Json(state.tools.update_preferences(&ctx, request)?))
 }
 
@@ -653,10 +654,10 @@ struct PodDiscoveryFeedQuery {
 
 async fn pod_discovery_feed(
     State(state): State<ApiState>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Query(query): Query<PodDiscoveryFeedQuery>,
 ) -> Result<Json<PodDiscoveryFeedResponse>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = state.tools.default_auth_context()?;
     Ok(Json(state.tools.pod_discovery_feed(
         &ctx,
         &state.base_url,
@@ -670,7 +671,7 @@ async fn home_discover_public_pods(
     headers: HeaderMap,
     Query(query): Query<PublicPodDiscoveryQuery>,
 ) -> Result<Json<HomePublicPodDiscoveryResponse>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     let topics = query
         .topics
         .unwrap_or_default()
@@ -698,7 +699,7 @@ async fn me(
     State(state): State<ApiState>,
     headers: HeaderMap,
 ) -> Result<Json<AuthContext>, ApiError> {
-    Ok(Json(auth_or_default(&state.tools, &headers)?))
+    Ok(Json(auth_or_default(&state, &headers)?))
 }
 
 async fn list_tenants(State(state): State<ApiState>) -> Result<Json<Vec<Tenant>>, ApiError> {
@@ -712,54 +713,77 @@ async fn list_tenants(State(state): State<ApiState>) -> Result<Json<Vec<Tenant>>
 
 async fn create_tenant(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     Json(request): Json<CreateTenantRequest>,
 ) -> Result<Json<Tenant>, ApiError> {
-    Ok(Json(state.tools.create_tenant(request)?))
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.create_tenant_as(&ctx, request)?))
 }
 
 async fn create_api_token(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     Json(request): Json<DevTokenRequest>,
 ) -> Result<Json<DevTokenResponse>, ApiError> {
     ensure_dev_tokens_allowed(&state)?;
-    Ok(Json(state.tools.create_dev_token(request)?))
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.create_dev_token_as(&ctx, request)?))
 }
 
 async fn revoke_api_token(Path(_id): Path<Uuid>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
-async fn federation_node(
+async fn register_agent_harness(
     State(state): State<ApiState>,
     headers: HeaderMap,
+    Json(request): Json<RegisterAgentHarnessRequest>,
+) -> Result<Json<RegisterAgentHarnessResponse>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.register_agent_harness(&ctx, request)?))
+}
+
+async fn revoke_agent_harness(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<AgentHarnessId>,
+) -> Result<StatusCode, ApiError> {
+    let ctx = auth_required(&state.tools, &headers)?;
+    state.tools.revoke_agent_harness(&ctx, id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn federation_node(
+    State(state): State<ApiState>,
+    _headers: HeaderMap,
 ) -> Result<Json<NodeInfo>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = state.tools.default_auth_context()?;
     Ok(Json(state.tools.node_info(&ctx)?))
 }
 
 async fn federation_pods(
     State(state): State<ApiState>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
 ) -> Result<Json<Vec<Pod>>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = state.tools.default_auth_context()?;
     Ok(Json(state.tools.list_public_pods(&ctx)?))
 }
 
 async fn federation_manifest(
     State(state): State<ApiState>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> Result<Json<PodManifest>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = state.tools.default_auth_context()?;
     Ok(Json(state.tools.federation_pod_manifest(&ctx, &slug)?))
 }
 
 async fn federation_events(
     State(state): State<ApiState>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> Result<Json<Vec<EventLog>>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = state.tools.default_auth_context()?;
     Ok(Json(state.tools.federation_pod_events(&ctx, &slug)?))
 }
 
@@ -775,7 +799,7 @@ async fn federation_import_events(
     Path(_slug): Path<String>,
     Json(request): Json<ImportEventsRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     let imported = state
         .tools
         .import_pod_events(&ctx, request.peer_id, request.events)?;
@@ -808,7 +832,7 @@ async fn hub_refresh(
     State(state): State<ApiState>,
     headers: HeaderMap,
 ) -> Result<Json<stumble_sync::HubRefreshReport>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     stumble_sync::refresh_hub_index(&state.tools, &ctx)
         .await
         .map(Json)
@@ -829,7 +853,7 @@ async fn hub_search_pods(
     headers: HeaderMap,
     Query(query): Query<HubSearchQuery>,
 ) -> Result<Json<HubSearchPodsResponse>, ApiError> {
-    let ctx = auth_or_default(&state.tools, &headers)?;
+    let ctx = auth_or_default(&state, &headers)?;
     state
         .tools
         .index_local_public_pods_in_hub(&ctx, &state.base_url)?;
@@ -839,7 +863,8 @@ async fn hub_search_pods(
     )?))
 }
 
-fn auth_or_default(tools: &AgentTools, headers: &HeaderMap) -> Result<AuthContext, ApiError> {
+fn auth_or_default(state: &ApiState, headers: &HeaderMap) -> Result<AuthContext, ApiError> {
+    let tools = &state.tools;
     if let Some(value) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
         if let Some(token) = value.strip_prefix("Bearer ") {
             if let Some(ctx) = tools.authenticate_token(token)? {
@@ -851,6 +876,12 @@ fn auth_or_default(tools: &AgentTools, headers: &HeaderMap) -> Result<AuthContex
             });
         }
     }
+    if !state.owner_access_allowed {
+        return Err(ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "bearer token required".to_string(),
+        });
+    }
     let store = tools.store();
     let store = store.read().map_err(|_| ApiError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -861,6 +892,24 @@ fn auth_or_default(tools: &AgentTools, headers: &HeaderMap) -> Result<AuthContex
         user_id: store.users.keys().next().copied(),
         tenant_id: None,
         node_id: node.id,
+        harness_id: None,
+    })
+}
+
+fn auth_required(tools: &AgentTools, headers: &HeaderMap) -> Result<AuthContext, ApiError> {
+    let Some(token) = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    else {
+        return Err(ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "bearer token required".to_string(),
+        });
+    };
+    tools.authenticate_token(token)?.ok_or_else(|| ApiError {
+        status: StatusCode::UNAUTHORIZED,
+        message: "invalid token".to_string(),
     })
 }
 
@@ -1032,6 +1081,8 @@ fn resolve_url(base: &Url, value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
 
     #[test]
     fn bind_with_port_overrides_only_the_port() {
@@ -1047,5 +1098,61 @@ mod tests {
         assert!(dev_tokens_allowed_for_bind(loopback, false));
         assert!(!dev_tokens_allowed_for_bind(public, false));
         assert!(dev_tokens_allowed_for_bind(public, true));
+    }
+
+    #[tokio::test]
+    async fn harness_capability_denial_is_http_forbidden() {
+        let tools = AgentTools::new(seed_store());
+        let owner = tools.default_auth_context().unwrap();
+        let issued = tools
+            .register_agent_harness(
+                &owner,
+                RegisterAgentHarnessRequest {
+                    label: "submitter".into(),
+                    kind: AgentHarnessKind::Unattended,
+                    capabilities: vec![HarnessCapability::CandidateSubmission],
+                    pod_ids: None,
+                },
+            )
+            .unwrap();
+        let response = router(tools)
+            .oneshot(
+                Request::post(format!("/links/{}/save", Uuid::nil()))
+                    .header("authorization", format!("Bearer {}", issued.token.expose()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn public_bind_rejects_unauthenticated_harness_registration() {
+        let response = router_with_options(
+            AgentTools::new(seed_store()),
+            "https://pods.example.com",
+            RouterOptions {
+                dev_tokens_allowed: false,
+                owner_access_allowed: false,
+            },
+        )
+        .oneshot(
+            Request::post("/harnesses")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&RegisterAgentHarnessRequest {
+                        label: "attacker".into(),
+                        kind: AgentHarnessKind::Unattended,
+                        capabilities: vec![HarnessCapability::FeedRead],
+                        pod_ids: None,
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

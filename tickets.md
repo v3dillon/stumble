@@ -27,13 +27,13 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 **Blocked by:** Boot the Home Node from SQLite.
 
-- [ ] A User can register a labeled interactive or unattended Agent Harness and receive a one-time token.
-- [ ] Grants can independently allow Feed reads, feedback, Discovery Tasks, Candidate Submission, Pod curation, package management, Subscription management, and administration.
-- [ ] Pod-scoped grants cannot access or modify other Pods.
-- [ ] Revocation takes effect without restarting the node.
-- [ ] Every harness-originated write records the harness identity.
-- [ ] Tokens and grants are absent from federation and public export surfaces.
-- [ ] Representative HTTP, MCP, and CLI calls return equivalent authorization outcomes.
+- [x] A User can register a labeled interactive or unattended Agent Harness and receive a one-time token.
+- [x] Grants can independently allow Feed reads, feedback, Discovery Tasks, Candidate Submission, Pod curation, package management, Subscription management, and administration.
+- [x] Pod-scoped grants cannot access or modify other Pods.
+- [x] Revocation takes effect without restarting the node.
+- [x] Every harness-originated write records the harness identity.
+- [x] Tokens and grants are absent from federation and public export surfaces.
+- [x] Representative HTTP, MCP, and CLI calls return equivalent authorization outcomes.
 
 ## Create and exchange portable Pod Packages
 

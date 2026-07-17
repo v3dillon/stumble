@@ -1445,6 +1445,7 @@ dependencies = [
  "stumble-core",
  "stumble-sync",
  "tokio",
+ "tower",
  "tower-http",
  "url",
  "uuid",
@@ -1462,7 +1463,9 @@ dependencies = [
  "serde_json",
  "stumble-api",
  "stumble-core",
+ "stumble-mcp",
  "tokio",
+ "tower",
  "uuid",
 ]
 

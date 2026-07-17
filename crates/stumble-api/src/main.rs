@@ -73,7 +73,14 @@ async fn main() -> anyhow::Result<()> {
             shutdown_rx,
         ))
     };
-    let app = router_with_options(tools, base_url, RouterOptions { dev_tokens_allowed });
+    let app = router_with_options(
+        tools,
+        base_url,
+        RouterOptions {
+            dev_tokens_allowed,
+            owner_access_allowed: listener.local_addr()?.ip().is_loopback(),
+        },
+    );
     let shutdown_signal = {
         let shutdown_tx = shutdown_tx.clone();
         async move {

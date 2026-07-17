@@ -48,6 +48,8 @@ pub struct InMemoryStore {
     pub users: HashMap<UserId, User>,
     pub tenant_users: Vec<TenantUser>,
     pub api_tokens: HashMap<Uuid, ApiToken>,
+    pub agent_harnesses: HashMap<AgentHarnessId, AgentHarness>,
+    pub harness_write_audit: Vec<HarnessWriteAudit>,
     pub node_identities: HashMap<NodeIdentityId, NodeIdentity>,
     pub trusted_peers: HashMap<PeerId, TrustedPeer>,
     pub pods: HashMap<PodId, Pod>,
@@ -77,6 +79,10 @@ struct PersistedStore {
     users: Vec<User>,
     tenant_users: Vec<TenantUser>,
     api_tokens: Vec<ApiToken>,
+    #[serde(default)]
+    agent_harnesses: Vec<AgentHarness>,
+    #[serde(default)]
+    harness_write_audit: Vec<HarnessWriteAudit>,
     node_identities: Vec<NodeIdentity>,
     trusted_peers: Vec<TrustedPeer>,
     pods: Vec<Pod>,
@@ -120,6 +126,8 @@ impl From<&InMemoryStore> for PersistedStore {
             users: store.users.values().cloned().collect(),
             tenant_users: store.tenant_users.clone(),
             api_tokens: store.api_tokens.values().cloned().collect(),
+            agent_harnesses: store.agent_harnesses.values().cloned().collect(),
+            harness_write_audit: store.harness_write_audit.clone(),
             node_identities: store.node_identities.values().cloned().collect(),
             trusted_peers: store.trusted_peers.values().cloned().collect(),
             pods: store.pods.values().cloned().collect(),
@@ -185,6 +193,12 @@ impl From<PersistedStore> for InMemoryStore {
                 .into_iter()
                 .map(|token| (token.id, token))
                 .collect(),
+            agent_harnesses: snapshot
+                .agent_harnesses
+                .into_iter()
+                .map(|harness| (harness.id, harness))
+                .collect(),
+            harness_write_audit: snapshot.harness_write_audit,
             node_identities: snapshot
                 .node_identities
                 .into_iter()
@@ -313,6 +327,8 @@ const STORE_COLLECTIONS: &[&str] = &[
     "users",
     "tenant_users",
     "api_tokens",
+    "agent_harnesses",
+    "harness_write_audit",
     "node_identities",
     "trusted_peers",
     "pods",
@@ -573,6 +589,7 @@ fn record_key(
         "pod_rules" | "pod_skill_packs" => &["pod_id"],
         "event_log" => &["event_id"],
         "feedback_events" => return Ok(serde_json::to_string(value)?),
+        "harness_write_audit" => &["id"],
         _ => &["id"],
     };
     let mut key = Vec::with_capacity(fields.len());
@@ -708,6 +725,7 @@ mod tests {
             user_id: Some(user_id),
             tenant_id: None,
             node_id: local_node_id,
+            harness_id: None,
         };
         tools
             .create_pod(
@@ -806,6 +824,7 @@ mod tests {
             user_id: None,
             tenant_id: None,
             node_id: local_node_id,
+            harness_id: None,
         };
         let second_ctx = first_ctx.clone();
 
@@ -856,6 +875,7 @@ mod tests {
             user_id: Some(user_id),
             tenant_id: None,
             node_id: local_node_id,
+            harness_id: None,
         };
 
         first

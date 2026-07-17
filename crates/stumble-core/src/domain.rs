@@ -10,6 +10,30 @@ pub type PodId = Uuid;
 pub type SubmissionId = Uuid;
 pub type PeerId = Uuid;
 pub type NodeIdentityId = Uuid;
+/// Stable local identity of an [`AgentHarness`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentHarnessId(Uuid);
+
+impl From<Uuid> for AgentHarnessId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl std::fmt::Display for AgentHarnessId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::str::FromStr for AgentHarnessId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse().map(Self)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -141,6 +165,148 @@ pub struct ApiToken {
     pub created_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
+    /// Harness authenticated by this token; absent only for local owner contexts.
+    #[serde(default)]
+    pub harness_id: Option<AgentHarnessId>,
+}
+
+/// Whether a harness operates with a User present or as unattended automation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentHarnessKind {
+    /// A User-facing harness that can participate in interactive flows.
+    Interactive,
+    /// A background harness intended to receive least authority.
+    Unattended,
+}
+
+/// Independently grantable Home Node operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessCapability {
+    /// Retrieve finite Feed-oriented content.
+    FeedRead,
+    /// Record private User feedback and preference changes.
+    Feedback,
+    /// Manage due discovery work and Source Rules.
+    DiscoveryTasks,
+    /// Submit discovered Candidates and their assets.
+    CandidateSubmission,
+    /// Create Pods and change accepted Pod content.
+    PodCuration,
+    /// Change Pod Packages.
+    PackageManagement,
+    /// Change the User's Subscriptions.
+    SubscriptionManagement,
+    /// Manage node-local authority and administration.
+    Administration,
+}
+
+impl std::fmt::Display for HarnessCapability {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::FeedRead => "feed_read",
+            Self::Feedback => "feedback",
+            Self::DiscoveryTasks => "discovery_tasks",
+            Self::CandidateSubmission => "candidate_submission",
+            Self::PodCuration => "pod_curation",
+            Self::PackageManagement => "package_management",
+            Self::SubscriptionManagement => "subscription_management",
+            Self::Administration => "administration",
+        })
+    }
+}
+
+impl std::str::FromStr for HarnessCapability {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.replace('-', "_").as_str() {
+            "feed_read" => Ok(Self::FeedRead),
+            "feedback" => Ok(Self::Feedback),
+            "discovery_tasks" => Ok(Self::DiscoveryTasks),
+            "candidate_submission" => Ok(Self::CandidateSubmission),
+            "pod_curation" => Ok(Self::PodCuration),
+            "package_management" => Ok(Self::PackageManagement),
+            "subscription_management" => Ok(Self::SubscriptionManagement),
+            "administration" => Ok(Self::Administration),
+            _ => Err(format!("unknown harness capability: {value}")),
+        }
+    }
+}
+
+/// Capabilities and optional Pod boundary assigned to an Agent Harness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessGrant {
+    /// Operations the harness may perform.
+    pub capabilities: Vec<HarnessCapability>,
+    /// `None` authorizes all local Pods; an empty list authorizes none.
+    pub pod_ids: Option<Vec<PodId>>,
+}
+
+/// Registered external environment through which a User operates Stumble.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentHarness {
+    /// Local harness identity.
+    pub id: AgentHarnessId,
+    /// User on whose behalf the harness operates.
+    pub user_id: UserId,
+    /// Optional hosted tenant boundary.
+    pub tenant_id: Option<TenantId>,
+    /// Human-readable operator label.
+    pub label: String,
+    /// Interactive or unattended operating mode.
+    pub kind: AgentHarnessKind,
+    /// Current least-authority grant.
+    pub grant: HarnessGrant,
+    /// Registration timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Revocation timestamp, if revoked.
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// Type-safe operation recorded in a harness write audit entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessWriteOperation {
+    RegisterAgentHarness,
+    RevokeAgentHarness,
+    CreateTenant,
+    CreateDevToken,
+    AddTrustedPeer,
+    ImportPodEvents,
+    IndexPublicPods,
+    CreatePod,
+    JoinPod,
+    SubmitLinkToPod,
+    RemoveSubmissionFromPod,
+    AddSubmissionAsset,
+    GenerateBrief,
+    PatchSkillPack,
+    ImportSkillPack,
+    ForkSkillPack,
+    AddSourceToPod,
+    CreateCrawlCandidate,
+    PromoteCrawlCandidate,
+    SaveLink,
+    BlockSource,
+    BlockTopic,
+    UpdatePreferences,
+}
+
+/// Local-only attribution record for a successful harness write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessWriteAudit {
+    /// Stable local audit entry identity.
+    pub id: Uuid,
+    /// Harness responsible for the write.
+    pub harness_id: AgentHarnessId,
+    /// Typed operation that changed local state.
+    pub operation: HarnessWriteOperation,
+    /// Affected Pod, when the write is Pod-specific.
+    pub pod_id: Option<PodId>,
+    /// Timestamp at which the write committed.
+    pub occurred_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -496,6 +662,9 @@ pub struct AuthContext {
     pub user_id: Option<UserId>,
     pub tenant_id: Option<TenantId>,
     pub node_id: NodeIdentityId,
+    /// Harness whose scoped grant applies to this request.
+    #[serde(default)]
+    pub harness_id: Option<AgentHarnessId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -640,6 +809,51 @@ pub struct DevTokenResponse {
     pub token_hash: String,
     pub user_id: UserId,
     pub tenant_id: Option<TenantId>,
+}
+
+/// Strict registration payload for a new Agent Harness and Harness Grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterAgentHarnessRequest {
+    /// Human-readable operator label.
+    pub label: String,
+    /// Interactive or unattended operating mode.
+    pub kind: AgentHarnessKind,
+    /// Independently allowed operations.
+    pub capabilities: Vec<HarnessCapability>,
+    /// Optional allowlist of local Pods.
+    pub pod_ids: Option<Vec<PodId>>,
+}
+
+/// One-time bearer token whose diagnostic formatting is always redacted.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct HarnessToken(String);
+
+impl HarnessToken {
+    pub(crate) fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    /// Borrows the token for authentication without copying it.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for HarnessToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("HarnessToken([redacted])")
+    }
+}
+
+/// Result of registration. The plaintext token is never returned again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterAgentHarnessResponse {
+    /// Persisted harness and normalized grant.
+    pub harness: AgentHarness,
+    /// Returned only at registration. Only its hash is retained by the Home Node.
+    pub token: HarnessToken,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

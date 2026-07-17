@@ -123,6 +123,19 @@ enum Command {
     RevokeApiToken {
         id: uuid::Uuid,
     },
+    RegisterHarness {
+        #[arg(long)]
+        label: String,
+        #[arg(long, value_enum)]
+        kind: HarnessKindArg,
+        #[arg(long = "capability", required = true)]
+        capabilities: Vec<HarnessCapability>,
+        #[arg(long = "pod-id")]
+        pod_ids: Vec<uuid::Uuid>,
+    },
+    RevokeHarness {
+        id: AgentHarnessId,
+    },
     NodeInfo,
     AddPeer {
         #[arg(long)]
@@ -159,6 +172,21 @@ enum ServeMode {
     Hosted,
 }
 
+#[derive(Debug, Clone, ValueEnum)]
+enum HarnessKindArg {
+    Interactive,
+    Unattended,
+}
+
+impl From<HarnessKindArg> for AgentHarnessKind {
+    fn from(value: HarnessKindArg) -> Self {
+        match value {
+            HarnessKindArg::Interactive => Self::Interactive,
+            HarnessKindArg::Unattended => Self::Unattended,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -174,12 +202,20 @@ async fn main() -> anyhow::Result<()> {
             user_id: store.users.keys().next().copied(),
             tenant_id: None,
             node_id: store.default_node()?.id,
+            harness_id: None,
         }
+    };
+    let ctx = if let Some(token) = cli.token.as_deref() {
+        tools
+            .authenticate_token(token)?
+            .ok_or_else(|| anyhow::anyhow!("invalid or revoked Harness token"))?
+    } else {
+        default_ctx
     };
 
     match cli.command {
         Command::InitNode => {
-            let info = tools.node_info(&default_ctx)?;
+            let info = tools.node_info(&ctx)?;
             print_json(&info)?;
         }
         Command::Serve {
@@ -195,6 +231,7 @@ async fn main() -> anyhow::Result<()> {
                 listener.local_addr()?,
                 allow_public_dev_tokens,
             );
+            let owner_access_allowed = listener.local_addr()?.ip().is_loopback();
             eprintln!(
                 "podctl serving HTTP API at http://{}",
                 listener.local_addr()?
@@ -210,7 +247,10 @@ async fn main() -> anyhow::Result<()> {
                 stumble_api::router_with_options(
                     tools,
                     base_url,
-                    stumble_api::RouterOptions { dev_tokens_allowed },
+                    stumble_api::RouterOptions {
+                        dev_tokens_allowed,
+                        owner_access_allowed,
+                    },
                 ),
             )
             .await?;
@@ -221,7 +261,7 @@ async fn main() -> anyhow::Result<()> {
             description,
         } => {
             let pod = tools.create_pod(
-                &default_ctx,
+                &ctx,
                 CreatePodRequest {
                     name,
                     slug,
@@ -231,9 +271,9 @@ async fn main() -> anyhow::Result<()> {
             )?;
             print_json(&pod)?;
         }
-        Command::ListPods => print_json(&tools.list_pods(default_ctx.tenant_id)?)?,
+        Command::ListPods => print_json(&tools.list_pods_for_harness(&ctx)?)?,
         Command::JoinPod { pod } => {
-            tools.join_pod(&default_ctx, &pod)?;
+            tools.join_pod(&ctx, &pod)?;
             println!("joined {pod}");
         }
         Command::Submit {
@@ -243,7 +283,7 @@ async fn main() -> anyhow::Result<()> {
             note,
         } => {
             let submission = tools.submit_link_to_pod(
-                &default_ctx,
+                &ctx,
                 &pod,
                 SubmitLinkRequest {
                     url,
@@ -257,41 +297,36 @@ async fn main() -> anyhow::Result<()> {
             print_json(&submission)?;
         }
         Command::AddSource { pod, url } => {
-            print_json(&tools.add_source_to_pod(
-                &default_ctx,
-                &pod,
-                CrawlerSourceType::Rss,
-                url,
-            )?)?;
+            print_json(&tools.add_source_to_pod(&ctx, &pod, CrawlerSourceType::Rss, url)?)?;
         }
         Command::Crawl { pod } => {
-            let manifest = tools.pod_manifest(&default_ctx, &pod)?;
+            let manifest = tools.pod_manifest(&ctx, &pod)?;
             print_json(&serde_json::json!({"status":"queued","pod": manifest.pod.slug}))?;
         }
         Command::Discover { pod, query, avoid } => {
             let items = tools.discover_in_pod(
-                &default_ctx,
+                &ctx,
                 &pod,
                 DiscoverRequest {
                     query,
                     avoid,
                     limit: 7,
                     mode: DiscoveryMode::DeepMatch,
-                    user_id: default_ctx.user_id,
+                    user_id: ctx.user_id,
                 },
             )?;
             print_json(&items)?;
         }
         Command::Stumble { pod, query } => {
             let items = tools.discover_in_pod(
-                &default_ctx,
+                &ctx,
                 &pod,
                 DiscoverRequest {
                     query,
                     avoid: vec![],
                     limit: 7,
                     mode: DiscoveryMode::Stumble,
-                    user_id: default_ctx.user_id,
+                    user_id: ctx.user_id,
                 },
             )?;
             print_json(&items)?;
@@ -303,23 +338,23 @@ async fn main() -> anyhow::Result<()> {
                 pods
             };
             print_json(&tools.generate_brief(
-                &default_ctx,
+                &ctx,
                 GenerateBriefRequest {
                     pod_slugs,
                     query,
-                    user_id: default_ctx.user_id,
+                    user_id: ctx.user_id,
                 },
             )?)?;
         }
         Command::BlockSource { source } => {
-            tools.block_source(&default_ctx, source)?;
+            tools.block_source(&ctx, source)?;
         }
         Command::BlockTopic { topic } => {
-            tools.block_topic(&default_ctx, topic)?;
+            tools.block_topic(&ctx, topic)?;
         }
-        Command::GetSkillPack { pod } => print_json(&tools.get_skill_pack(&default_ctx, &pod)?)?,
+        Command::GetSkillPack { pod } => print_json(&tools.get_skill_pack(&ctx, &pod)?)?,
         Command::ExportSkillPack { pod, out } => {
-            let export = tools.export_skill_pack(&default_ctx, &pod)?;
+            let export = tools.export_skill_pack(&ctx, &pod)?;
             std::fs::create_dir_all(&out)?;
             for (name, contents) in export.files {
                 std::fs::write(out.join(name), contents)?;
@@ -341,7 +376,7 @@ async fn main() -> anyhow::Result<()> {
                     files.insert(name.to_string(), std::fs::read_to_string(path)?);
                 }
             }
-            print_json(&tools.import_skill_pack(&default_ctx, &pod, files)?)?;
+            print_json(&tools.import_skill_pack(&ctx, &pod, files)?)?;
         }
         Command::ForkSkillPack {
             source_pod,
@@ -349,7 +384,7 @@ async fn main() -> anyhow::Result<()> {
             slug,
         } => {
             print_json(&tools.fork_skill_pack(
-                &default_ctx,
+                &ctx,
                 &source_pod,
                 CreatePodRequest {
                     name,
@@ -360,51 +395,59 @@ async fn main() -> anyhow::Result<()> {
             )?)?;
         }
         Command::ValidateSkillPack { pod } => {
-            print_json(&tools.validate_pod_skill_pack(&default_ctx, &pod)?)?
+            print_json(&tools.validate_pod_skill_pack(&ctx, &pod)?)?
         }
         Command::CreateTenant { slug, name } => {
-            print_json(&tools.create_tenant(CreateTenantRequest { name, slug })?)?
+            print_json(&tools.create_tenant_as(&ctx, CreateTenantRequest { name, slug })?)?
         }
         Command::CreateApiToken {
             user,
             tenant,
             label,
-        } => print_json(&tools.create_dev_token(DevTokenRequest {
-            user_id: user,
-            tenant_slug: tenant,
-            label,
-        })?)?,
+        } => print_json(&tools.create_dev_token_as(
+            &ctx,
+            DevTokenRequest {
+                user_id: user,
+                tenant_slug: tenant,
+                label,
+            },
+        )?)?,
         Command::ListApiTokens => {
+            tools.require_harness_capability(&ctx, HarnessCapability::Administration)?;
             let store = tools.store();
             let store = store.read().unwrap();
             print_json(&store.api_tokens.values().collect::<Vec<_>>())?;
         }
         Command::RevokeApiToken { id } => println!("revocation placeholder accepted for {id}"),
-        Command::NodeInfo => print_json(&tools.node_info(&default_ctx)?)?,
+        Command::RegisterHarness {
+            label,
+            kind,
+            capabilities,
+            pod_ids,
+        } => print_json(&tools.register_agent_harness(
+            &ctx,
+            RegisterAgentHarnessRequest {
+                label,
+                kind: kind.into(),
+                capabilities,
+                pod_ids: (!pod_ids.is_empty()).then_some(pod_ids),
+            },
+        )?)?,
+        Command::RevokeHarness { id } => {
+            tools.revoke_agent_harness(&ctx, id)?;
+            println!("revoked {id}");
+        }
+        Command::NodeInfo => print_json(&tools.node_info(&ctx)?)?,
         Command::AddPeer {
             display_name,
             base_url,
             public_key,
         } => {
-            let store = tools.store();
-            let mut store = store.write().unwrap();
-            let id = uuid::Uuid::now_v7();
-            store.trusted_peers.insert(
-                id,
-                TrustedPeer {
-                    id,
-                    tenant_id: None,
-                    display_name,
-                    base_url,
-                    public_key,
-                    trust_level: TrustLevel::ReadOnly,
-                    enabled: true,
-                    created_at: chrono::Utc::now(),
-                },
-            );
-            println!("added peer {id}");
+            let peer = tools.add_trusted_peer(&ctx, display_name, base_url, public_key)?;
+            println!("added peer {}", peer.id);
         }
         Command::ListPeers => {
+            tools.require_harness_capability(&ctx, HarnessCapability::Administration)?;
             let store = tools.store();
             let store = store.read().unwrap();
             print_json(&store.trusted_peers.values().collect::<Vec<_>>())?;
@@ -413,7 +456,7 @@ async fn main() -> anyhow::Result<()> {
         Command::SyncPod { pod, peer_id } => {
             println!("sync queued for pod {pod} with peer {peer_id}")
         }
-        Command::ExportEvents { pod } => print_json(&tools.export_pod_events(&default_ctx, &pod)?)?,
+        Command::ExportEvents { pod } => print_json(&tools.export_pod_events(&ctx, &pod)?)?,
         Command::ImportEvents {
             pod: _,
             peer_id,
@@ -425,11 +468,11 @@ async fn main() -> anyhow::Result<()> {
                 .filter(|line| !line.trim().is_empty())
                 .map(serde_json::from_str)
                 .collect::<Result<Vec<EventLog>, _>>()?;
-            let imported = tools.import_pod_events(&default_ctx, peer_id, events)?;
+            let imported = tools.import_pod_events(&ctx, peer_id, events)?;
             println!("imported {imported}");
         }
         Command::VerifyEvents { pod } => {
-            let events = tools.export_pod_events(&default_ctx, &pod)?;
+            let events = tools.export_pod_events(&ctx, &pod)?;
             print_json(
                 &serde_json::json!({"pod": pod, "public_events": events.len(), "verified": events.iter().filter(|e| e.verified).count()}),
             )?;

@@ -32,6 +32,33 @@ Home Nodes use `<data-dir>/stumble.sqlite3` as their authoritative store (`.stum
 
 Use `--port <number>` to choose a port without changing the bind host; use `--port 0` to let the operating system assign an available port. Dev-token minting endpoints are enabled on loopback binds and disabled on public binds unless `--allow-public-dev-tokens` is explicitly passed.
 
+## Agent Harness grants
+
+Register each interactive or unattended Agent Harness separately and grant only the capabilities it needs: `feed-read`, `feedback`, `discovery-tasks`, `candidate-submission`, `pod-curation`, `package-management`, `subscription-management`, and `administration`. Add one or more `--pod-id` values to restrict every Pod-facing operation; omit them for all local Pods.
+
+```bash
+podctl --data-dir ~/.stumble/nodes/default register-harness \
+  --label "Nightly discovery" \
+  --kind unattended \
+  --capability discovery-tasks \
+  --capability candidate-submission \
+  --pod-id <pod-uuid>
+
+podctl --data-dir ~/.stumble/nodes/default \
+  --token '<one-time-token>' \
+  submit --pod beautiful-interfaces --url https://example.com/item
+
+podctl --data-dir ~/.stumble/nodes/default revoke-harness <harness-uuid>
+```
+
+The registration response is the only place the plaintext bearer token appears; the Home Node stores its hash. Revocation affects existing HTTP, MCP, and CLI contexts immediately. Harness identity is recorded with successful writes. Tokens, grants, write audits, and private User state remain node-local and are not included in federation Pod lists, manifests, events, or package exports.
+
+Only a direct local owner context may bootstrap an interactive `administration` harness; unattended and delegated administrative grants are forbidden. Later authority expansion remains reserved for the Pending Proposal approval flow. A harness may otherwise delegate only an unattended subset of its own capabilities and Pod scope. On a public bind, every non-public API operation requires a bearer token; unauthenticated owner bootstrap is loopback-only.
+
+Legacy dev tokens remain available for compatibility but are linked to a Harness identity and receive no implicit capabilities. Register a scoped Harness for agent work.
+
+HTTP exposes `POST /harnesses` and `DELETE /harnesses/:id`. MCP exposes `register_agent_harness` and `revoke_agent_harness`; construct an authenticated router with the one-time token. All three adapters return the same core authorization reason, with HTTP mapping denials to `403 Forbidden` and CLI returning a non-zero exit status.
+
 ## Local Mode Examples
 
 ```bash

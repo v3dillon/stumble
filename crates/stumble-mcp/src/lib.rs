@@ -20,9 +20,24 @@ impl McpToolRouter {
         Self { tools, ctx }
     }
 
+    /// Builds a router for a current, non-revoked Harness token.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when authentication or persistence fails, or when the
+    /// token is invalid or revoked.
+    pub fn authenticated(tools: AgentTools, token: &str) -> anyhow::Result<Self> {
+        let ctx = tools
+            .authenticate_token(token)?
+            .ok_or_else(|| anyhow::anyhow!("invalid or revoked Harness token"))?;
+        Ok(Self::new(tools, ctx))
+    }
+
     pub fn tool_names() -> &'static [&'static str] {
         &[
             "list_pods",
+            "register_agent_harness",
+            "revoke_agent_harness",
             "create_pod",
             "join_pod",
             "submit_link_to_pod",
@@ -56,7 +71,18 @@ impl McpToolRouter {
 
     pub fn call(&self, call: McpToolCall) -> anyhow::Result<Value> {
         match call.tool.as_str() {
-            "list_pods" => Ok(json!(self.tools.list_pods(self.ctx.tenant_id)?)),
+            "register_agent_harness" => {
+                let request = serde_json::from_value(call.arguments)?;
+                Ok(json!(self
+                    .tools
+                    .register_agent_harness(&self.ctx, request)?))
+            }
+            "revoke_agent_harness" => {
+                let id = arg_string(&call.arguments, "harness_id")?.parse()?;
+                self.tools.revoke_agent_harness(&self.ctx, id)?;
+                Ok(json!({"revoked": id}))
+            }
+            "list_pods" => Ok(json!(self.tools.list_pods_for_harness(&self.ctx)?)),
             "create_pod" => {
                 let request: CreatePodRequest = serde_json::from_value(call.arguments)?;
                 Ok(json!(self.tools.create_pod(&self.ctx, request)?))
@@ -156,7 +182,7 @@ impl McpToolRouter {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
                 Ok(json!(self.tools.get_skill_pack(&self.ctx, &pod_slug)?))
             }
-            "list_pod_skills" => Ok(json!(self.tools.list_pods(self.ctx.tenant_id)?)),
+            "list_pod_skills" => Ok(json!(self.tools.list_pods_for_harness(&self.ctx)?)),
             "export_pod_skill_pack" => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
                 Ok(json!(self.tools.export_skill_pack(&self.ctx, &pod_slug)?))
@@ -242,4 +268,35 @@ fn string_list(args: &Value, key: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn harness_capability_denial_is_returned_by_mcp() {
+        let tools = AgentTools::new(seed_store());
+        let owner = tools.default_auth_context().unwrap();
+        let issued = tools
+            .register_agent_harness(
+                &owner,
+                RegisterAgentHarnessRequest {
+                    label: "submitter".into(),
+                    kind: AgentHarnessKind::Unattended,
+                    capabilities: vec![HarnessCapability::CandidateSubmission],
+                    pod_ids: None,
+                },
+            )
+            .unwrap();
+        let router = McpToolRouter::authenticated(tools, issued.token.expose()).unwrap();
+        let error = router
+            .call(McpToolCall {
+                tool: "save_link".into(),
+                arguments: json!({"submission_id": Uuid::nil()}),
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("harness grant lacks feedback"));
+    }
 }
