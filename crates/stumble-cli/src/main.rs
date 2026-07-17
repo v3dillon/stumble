@@ -36,6 +36,16 @@ enum Command {
         #[arg(long, default_value = "")]
         description: String,
     },
+    CreatePodPackage {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        slug: String,
+        #[arg(long, default_value = "")]
+        description: String,
+        #[arg(long)]
+        from: PathBuf,
+    },
     ListPods,
     JoinPod {
         pod: String,
@@ -271,6 +281,24 @@ async fn main() -> anyhow::Result<()> {
             )?;
             print_json(&pod)?;
         }
+        Command::CreatePodPackage {
+            name,
+            slug,
+            description,
+            from,
+        } => {
+            let files = read_portable_package_directory(&from)?;
+            let package = pod_package_contents_from_files(&files)?;
+            print_json(&tools.create_private_pod_with_package(
+                &ctx,
+                CreatePrivatePodWithPackageRequest {
+                    name,
+                    slug,
+                    description,
+                    package,
+                },
+            )?)?;
+        }
         Command::ListPods => print_json(&tools.list_pods_for_harness(&ctx)?)?,
         Command::JoinPod { pod } => {
             tools.join_pod(&ctx, &pod)?;
@@ -362,20 +390,7 @@ async fn main() -> anyhow::Result<()> {
             println!("exported {pod}");
         }
         Command::ImportSkillPack { pod, from } => {
-            let mut files = BTreeMap::new();
-            for name in [
-                "pod.yaml",
-                "SKILL.md",
-                "sources.yaml",
-                "filters.yaml",
-                "examples.good.md",
-                "examples.bad.md",
-            ] {
-                let path = from.join(name);
-                if path.exists() {
-                    files.insert(name.to_string(), std::fs::read_to_string(path)?);
-                }
-            }
+            let files = read_portable_package_directory(&from)?;
             print_json(&tools.import_skill_pack(&ctx, &pod, files)?)?;
         }
         Command::ForkSkillPack {
@@ -485,4 +500,21 @@ async fn main() -> anyhow::Result<()> {
 fn print_json<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+fn read_portable_package_directory(
+    path: &std::path::Path,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !PORTABLE_PACKAGE_FILES.contains(&name.as_str()) {
+            anyhow::bail!("unsupported portable Pod Package file {name}");
+        }
+    }
+    let mut files = BTreeMap::new();
+    for name in PORTABLE_PACKAGE_FILES {
+        files.insert(name.to_string(), std::fs::read_to_string(path.join(name))?);
+    }
+    Ok(files)
 }

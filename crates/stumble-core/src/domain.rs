@@ -10,6 +10,54 @@ pub type PodId = Uuid;
 pub type SubmissionId = Uuid;
 pub type PeerId = Uuid;
 pub type NodeIdentityId = Uuid;
+
+/// Positive, immutable version number of a Pod Package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct PackageVersion(i32);
+
+impl<'de> Deserialize<'de> for PackageVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = i32::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl PackageVersion {
+    /// Creates a positive Package Version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is less than one.
+    pub fn new(value: i32) -> Result<Self, PackageVersionError> {
+        if value < 1 {
+            return Err(PackageVersionError(value));
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the wire-compatible integer value.
+    #[must_use]
+    pub const fn value(self) -> i32 {
+        self.0
+    }
+}
+
+impl TryFrom<i32> for PackageVersion {
+    type Error = PackageVersionError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+/// Error returned for a non-positive Package Version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("Package Version must be positive, got {0}")]
+pub struct PackageVersionError(i32);
 /// Stable local identity of an [`AgentHarness`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -361,20 +409,46 @@ pub struct PodRules {
     pub federate_sources: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct PodSkillPack {
+    /// Stable identity shared by the versions of this package.
     pub id: Uuid,
+    /// Pod governed by this package.
     pub pod_id: PodId,
+    /// Legacy wire-compatible numeric version. New storage APIs use [`PackageVersion`].
     pub version: i32,
+    /// Subject language, scope, and boundaries. This is deliberately separate
+    /// from the operational instructions in `skill_md`.
+    #[serde(default)]
+    pub context_md: String,
+    /// Legacy Pod metadata retained for compatibility.
     pub pod_yaml: String,
+    /// Scoped, untrusted discovery and curation instructions.
     pub skill_md: String,
+    /// Declarative Source Rule suggestions.
     pub sources_yaml: String,
+    /// Pod-owned filtering suggestions.
     pub filters_yaml: String,
+    /// Positive calibration examples.
     pub examples_good_md: String,
+    /// Negative calibration examples.
     pub examples_bad_md: String,
+    /// User who owns the authoritative package version.
+    #[serde(default)]
+    pub owner_id: Option<UserId>,
+    /// Harness that proposed this package version, if any.
+    #[serde(default)]
+    pub proposer_harness_id: Option<AgentHarnessId>,
+    /// Timestamp at which this immutable version was created.
     pub created_at: DateTime<Utc>,
+    /// Legacy alias of `created_at` retained for wire compatibility.
     pub updated_at: DateTime<Utc>,
 }
+
+/// Canonical name for the signed, versioned bundle historically exposed as a
+/// `PodSkillPack`. The legacy name remains for wire and source compatibility.
+pub type PodPackage = PodSkillPack;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventLog {
@@ -675,6 +749,63 @@ pub struct CreatePodRequest {
     pub visibility: Visibility,
 }
 
+/// Complete portable contents of one Pod Package version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    deny_unknown_fields,
+    rename_all = "snake_case",
+    try_from = "RawPodPackageContents"
+)]
+pub struct PodPackageContents {
+    /// Subject language, scope, and boundaries.
+    pub context_md: String,
+    /// Scoped, untrusted harness instructions.
+    pub skill_md: String,
+    /// Declarative Source Rules.
+    pub sources_yaml: String,
+    /// Pod-owned filters.
+    pub filters_yaml: String,
+    /// Positive calibration examples.
+    pub examples_good_md: String,
+    /// Negative calibration examples.
+    pub examples_bad_md: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub(crate) struct RawPodPackageContents {
+    pub context_md: String,
+    pub skill_md: String,
+    pub sources_yaml: String,
+    pub filters_yaml: String,
+    pub examples_good_md: String,
+    pub examples_bad_md: String,
+}
+
+/// Atomic request to create a private Pod and its first package version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct CreatePrivatePodWithPackageRequest {
+    /// Display name for the private Pod.
+    pub name: String,
+    /// Stable local URL slug.
+    pub slug: String,
+    /// Human-readable Pod summary.
+    pub description: String,
+    /// Complete validated initial package contents.
+    pub package: PodPackageContents,
+}
+
+/// Result of atomically creating a private Pod and package.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CreatedPodPackage {
+    /// Newly created private Pod.
+    pub pod: Pod,
+    /// Immutable initial package version.
+    pub package: PodPackage,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubmitLinkRequest {
     pub url: String,
@@ -775,6 +906,8 @@ pub struct GenerateBriefRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillPackPatch {
+    #[serde(default)]
+    pub context_md: Option<String>,
     pub pod_yaml: Option<String>,
     pub skill_md: Option<String>,
     pub sources_yaml: Option<String>,

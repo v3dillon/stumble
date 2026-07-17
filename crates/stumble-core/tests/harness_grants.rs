@@ -31,7 +31,7 @@ fn scoped_harness_grants_are_revocable_and_auditable() {
                 name: "Allowed".into(),
                 slug: "allowed".into(),
                 description: String::new(),
-                visibility: Visibility::Private,
+                visibility: Visibility::Public,
             },
         )
         .unwrap();
@@ -214,7 +214,7 @@ fn grant_capabilities_are_independent_and_local_only() {
         .unwrap();
 
     let curation = harness_context(&tools, &owner, HarnessCapability::PodCuration, None);
-    tools
+    let curated = tools
         .create_pod(
             &curation,
             CreatePodRequest {
@@ -230,13 +230,14 @@ fn grant_capabilities_are_independent_and_local_only() {
         &tools,
         &owner,
         HarnessCapability::PackageManagement,
-        Some(vec![pod.id]),
+        Some(vec![curated.id]),
     );
     tools
         .patch_skill_pack(
             &packages,
-            "capabilities",
+            "curated",
             SkillPackPatch {
+                context_md: None,
                 pod_yaml: None,
                 skill_md: Some("# Capability package\n\nUse only relevant sources.".into()),
                 sources_yaml: None,

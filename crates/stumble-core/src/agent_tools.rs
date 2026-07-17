@@ -5,7 +5,8 @@ use crate::signing::{
 };
 use crate::skill_pack::{
     default_skill_pack, export_skill_pack, fork_skill_pack, import_skill_pack, patch_skill_pack,
-    skill_pack_payload, validate_skill_pack,
+    pod_package_contents_from_files, validate_pod_package_contents,
+    validate_portable_package_files, validate_skill_pack,
 };
 use crate::store::{
     load_or_initialize_sqlite_store, load_sqlite_store, persist_sqlite_store_changes,
@@ -731,9 +732,10 @@ impl AgentTools {
                 federate_sources: matches!(pod.visibility, Visibility::Public),
             },
         );
-        store
-            .pod_skill_packs
-            .insert(pod.id, default_skill_pack(&pod));
+        let mut package = default_skill_pack(&pod);
+        package.proposer_harness_id = ctx.harness_id;
+        store.insert_pod_package_version(package.clone())?;
+        store.pod_skill_packs.insert(pod.id, package.clone());
         if let Some(user_id) = ctx.user_id {
             store.pod_memberships.push(PodMembership {
                 user_id,
@@ -746,7 +748,7 @@ impl AgentTools {
             &node,
             "pod_created",
             &pod.slug,
-            json!({"pod": pod.clone()}),
+            json!({"pod": pod.clone(), "package": package}),
             store.latest_event_hash(&pod.slug),
         )?;
         store.event_log.push(event);
@@ -758,6 +760,106 @@ impl AgentTools {
         );
         self.persist_locked(&mut store)?;
         Ok(pod)
+    }
+
+    /// Atomically creates a private Pod and its complete initial Pod Package.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when authorization or validation fails, the slug is in
+    /// use, signing fails, or persistence cannot commit the complete operation.
+    pub fn create_private_pod_with_package(
+        &self,
+        ctx: &AuthContext,
+        request: CreatePrivatePodWithPackageRequest,
+    ) -> Result<CreatedPodPackage, AgentToolsError> {
+        let validation = validate_pod_package_contents(&request.package);
+        if !validation.valid {
+            return Err(StoreError::Validation(validation.errors.join(", ")).into());
+        }
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness_for_new_pod(&store, ctx, HarnessCapability::PodCuration)?;
+        authorize_harness_for_new_pod(&store, ctx, HarnessCapability::PackageManagement)?;
+        if store
+            .pods
+            .values()
+            .any(|pod| pod.slug == request.slug && pod.tenant_id == ctx.tenant_id)
+        {
+            return Err(StoreError::Duplicate(format!("pod {}", request.slug)).into());
+        }
+        let owner_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("private Pod Package requires an owner".to_string())
+        })?;
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        let now = Utc::now();
+        let pod = Pod {
+            id: Uuid::now_v7(),
+            tenant_id: ctx.tenant_id,
+            name: request.name,
+            slug: request.slug,
+            description: request.description,
+            visibility: Visibility::Private,
+            created_by: Some(owner_id),
+            created_at: now,
+            origin_node_id: Some(node.id),
+        };
+        let package = PodSkillPack {
+            id: Uuid::now_v7(),
+            pod_id: pod.id,
+            version: 1,
+            context_md: request.package.context_md,
+            pod_yaml: format!(
+                "name: {}\nslug: {}\ndescription: {}\nvisibility: private\n",
+                pod.name, pod.slug, pod.description
+            ),
+            skill_md: request.package.skill_md,
+            sources_yaml: request.package.sources_yaml,
+            filters_yaml: request.package.filters_yaml,
+            examples_good_md: request.package.examples_good_md,
+            examples_bad_md: request.package.examples_bad_md,
+            owner_id: Some(owner_id),
+            proposer_harness_id: ctx.harness_id,
+            created_at: now,
+            updated_at: now,
+        };
+        store.pods.insert(pod.id, pod.clone());
+        store.pod_rules.insert(
+            pod.id,
+            PodRules {
+                pod_id: pod.id,
+                blocked_topics: Vec::new(),
+                blocked_domains: Vec::new(),
+                auto_promote_crawler_candidates: false,
+                federate_sources: false,
+            },
+        );
+        store.pod_memberships.push(PodMembership {
+            user_id: owner_id,
+            pod_id: pod.id,
+            role: PodRole::Owner,
+            created_at: now,
+        });
+        store.insert_pod_package_version(package.clone())?;
+        store.pod_skill_packs.insert(pod.id, package.clone());
+        let event = sign_public_event(
+            &node,
+            "private_pod_package_created",
+            &pod.slug,
+            json!({"pod": pod, "package": package}),
+            store.latest_event_hash(&pod.slug),
+        )?;
+        store.event_log.push(event);
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::CreatePod,
+            Some(pod.id),
+        );
+        self.persist_locked(&mut store)?;
+        Ok(CreatedPodPackage { pod, package })
     }
 
     pub fn join_pod(&self, ctx: &AuthContext, pod_slug: &str) -> Result<(), AgentToolsError> {
@@ -1249,6 +1351,32 @@ impl AgentTools {
             .ok_or_else(|| StoreError::NotFound("skill pack".to_string()).into())
     }
 
+    /// Reads one immutable historical Pod Package version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Pod or version does not exist, the Harness is
+    /// outside its Pod scope, or the store lock is poisoned.
+    pub fn get_pod_package_version(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+        version: PackageVersion,
+    ) -> Result<PodPackage, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        authorize_harness_pod_scope(&store, ctx, pod.id)?;
+        store
+            .pod_package_version(pod.id, version)
+            .cloned()
+            .ok_or_else(|| {
+                StoreError::NotFound(format!("Pod Package version {}", version.value())).into()
+            })
+    }
+
     pub fn pod_agent_context(
         &self,
         ctx: &AuthContext,
@@ -1298,20 +1426,30 @@ impl AgentTools {
             HarnessCapability::PackageManagement,
             Some(pod.id),
         )?;
+        ensure_direct_package_revision_allowed(&store, ctx, &pod)?;
         let existing = store
             .pod_skill_packs
             .get(&pod.id)
             .cloned()
             .ok_or_else(|| StoreError::NotFound("skill pack".to_string()))?;
-        let pack = patch_skill_pack(&existing, patch);
+        let mut pack = patch_skill_pack(&existing, patch);
+        let validation = validate_skill_pack(&pack);
+        if !validation.valid {
+            return Err(StoreError::Validation(validation.errors.join(", ")).into());
+        }
+        let now = Utc::now();
+        pack.created_at = now;
+        pack.updated_at = now;
+        pack.proposer_harness_id = ctx.harness_id;
         let node = store.node_for_tenant(ctx.tenant_id)?;
         let event = sign_public_event(
             &node,
             "pod_skill_pack_updated",
             &pod.slug,
-            skill_pack_payload(&pack),
+            json!({"package": pack}),
             store.latest_event_hash(&pod.slug),
         )?;
+        store.insert_pod_package_version(pack.clone())?;
         store.pod_skill_packs.insert(pod.id, pack.clone());
         store.event_log.push(event);
         record_harness_write(
@@ -1366,17 +1504,34 @@ impl AgentTools {
             HarnessCapability::PackageManagement,
             Some(pod.id),
         )?;
+        ensure_direct_package_revision_allowed(&store, ctx, &pod)?;
         let existing = store
             .pod_skill_packs
             .get(&pod.id)
             .cloned()
             .ok_or_else(|| StoreError::NotFound("skill pack".to_string()))?;
-        let pack = import_skill_pack(&existing, &files);
+        validate_portable_package_files(&files)?;
+        verify_portable_package_history(&store, &files)?;
+        let mut pack = import_skill_pack(&existing, &files);
         let report = validate_skill_pack(&pack);
         if !report.valid {
             return Err(StoreError::Validation(report.errors.join(", ")).into());
         }
+        let now = Utc::now();
+        pack.created_at = now;
+        pack.updated_at = now;
+        pack.proposer_harness_id = ctx.harness_id;
+        store.insert_pod_package_version(pack.clone())?;
         store.pod_skill_packs.insert(pod.id, pack.clone());
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        let event = sign_public_event(
+            &node,
+            "pod_package_imported",
+            &pod.slug,
+            json!({"package": pack}),
+            store.latest_event_hash(&pod.slug),
+        )?;
+        store.event_log.push(event);
         record_harness_write(
             &mut store,
             ctx,
@@ -1393,14 +1548,32 @@ impl AgentTools {
         source_pod_slug: &str,
         target: CreatePodRequest,
     ) -> Result<PodSkillPack, AgentToolsError> {
+        if target.visibility == Visibility::Public {
+            return Err(StoreError::Validation(
+                "public Package Revisions require Pending Proposal approval".to_string(),
+            )
+            .into());
+        }
         let source_pack = self.get_skill_pack(ctx, source_pod_slug)?;
         let target_pod = self.create_pod(ctx, target)?;
-        let forked = fork_skill_pack(&source_pack, &target_pod);
+        let mut forked = fork_skill_pack(&source_pack, &target_pod);
+        forked.proposer_harness_id = ctx.harness_id;
         let mut store = self
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
+        forked.version = 2;
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        let event = sign_public_event(
+            &node,
+            "pod_package_forked",
+            &target_pod.slug,
+            json!({"package": forked}),
+            store.latest_event_hash(&target_pod.slug),
+        )?;
+        store.insert_pod_package_version(forked.clone())?;
         store.pod_skill_packs.insert(target_pod.id, forked.clone());
+        store.event_log.push(event);
         record_harness_write(
             &mut store,
             ctx,
@@ -2869,6 +3042,104 @@ fn record_harness_write(
             occurred_at: Utc::now(),
         });
     }
+}
+
+fn verify_portable_package_history(
+    store: &InMemoryStore,
+    files: &BTreeMap<String, String>,
+) -> Result<(), AgentToolsError> {
+    let events_text = files.get("events.jsonl").ok_or_else(|| {
+        StoreError::Validation("portable Pod Package is missing events.jsonl".into())
+    })?;
+    let events = events_text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str::<EventLog>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| StoreError::Validation(format!("events.jsonl is invalid: {error}")))?;
+    if events.is_empty() {
+        return Err(StoreError::Validation(
+            "events.jsonl must contain signed package history".to_string(),
+        )
+        .into());
+    }
+    let mut previous_hash: Option<&str> = None;
+    for event in &events {
+        if event.previous_event_hash.as_deref() != previous_hash {
+            return Err(StoreError::InvalidSignature.into());
+        }
+        let public_key = store
+            .node_identities
+            .get(&event.author_node_id)
+            .filter(|node| node.tenant_id == event.tenant_id)
+            .map(|node| node.public_key.as_str())
+            .or_else(|| {
+                store
+                    .hub_nodes
+                    .get(&event.author_node_id)
+                    .map(|node| node.public_key.as_str())
+            })
+            .or_else(|| {
+                store
+                    .trusted_peers
+                    .get(&event.author_node_id)
+                    .filter(|peer| peer.enabled)
+                    .map(|peer| peer.public_key.as_str())
+            })
+            .ok_or(StoreError::UntrustedPeer)?;
+        if !verify_event(event, public_key)? {
+            return Err(StoreError::InvalidSignature.into());
+        }
+        previous_hash = Some(&event.content_hash);
+    }
+    let requested = pod_package_contents_from_files(files)?;
+    let has_signed_contents = events.iter().any(|event| {
+        event
+            .payload_json
+            .get("package")
+            .and_then(|value| serde_json::from_value::<PodSkillPack>(value.clone()).ok())
+            .is_some_and(|package| package_contents_match(&package, &requested))
+    });
+    if !has_signed_contents {
+        return Err(StoreError::Validation(
+            "events.jsonl does not contain the signed package contents".to_string(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn ensure_direct_package_revision_allowed(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    pod: &Pod,
+) -> Result<(), AgentToolsError> {
+    let local_node = store.node_for_tenant(ctx.tenant_id)?;
+    if pod
+        .origin_node_id
+        .is_some_and(|origin_node_id| origin_node_id != local_node.id)
+    {
+        return Err(StoreError::Validation(
+            "remote Pod Packages may change only through verified synchronization".to_string(),
+        )
+        .into());
+    }
+    if pod.visibility == Visibility::Public {
+        return Err(StoreError::Validation(
+            "public Package Revisions require Pending Proposal approval".to_string(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn package_contents_match(package: &PodSkillPack, contents: &PodPackageContents) -> bool {
+    package.context_md == contents.context_md
+        && package.skill_md == contents.skill_md
+        && package.sources_yaml == contents.sources_yaml
+        && package.filters_yaml == contents.filters_yaml
+        && package.examples_good_md == contents.examples_good_md
+        && package.examples_bad_md == contents.examples_bad_md
 }
 
 fn normalize_capabilities(mut capabilities: Vec<HarnessCapability>) -> Vec<HarnessCapability> {

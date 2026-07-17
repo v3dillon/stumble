@@ -33,6 +33,8 @@ pub enum StorePersistenceError {
     Sqlite(#[from] rusqlite::Error),
     #[error("unsupported store version: {0}")]
     UnsupportedVersion(u32),
+    #[error(transparent)]
+    InvalidPackageVersion(#[from] PackageVersionError),
     #[error("concurrent write conflict in {collection} record {record_key}")]
     ConcurrentWriteConflict {
         collection: String,
@@ -56,6 +58,8 @@ pub struct InMemoryStore {
     pub pod_memberships: Vec<PodMembership>,
     pub pod_rules: HashMap<PodId, PodRules>,
     pub pod_skill_packs: HashMap<PodId, PodSkillPack>,
+    /// Immutable historical Pod Package versions.
+    pub(crate) pod_package_versions: HashMap<(PodId, PackageVersion), PodPackage>,
     pub event_log: Vec<EventLog>,
     pub submissions: HashMap<SubmissionId, Submission>,
     pub submission_pods: Vec<SubmissionPod>,
@@ -89,6 +93,8 @@ struct PersistedStore {
     pod_memberships: Vec<PodMembership>,
     pod_rules: Vec<PodRules>,
     pod_skill_packs: Vec<PodSkillPack>,
+    #[serde(default, alias = "pod_skill_pack_versions")]
+    pod_package_versions: Vec<PodSkillPack>,
     event_log: Vec<EventLog>,
     submissions: Vec<Submission>,
     submission_pods: Vec<SubmissionPod>,
@@ -134,6 +140,7 @@ impl From<&InMemoryStore> for PersistedStore {
             pod_memberships: store.pod_memberships.clone(),
             pod_rules: store.pod_rules.values().cloned().collect(),
             pod_skill_packs: store.pod_skill_packs.values().cloned().collect(),
+            pod_package_versions: store.pod_package_versions.values().cloned().collect(),
             event_log: store.event_log.clone(),
             submissions: store.submissions.values().cloned().collect(),
             submission_pods: store.submission_pods.clone(),
@@ -174,9 +181,25 @@ impl From<&InMemoryStore> for PersistedStore {
     }
 }
 
-impl From<PersistedStore> for InMemoryStore {
-    fn from(snapshot: PersistedStore) -> Self {
-        Self {
+impl TryFrom<PersistedStore> for InMemoryStore {
+    type Error = StorePersistenceError;
+
+    fn try_from(snapshot: PersistedStore) -> Result<Self, Self::Error> {
+        let current_skill_packs = snapshot.pod_skill_packs;
+        let mut historical_skill_packs = snapshot
+            .pod_package_versions
+            .into_iter()
+            .map(|pack| {
+                PackageVersion::new(pack.version).map(|version| ((pack.pod_id, version), pack))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
+        for pack in &current_skill_packs {
+            let version = PackageVersion::new(pack.version)?;
+            historical_skill_packs
+                .entry((pack.pod_id, version))
+                .or_insert_with(|| pack.clone());
+        }
+        Ok(Self {
             tenants: snapshot
                 .tenants
                 .into_iter()
@@ -216,11 +239,11 @@ impl From<PersistedStore> for InMemoryStore {
                 .into_iter()
                 .map(|rules| (rules.pod_id, rules))
                 .collect(),
-            pod_skill_packs: snapshot
-                .pod_skill_packs
+            pod_skill_packs: current_skill_packs
                 .into_iter()
                 .map(|pack| (pack.pod_id, pack))
                 .collect(),
+            pod_package_versions: historical_skill_packs,
             event_log: snapshot.event_log,
             submissions: snapshot
                 .submissions
@@ -279,7 +302,7 @@ impl From<PersistedStore> for InMemoryStore {
                 .into_iter()
                 .map(|pod| ((pod.node_id, pod.pod_slug.clone()), pod))
                 .collect(),
-        }
+        })
     }
 }
 
@@ -304,7 +327,7 @@ pub fn load_store_snapshot(path: &Path) -> Result<InMemoryStore, StorePersistenc
     if snapshot.version != 1 {
         return Err(StorePersistenceError::UnsupportedVersion(snapshot.version));
     }
-    Ok(snapshot.into())
+    snapshot.try_into()
 }
 
 pub fn load_or_seed_store_snapshot(
@@ -335,6 +358,7 @@ const STORE_COLLECTIONS: &[&str] = &[
     "pod_memberships",
     "pod_rules",
     "pod_skill_packs",
+    "pod_package_versions",
     "event_log",
     "submissions",
     "submission_pods",
@@ -549,7 +573,7 @@ fn load_sqlite_store_from_connection(
     if snapshot.version != 1 {
         return Err(StorePersistenceError::UnsupportedVersion(snapshot.version));
     }
-    Ok(snapshot.into())
+    snapshot.try_into()
 }
 
 fn store_records(store: &InMemoryStore) -> Result<StoreRecords, StorePersistenceError> {
@@ -587,6 +611,7 @@ fn record_key(
         "hub_pods" => &["node_id", "pod_slug"],
         "hub_nodes" => &["node_id"],
         "pod_rules" | "pod_skill_packs" => &["pod_id"],
+        "pod_package_versions" => &["pod_id", "version"],
         "event_log" => &["event_id"],
         "feedback_events" => return Ok(serde_json::to_string(value)?),
         "harness_write_audit" => &["id"],
@@ -605,6 +630,33 @@ fn record_key(
 }
 
 impl InMemoryStore {
+    /// Stores a Pod Package version once and refuses replacement.
+    pub(crate) fn insert_pod_package_version(
+        &mut self,
+        package: PodPackage,
+    ) -> Result<(), StoreError> {
+        let version = PackageVersion::new(package.version)
+            .map_err(|error| StoreError::Validation(error.to_string()))?;
+        let key = (package.pod_id, version);
+        if self.pod_package_versions.contains_key(&key) {
+            return Err(StoreError::Duplicate(format!(
+                "Pod Package version {} for Pod {}",
+                version.value(),
+                package.pod_id
+            )));
+        }
+        self.pod_package_versions.insert(key, package);
+        Ok(())
+    }
+
+    pub(crate) fn pod_package_version(
+        &self,
+        pod_id: PodId,
+        version: PackageVersion,
+    ) -> Option<&PodPackage> {
+        self.pod_package_versions.get(&(pod_id, version))
+    }
+
     pub fn default_node(&self) -> Result<NodeIdentity, StoreError> {
         self.node_identities
             .values()

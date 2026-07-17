@@ -43,13 +43,13 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 **Blocked by:** Boot the Home Node from SQLite; Authorize Agent Harnesses with scoped grants.
 
-- [ ] A harness can create a private Pod and its initial complete Pod Package in one flow.
-- [ ] Package validation distinguishes subject context from scoped curation instructions.
-- [ ] Source Rules express what a harness should inspect, seek, and schedule without executable connector code or credentials.
-- [ ] Package import and export round-trip through the portable directory format.
-- [ ] Package versions are immutable and attributable to their proposer and owner.
-- [ ] Remote or imported packages cannot alter Harness Grants, browser permissions, or other node-local authority.
-- [ ] HTTP, MCP, and CLI expose equivalent create, read, validate, import, and export behavior.
+- [x] A harness can create a private Pod and its initial complete Pod Package in one flow.
+- [x] Package validation distinguishes subject context from scoped curation instructions.
+- [x] Source Rules express what a harness should inspect, seek, and schedule without executable connector code or credentials.
+- [x] Package import and export round-trip through the portable directory format.
+- [x] Package versions are immutable and attributable to their proposer and owner.
+- [x] Remote or imported packages cannot alter Harness Grants, browser permissions, or other node-local authority.
+- [x] HTTP, MCP, and CLI expose equivalent create, read, validate, import, and export behavior.
 
 ## Claim scheduled Discovery Tasks
 

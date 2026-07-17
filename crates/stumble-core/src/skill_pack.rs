@@ -1,10 +1,42 @@
 use crate::domain::{
-    CreatePodRequest, ExportedSkillPack, Pod, PodSkillPack, SkillPackPatch, ValidationReport,
+    CreatePodRequest, ExportedSkillPack, Pod, PodPackageContents, PodSkillPack, SkillPackPatch,
+    ValidationReport,
 };
 use chrono::Utc;
+use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
 use uuid::Uuid;
+
+/// Typed validation failure for portable Pod Package contents.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PodPackageValidationError {
+    /// A required portable component has no content.
+    #[error("{component} is empty")]
+    EmptyComponent { component: &'static str },
+    /// Pod Context contains operational instruction language.
+    #[error("CONTEXT.md must describe subject scope and boundaries, not agent instructions")]
+    ContextContainsInstructions,
+    /// The Source Rule document is absent or malformed.
+    #[error("sources.yaml must contain declarative non-executable Source Rules without credentials: {reason}")]
+    InvalidSourceRules { reason: String },
+    /// The filter document is malformed.
+    #[error("filters.yaml is not valid YAML: {reason}")]
+    InvalidFilters { reason: String },
+}
+
+/// Collection of typed Pod Package validation failures.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{}", .0.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))]
+pub struct PodPackageValidationErrors(Vec<PodPackageValidationError>);
+
+impl PodPackageValidationErrors {
+    /// Returns every typed validation failure.
+    #[must_use]
+    pub fn errors(&self) -> &[PodPackageValidationError] {
+        &self.0
+    }
+}
 
 pub fn default_skill_pack(pod: &Pod) -> PodSkillPack {
     let pod_yaml = format!(
@@ -20,48 +52,329 @@ pub fn default_skill_pack(pod: &Pod) -> PodSkillPack {
         id: Uuid::now_v7(),
         pod_id: pod.id,
         version: 1,
+        context_md: format!(
+            "# {}\n\n## Scope\n\n{}\n\n## Boundaries\n\nThis context defines the Pod subject; curation instructions belong in SKILL.md.\n",
+            pod.name, pod.description
+        ),
         pod_yaml,
         skill_md,
-        sources_yaml: "sources: []\n".to_string(),
+        sources_yaml: "source_rules:\n  - inspect:\n      kind: publication\n      name: sources relevant to this Pod subject\n    seek:\n      description: durable material within the Pod scope\n    schedule:\n      cadence: on_demand\n".to_string(),
         filters_yaml: "blocked_topics: []\nblocked_domains: []\ndownrank:\n  - generic AI hype\n  - VC announcement\n  - product launch without artifact\nauto_promote_crawler_candidates: false\n".to_string(),
         examples_good_md: "# Good examples\n\n- Links with artifacts, demos, clear notes, or durable ideas.\n".to_string(),
         examples_bad_md: "# Bad examples\n\n- Engagement bait, politics, generic hype, or thin launches.\n".to_string(),
+        owner_id: pod.created_by,
+        proposer_harness_id: None,
         created_at: now,
         updated_at: now,
     }
 }
 
 pub fn validate_skill_pack(pack: &PodSkillPack) -> ValidationReport {
-    let mut errors = Vec::new();
+    validate_pod_package_contents(&PodPackageContents {
+        context_md: pack.context_md.clone(),
+        skill_md: pack.skill_md.clone(),
+        sources_yaml: pack.sources_yaml.clone(),
+        filters_yaml: pack.filters_yaml.clone(),
+        examples_good_md: pack.examples_good_md.clone(),
+        examples_bad_md: pack.examples_bad_md.clone(),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceRulesDocument {
+    source_rules: Vec<SourceRuleSuggestion>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceRuleSuggestion {
+    inspect: InspectionKind,
+    seek: DiscoveryObjective,
+    schedule: ScheduleSuggestion,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum InspectionKind {
+    Publication { name: CredentialFreeText },
+    Website { url: CredentialFreeUrl },
+    Domain { domain: DomainName },
+    SearchTopic { topic: CredentialFreeText },
+}
+
+impl InspectionKind {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Publication { name } => name.0.trim().is_empty(),
+            Self::Website { url } => url.0.as_str().is_empty(),
+            Self::Domain { domain } => domain.0.is_empty(),
+            Self::SearchTopic { topic } => topic.0.trim().is_empty(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiscoveryObjective {
+    description: CredentialFreeText,
+}
+
+#[derive(Debug)]
+struct CredentialFreeText(String);
+
+#[derive(Debug)]
+struct CredentialFreeUrl(url::Url);
+
+#[derive(Debug)]
+struct DomainName(String);
+
+impl<'de> Deserialize<'de> for CredentialFreeText {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        validate_credential_free_text(&value).map_err(serde::de::Error::custom)?;
+        Ok(Self(value))
+    }
+}
+
+fn validate_credential_free_text(value: &str) -> Result<(), &'static str> {
+    let normalized = value.to_ascii_lowercase();
+    let mut cursor = 0;
+    while let Some(relative_start) = next_http_scheme(&normalized[cursor..]) {
+        let start = cursor + relative_start;
+        let candidate = &value[start..];
+        let end = candidate
+            .find(|character: char| {
+                character.is_whitespace()
+                    || matches!(
+                        character,
+                        ')' | ']' | '}' | ',' | ';' | '<' | '>' | '"' | '\''
+                    )
+            })
+            .unwrap_or(candidate.len());
+        let url = url::Url::parse(&candidate[..end]).map_err(|_| "invalid embedded URL")?;
+        validate_credential_free_url(&url)?;
+        cursor = start + end;
+    }
+    if has_credential_assignment(&normalized) {
+        return Err("embedded credentials are not allowed");
+    }
+    Ok(())
+}
+
+fn next_http_scheme(value: &str) -> Option<usize> {
+    [value.find("http://"), value.find("https://")]
+        .into_iter()
+        .flatten()
+        .min()
+}
+
+impl<'de> Deserialize<'de> for CredentialFreeUrl {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let url = url::Url::parse(&value).map_err(serde::de::Error::custom)?;
+        validate_credential_free_url(&url).map_err(serde::de::Error::custom)?;
+        Ok(Self(url))
+    }
+}
+
+fn validate_credential_free_url(url: &url::Url) -> Result<(), &'static str> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("website URL must use HTTP or HTTPS");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("URL user information is not allowed");
+    }
+    if url.query().is_some() {
+        return Err("URL query parameters are not allowed");
+    }
+    if url.fragment().is_some() {
+        return Err("URL fragments are not allowed");
+    }
+    Ok(())
+}
+
+fn has_credential_assignment(value: &str) -> bool {
+    CREDENTIAL_NAMES
+        .into_iter()
+        .any(|name| value.contains(&format!("{name}=")) || value.contains(&format!("{name}:")))
+        || value.contains("authorization:")
+}
+
+impl<'de> Deserialize<'de> for DomainName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let parsed =
+            url::Url::parse(&format!("https://{value}")).map_err(serde::de::Error::custom)?;
+        let labels_are_valid = value.contains('.')
+            && value.len() <= 253
+            && value.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric() || character == '-')
+            });
+        let is_domain = labels_are_valid
+            && matches!(parsed.host(), Some(url::Host::Domain(domain)) if domain == value)
+            && parsed.port().is_none()
+            && parsed.path() == "/"
+            && parsed.query().is_none()
+            && parsed.fragment().is_none();
+        if !is_domain {
+            return Err(serde::de::Error::custom(
+                "invalid credential-free domain name",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+const CREDENTIAL_NAMES: [&str; 11] = [
+    "api_key",
+    "apikey",
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "auth_token",
+    "bearer_token",
+    "token",
+    "client_secret",
+    "secret",
+    "password",
+];
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScheduleSuggestion {
+    cadence: SourceRuleCadence,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SourceRuleCadence {
+    OnDemand,
+    Hourly,
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+/// Validates all required portable package components and their trust boundary.
+#[must_use]
+pub fn validate_pod_package_contents(contents: &PodPackageContents) -> ValidationReport {
+    let errors = pod_package_validation_errors(contents);
     let mut warnings = Vec::new();
-    if pack.pod_yaml.trim().is_empty() {
-        errors.push("pod.yaml is empty".to_string());
-    } else if serde_yaml::from_str::<serde_yaml::Value>(&pack.pod_yaml).is_err() {
-        errors.push("pod.yaml is not valid YAML".to_string());
-    }
-    if pack.sources_yaml.trim().is_empty() {
-        warnings.push("sources.yaml is empty; crawler will have no approved sources".to_string());
-    } else if serde_yaml::from_str::<serde_yaml::Value>(&pack.sources_yaml).is_err() {
-        errors.push("sources.yaml is not valid YAML".to_string());
-    }
-    if pack.filters_yaml.trim().is_empty() {
-        warnings.push("filters.yaml is empty; pod-level filters will be weak".to_string());
-    } else if serde_yaml::from_str::<serde_yaml::Value>(&pack.filters_yaml).is_err() {
-        errors.push("filters.yaml is not valid YAML".to_string());
-    }
-    if !pack.skill_md.contains("#") {
+    if !contents.skill_md.trim().is_empty() && !contents.skill_md.contains('#') {
         warnings.push("SKILL.md has no headings".to_string());
     }
     ValidationReport {
         valid: errors.is_empty(),
-        errors,
+        errors: errors.iter().map(ToString::to_string).collect(),
         warnings,
+    }
+}
+
+fn pod_package_validation_errors(contents: &PodPackageContents) -> Vec<PodPackageValidationError> {
+    let mut errors = Vec::new();
+    for (component, value) in [
+        ("CONTEXT.md", contents.context_md.as_str()),
+        ("SKILL.md", contents.skill_md.as_str()),
+        ("sources.yaml", contents.sources_yaml.as_str()),
+        ("filters.yaml", contents.filters_yaml.as_str()),
+        ("examples.good.md", contents.examples_good_md.as_str()),
+        ("examples.bad.md", contents.examples_bad_md.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            errors.push(PodPackageValidationError::EmptyComponent { component });
+        }
+    }
+    let context = contents.context_md.to_lowercase();
+    if context.contains("## instructions")
+        || context.contains("ignore harness")
+        || context.contains("you must")
+    {
+        errors.push(PodPackageValidationError::ContextContainsInstructions);
+    }
+    if !contents.sources_yaml.trim().is_empty() {
+        match serde_yaml::from_str::<SourceRulesDocument>(&contents.sources_yaml) {
+            Ok(document) if document.source_rules.is_empty() => {
+                errors.push(PodPackageValidationError::InvalidSourceRules {
+                    reason: "at least one Source Rule is required".to_string(),
+                })
+            }
+            Ok(document) => {
+                for rule in document.source_rules {
+                    if rule.inspect.is_empty() || rule.seek.description.0.trim().is_empty() {
+                        errors.push(PodPackageValidationError::InvalidSourceRules {
+                            reason: "each rule requires inspect, seek, and schedule".to_string(),
+                        });
+                    }
+                    let _ = &rule.schedule.cadence;
+                }
+            }
+            Err(error) => errors.push(PodPackageValidationError::InvalidSourceRules {
+                reason: error.to_string(),
+            }),
+        }
+    }
+    if !contents.filters_yaml.trim().is_empty() {
+        if let Err(error) = serde_yaml::from_str::<serde_yaml::Value>(&contents.filters_yaml) {
+            errors.push(PodPackageValidationError::InvalidFilters {
+                reason: error.to_string(),
+            });
+        }
+    }
+    errors
+}
+
+/// Returns typed failures for invalid package contents.
+///
+/// # Errors
+///
+/// Returns every structural or trust-boundary validation failure.
+pub fn validate_pod_package_contents_typed(
+    contents: &PodPackageContents,
+) -> Result<(), PodPackageValidationErrors> {
+    let errors = pod_package_validation_errors(contents);
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(PodPackageValidationErrors(errors))
+    }
+}
+
+impl TryFrom<crate::domain::RawPodPackageContents> for PodPackageContents {
+    type Error = PodPackageValidationErrors;
+
+    fn try_from(raw: crate::domain::RawPodPackageContents) -> Result<Self, Self::Error> {
+        let contents = Self {
+            context_md: raw.context_md,
+            skill_md: raw.skill_md,
+            sources_yaml: raw.sources_yaml,
+            filters_yaml: raw.filters_yaml,
+            examples_good_md: raw.examples_good_md,
+            examples_bad_md: raw.examples_bad_md,
+        };
+        validate_pod_package_contents_typed(&contents)?;
+        Ok(contents)
     }
 }
 
 pub fn export_skill_pack(pack: &PodSkillPack, events_jsonl: String) -> ExportedSkillPack {
     let mut files = BTreeMap::new();
-    files.insert("pod.yaml".to_string(), pack.pod_yaml.clone());
+    files.insert("CONTEXT.md".to_string(), pack.context_md.clone());
     files.insert("SKILL.md".to_string(), pack.skill_md.clone());
     files.insert("sources.yaml".to_string(), pack.sources_yaml.clone());
     files.insert("filters.yaml".to_string(), pack.filters_yaml.clone());
@@ -79,8 +392,8 @@ pub fn import_skill_pack(
     files: &BTreeMap<String, String>,
 ) -> PodSkillPack {
     let mut pack = existing.clone();
-    if let Some(value) = files.get("pod.yaml") {
-        pack.pod_yaml = value.clone();
+    if let Some(value) = files.get("CONTEXT.md") {
+        pack.context_md = value.clone();
     }
     if let Some(value) = files.get("SKILL.md") {
         pack.skill_md = value.clone();
@@ -104,6 +417,9 @@ pub fn import_skill_pack(
 
 pub fn patch_skill_pack(existing: &PodSkillPack, patch: SkillPackPatch) -> PodSkillPack {
     let mut pack = existing.clone();
+    if let Some(value) = patch.context_md {
+        pack.context_md = value;
+    }
     if let Some(value) = patch.pod_yaml {
         pack.pod_yaml = value;
     }
@@ -127,12 +443,80 @@ pub fn patch_skill_pack(existing: &PodSkillPack, patch: SkillPackPatch) -> PodSk
     pack
 }
 
+/// Exact portable Pod Package directory entries, including signed history.
+pub const PORTABLE_PACKAGE_FILES: [&str; 7] = [
+    "CONTEXT.md",
+    "SKILL.md",
+    "sources.yaml",
+    "filters.yaml",
+    "examples.good.md",
+    "examples.bad.md",
+    "events.jsonl",
+];
+
+/// Rejects incomplete directories and any file that could represent local authority.
+///
+/// # Errors
+///
+/// Returns an error for a missing required file or any unsupported extra file.
+pub fn validate_portable_package_files(
+    files: &BTreeMap<String, String>,
+) -> Result<(), crate::store::StoreError> {
+    for required in PORTABLE_PACKAGE_FILES {
+        if !files.contains_key(required) {
+            return Err(crate::store::StoreError::Validation(format!(
+                "portable Pod Package is missing {required}"
+            )));
+        }
+    }
+    for name in files.keys() {
+        if !PORTABLE_PACKAGE_FILES.contains(&name.as_str()) {
+            let message = if name.to_lowercase().contains("grant")
+                || name.to_lowercase().contains("credential")
+                || name.to_lowercase().contains("permission")
+            {
+                format!("portable Pod Package cannot contain node-local authority file {name}")
+            } else {
+                format!("portable Pod Package contains unsupported file {name}")
+            };
+            return Err(crate::store::StoreError::Validation(message));
+        }
+    }
+    Ok(())
+}
+
+/// Parses an allowlisted portable directory map into complete package contents.
+///
+/// # Errors
+///
+/// Returns an error if any required file is absent or an unsupported file is present.
+pub fn pod_package_contents_from_files(
+    files: &BTreeMap<String, String>,
+) -> Result<PodPackageContents, crate::store::StoreError> {
+    validate_portable_package_files(files)?;
+    let required = |name: &str| {
+        files.get(name).cloned().ok_or_else(|| {
+            crate::store::StoreError::Validation(format!("portable Pod Package is missing {name}"))
+        })
+    };
+    Ok(PodPackageContents {
+        context_md: required("CONTEXT.md")?,
+        skill_md: required("SKILL.md")?,
+        sources_yaml: required("sources.yaml")?,
+        filters_yaml: required("filters.yaml")?,
+        examples_good_md: required("examples.good.md")?,
+        examples_bad_md: required("examples.bad.md")?,
+    })
+}
+
 pub fn fork_skill_pack(source: &PodSkillPack, target_pod: &Pod) -> PodSkillPack {
     let now = Utc::now();
     let mut pack = source.clone();
     pack.id = Uuid::now_v7();
     pack.pod_id = target_pod.id;
     pack.version = 1;
+    pack.owner_id = target_pod.created_by;
+    pack.proposer_harness_id = None;
     pack.created_at = now;
     pack.updated_at = now;
     pack.pod_yaml = pack.pod_yaml.replace(

@@ -39,6 +39,7 @@ impl McpToolRouter {
             "register_agent_harness",
             "revoke_agent_harness",
             "create_pod",
+            "create_private_pod_with_package",
             "join_pod",
             "submit_link_to_pod",
             "add_source_to_pod",
@@ -86,6 +87,13 @@ impl McpToolRouter {
             "create_pod" => {
                 let request: CreatePodRequest = serde_json::from_value(call.arguments)?;
                 Ok(json!(self.tools.create_pod(&self.ctx, request)?))
+            }
+            "create_private_pod_with_package" => {
+                let request: CreatePrivatePodWithPackageRequest =
+                    serde_json::from_value(call.arguments)?;
+                Ok(json!(self
+                    .tools
+                    .create_private_pod_with_package(&self.ctx, request)?))
             }
             "join_pod" => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;

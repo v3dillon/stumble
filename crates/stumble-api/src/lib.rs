@@ -104,6 +104,7 @@ pub fn router_with_options(
         .route("/route-link", post(route_link))
         .route("/intake-link", post(auto_route_intake_link))
         .route("/pods", get(list_pods).post(create_pod))
+        .route("/pod-packages", post(create_private_pod_with_package))
         .route("/pods/:slug/join", post(join_pod))
         .route("/pods/:slug/submit", post(submit_link))
         .route("/pods/:slug/intake-link", post(intake_link))
@@ -319,6 +320,17 @@ async fn create_pod(
 ) -> Result<Json<Pod>, ApiError> {
     let ctx = auth_or_default(&state, &headers)?;
     Ok(Json(state.tools.create_pod(&ctx, request)?))
+}
+
+async fn create_private_pod_with_package(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<CreatePrivatePodWithPackageRequest>,
+) -> Result<Json<CreatedPodPackage>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(
+        state.tools.create_private_pod_with_package(&ctx, request)?,
+    ))
 }
 
 async fn join_pod(

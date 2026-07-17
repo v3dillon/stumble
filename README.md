@@ -71,6 +71,35 @@ podctl brief --pod beautiful-interfaces
 podctl export-skill-pack --pod beautiful-interfaces --out ./pods/beautiful-interfaces
 ```
 
+## Portable Pod Packages
+
+A portable Pod Package directory contains exactly `CONTEXT.md`, `SKILL.md`,
+`sources.yaml`, `filters.yaml`, `examples.good.md`, `examples.bad.md`, and the
+signed `events.jsonl` history.
+`CONTEXT.md` defines subject scope and boundaries; `SKILL.md` contains scoped,
+untrusted curation instructions. Source Rules are declarative `inspect`, `seek`,
+and `schedule` suggestions and cannot contain connector commands or credentials.
+
+```bash
+podctl create-pod-package \
+  --name "Rust Systems" \
+  --slug rust-systems \
+  --from ./pods/rust-systems
+podctl get-skill-pack rust-systems
+podctl validate-skill-pack rust-systems
+podctl export-skill-pack rust-systems ./pods/rust-systems-exported
+podctl import-skill-pack rust-systems ./pods/rust-systems-exported
+```
+
+Creation is atomic and always creates a private Pod. Accepted package versions
+are immutable, owner/proposer-attributed, and recorded in signed Pod Events.
+Imports ignore no extra files: unsupported files—including grants, permissions,
+or credentials—are rejected, and package exports never include node-local
+Harness Grants. HTTP uses `POST /pod-packages` plus the existing
+`/pods/:slug/skill-pack` routes; MCP exposes
+`create_private_pod_with_package` and the package read/validate/import/export
+tools.
+
 ## Dillon Interest Agent
 
 Run the local node, then run the HTTP agent that knows the interests `tech`, `ai`, and `aliens`. It creates or reuses the `dillon-tech-ai-aliens` pod, stores those interests as user preferences, runs discovery, and generates a private brief.

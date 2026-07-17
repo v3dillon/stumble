@@ -2,7 +2,9 @@ use crate::agent_tools::AgentTools;
 use crate::domain::*;
 use crate::signing::{create_node_identity, hash_api_token, new_plaintext_api_token};
 #[cfg(test)]
-use crate::skill_pack::{default_skill_pack, pod_request_from_template};
+use crate::skill_pack::{
+    default_skill_pack, pod_package_contents_from_files, pod_request_from_template,
+};
 use crate::store::InMemoryStore;
 #[cfg(test)]
 use chrono::Duration;
@@ -155,14 +157,14 @@ fn insert_seed_pod(
             federate_sources: true,
         },
     );
-    store
-        .pod_skill_packs
-        .insert(pod.id, default_skill_pack(&pod));
+    let package = default_skill_pack(&pod);
+    let _ = store.insert_pod_package_version(package.clone());
+    store.pod_skill_packs.insert(pod.id, package.clone());
     if let Ok(event) = crate::signing::sign_public_event(
         node,
         "pod_created",
         &pod.slug,
-        serde_json::json!({"slug": pod.slug, "name": pod.name}),
+        serde_json::json!({"pod": pod.clone(), "package": package}),
         store.latest_event_hash(&pod.slug),
     ) {
         store.event_log.push(event);
@@ -565,7 +567,7 @@ mod tests {
                     name: "Research Toys".to_string(),
                     slug: "research-toys".to_string(),
                     description: "Small research artifacts.".to_string(),
-                    visibility: Visibility::Public,
+                    visibility: Visibility::Private,
                 },
             )
             .unwrap();
@@ -579,11 +581,18 @@ mod tests {
                     name: "Research Toys Fork".to_string(),
                     slug: "research-toys-fork".to_string(),
                     description: "Fork.".to_string(),
-                    visibility: Visibility::Public,
+                    visibility: Visibility::Private,
                 },
             )
             .unwrap();
         assert_ne!(pack.id, forked.id);
+        let exported = tools
+            .export_skill_pack(&context, "research-toys-fork")
+            .unwrap();
+        let imported = tools
+            .import_skill_pack(&context, "research-toys-fork", exported.files)
+            .unwrap();
+        assert_eq!(imported.version, 3);
     }
 
     #[test]
@@ -601,8 +610,29 @@ mod tests {
             .validate_pod_skill_pack(&context, "beautiful-interfaces")
             .unwrap();
         assert!(report.valid);
+        let public_error = tools
+            .import_skill_pack(&context, "beautiful-interfaces", export.files.clone())
+            .unwrap_err();
+        assert!(public_error
+            .to_string()
+            .contains("Pending Proposal approval"));
+        let package = pod_package_contents_from_files(&export.files).unwrap();
+        tools
+            .create_private_pod_with_package(
+                &context,
+                CreatePrivatePodWithPackageRequest {
+                    name: "Portable private package".to_string(),
+                    slug: "portable-private-package".to_string(),
+                    description: "Import/export acceptance".to_string(),
+                    package,
+                },
+            )
+            .unwrap();
+        let private_export = tools
+            .export_skill_pack(&context, "portable-private-package")
+            .unwrap();
         let imported = tools
-            .import_skill_pack(&context, "beautiful-interfaces", export.files)
+            .import_skill_pack(&context, "portable-private-package", private_export.files)
             .unwrap();
         assert!(imported.version > 1);
     }
