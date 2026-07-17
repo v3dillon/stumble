@@ -4,6 +4,9 @@ A private Home Node subscribes to a public Pod by its canonical HTTPS address:
 `https://origin.example/federation/pods/<slug>`. The Home Node only makes outbound
 requests. It fetches the Origin Node identity, public manifest, and signed Pod
 Events, then pins the Origin public key in a local `Subscription`.
+Before inspecting or projecting events, it requires the Origin to advertise the
+current `stumble/1.0` protocol. Incompatible versions fail negotiation so new
+event shapes cannot be interpreted under the pre-release contract.
 Loopback HTTP is accepted for a two-node local deployment; non-loopback public
 Pod addresses require HTTPS. This address policy is checked before any outbound
 request is attempted.

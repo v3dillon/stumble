@@ -63,6 +63,14 @@ pub enum AgentToolsError {
     CandidatePackageVersionMismatch,
     #[error("candidate submission idempotency key was reused with different input")]
     CandidateIdempotencyConflict,
+    /// A remote node advertises a protocol this node cannot safely interpret.
+    #[error("incompatible protocol version {received}; this node supports {supported}")]
+    IncompatibleProtocol {
+        /// Protocol version advertised by the remote node.
+        received: String,
+        /// Protocol version supported by this node.
+        supported: &'static str,
+    },
 }
 
 const MAX_DISCOVERY_TASK_ATTEMPTS: usize = 3;
@@ -4660,7 +4668,7 @@ impl AgentTools {
             node_id: node.id,
             display_name: node.display_name,
             public_key: node.public_key,
-            supported_protocol_version: "stumble/0.1".to_string(),
+            supported_protocol_version: CURRENT_PROTOCOL_VERSION.to_string(),
         })
     }
 
@@ -4778,7 +4786,7 @@ impl AgentTools {
             format!("{base}/hub/search-pods"),
         );
         Ok(WellKnownNode {
-            protocol: "stumble/0.1".to_string(),
+            protocol: CURRENT_PROTOCOL_VERSION.to_string(),
             node,
             endpoints,
         })
@@ -4858,7 +4866,7 @@ impl AgentTools {
                     node_id: node.id,
                     display_name: node.display_name.clone(),
                     public_key: node.public_key.clone(),
-                    supported_protocol_version: "stumble/0.1".into(),
+                    supported_protocol_version: CURRENT_PROTOCOL_VERSION.into(),
                 },
                 pod_slug: pod.slug.clone(),
                 pod_name: pod.name.clone(),
@@ -4981,6 +4989,30 @@ impl AgentTools {
             .collect::<Vec<_>>();
         peers.sort_by(|left, right| left.base_url.cmp(&right.base_url));
         Ok(peers)
+    }
+
+    /// Resolves one enabled peer within the caller's tenant trust boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when administration is denied, the peer is absent,
+    /// disabled, belongs to another tenant, or state is unavailable.
+    pub fn trusted_peer(
+        &self,
+        ctx: &AuthContext,
+        peer_id: PeerId,
+    ) -> Result<TrustedPeer, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        store
+            .trusted_peers
+            .get(&peer_id)
+            .filter(|peer| peer.tenant_id == ctx.tenant_id && peer.enabled)
+            .cloned()
+            .ok_or_else(|| StoreError::UntrustedPeer.into())
     }
 
     /// Serves retained Origin-signed announcements to an explicitly trusted peer.
@@ -5303,7 +5335,7 @@ impl AgentTools {
                     node_id: node.id,
                     display_name: node.display_name.clone(),
                     public_key: node.public_key.clone(),
-                    supported_protocol_version: "stumble/0.1".into(),
+                    supported_protocol_version: CURRENT_PROTOCOL_VERSION.into(),
                 },
                 endorsing_pod_slug: endorsing_pod.slug,
                 endorsing_announcement_id: endorsing.id,
@@ -5651,7 +5683,7 @@ impl AgentTools {
             display_name: node.display_name.clone(),
             base_url: normalized_base_url.clone(),
             public_key: node.public_key.clone(),
-            protocol_version: "stumble/0.1".to_string(),
+            protocol_version: CURRENT_PROTOCOL_VERSION.to_string(),
             registered_at: store
                 .hub_nodes
                 .get(&node.id)
@@ -6132,10 +6164,8 @@ fn validate_federation_snapshot(
     snapshot: &FederationPodSnapshot,
 ) -> Result<(), AgentToolsError> {
     let pod = &snapshot.manifest.pod;
-    if pod.visibility != Visibility::Public
-        || pod.origin_node_id != Some(snapshot.node.node_id)
-        || snapshot.node.supported_protocol_version != "stumble/0.1"
-    {
+    validate_protocol_version(&snapshot.node.supported_protocol_version)?;
+    if pod.visibility != Visibility::Public || pod.origin_node_id != Some(snapshot.node.node_id) {
         return Err(StoreError::Validation(
             "federation snapshot does not describe an authoritative public Pod".to_string(),
         )
@@ -6698,13 +6728,13 @@ fn project_imported_submission(
 }
 
 fn validate_protocol_version(value: &str) -> Result<(), AgentToolsError> {
-    if value == "stumble/0.1" {
+    if value == CURRENT_PROTOCOL_VERSION {
         return Ok(());
     }
-    Err(StoreError::Validation(format!(
-        "unsupported protocol_version {value}; expected stumble/0.1"
-    ))
-    .into())
+    Err(AgentToolsError::IncompatibleProtocol {
+        received: value.to_string(),
+        supported: CURRENT_PROTOCOL_VERSION,
+    })
 }
 
 fn validate_hub_base_url(value: &str, field: &str) -> Result<Url, AgentToolsError> {

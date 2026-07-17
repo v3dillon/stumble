@@ -1,40 +1,43 @@
 # Stumble
 
-Rust MVP for an agent-native shared discovery system.
+Stumble is a headless, decentralized personal discovery system. Agent Harnesses
+use their own browser, search, APIs, credentials, and schedulers; Stumble owns
+structured Candidate ingestion, curation, synchronization, and finite Feed
+Batches.
 
-The repository is organized around one rule: HTTP, CLI, MCP, hosted mode, local mode, crawler, federation, and custom hub discovery all call the shared `AgentTools` service in `stumble-core`.
-
-Stumble uses a custom `stumble/0.1` discovery protocol.
+HTTP, MCP, and `podctl` call the shared `AgentTools` service in `stumble-core`.
+The first-release federation contract is `stumble/1.0`.
 
 ## Workspace
 
-- `stumble-core`: domain model, in-memory MVP store, signing, ranking, skill packs, briefs, seed data, AgentTools.
-- `stumble-api`: Axum HTTP JSON API, hosted/account endpoints, federation endpoints, route docs.
-- `stumble-cli`: `podctl` CLI.
-- `stumble-mcp`: MCP adapter boundary and JSON tool-call dispatcher.
-- `stumble-crawler`: cautious RSS/Atom/webpage crawler boundary.
-- `stumble-sync`: federation peer sync/import/export helpers.
-- `migrations/postgres`: hosted PostgreSQL schema.
-- `migrations/sqlite`: local SQLite schema.
+- `stumble-core`: domain, SQLite persistence, curation, Feed, signing, and tools.
+- `stumble-api`: HTTP adapter and federation endpoints.
+- `stumble-cli`: local `podctl` adapter.
+- `stumble-mcp`: transport-neutral MCP tool dispatcher.
+- `stumble-sync`: direct-address Subscription synchronization.
 
-## Setup
+Stumble does not ship a crawler or dedicated source connector.
+
+## Run a Home Node
 
 ```bash
-rustup default stable
-cargo fmt
-cargo test
-cargo run -p stumble-cli -- --help
-mkdir -p ~/.stumble/nodes/default
-cargo run -p stumble-api -- --mode local --bind 127.0.0.1:8787 --data-dir ~/.stumble/nodes/default
+cargo run -p stumble-cli -- --data-dir ~/.stumble/nodes/default init-node
+cargo run -p stumble-api -- \
+  --mode local \
+  --bind 127.0.0.1:8787 \
+  --data-dir ~/.stumble/nodes/default
 ```
 
-Home Nodes use `<data-dir>/stumble.sqlite3` as their authoritative store (`.stumble` when `--data-dir` is omitted). On first boot, an existing `<data-dir>/store.json` is imported only when SQLite is empty and retained alongside `store.json.migrated.bak` for recovery; populated SQLite state is never replaced by the legacy snapshot.
+`<data-dir>/stumble.sqlite3` is authoritative. On first boot only, a legacy
+`store.json` is transactionally imported into an empty database and retained as
+`store.json.migrated.bak`. Canonical Content Item IDs, Pod Placements, Feedback
+Signals, Saves, briefs, and Pod Events are preserved; populated SQLite state is
+never overwritten.
 
-Use `--port <number>` to choose a port without changing the bind host; use `--port 0` to let the operating system assign an available port. Dev-token minting endpoints are enabled on loopback binds and disabled on public binds unless `--allow-public-dev-tokens` is explicitly passed.
+## Agent Harness workflow
 
-## Agent Harness grants
-
-Register each interactive or unattended Agent Harness separately and grant only the capabilities it needs: `feed-read`, `feedback`, `discovery-tasks`, `candidate-submission`, `pod-curation`, `package-management`, `subscription-management`, `administration`, and `approval`. Add one or more `--pod-id` values to restrict every Pod-facing operation; omit them for all local Pods.
+Register each interactive or unattended harness with only the capabilities and
+optional Pod scope it needs:
 
 ```bash
 podctl --data-dir ~/.stumble/nodes/default register-harness \
@@ -43,236 +46,94 @@ podctl --data-dir ~/.stumble/nodes/default register-harness \
   --capability discovery-tasks \
   --capability candidate-submission \
   --pod-id <pod-uuid>
-
-podctl --data-dir ~/.stumble/nodes/default \
-  --token '<one-time-token>' \
-  submit --pod beautiful-interfaces --url https://example.com/item
-
-podctl --data-dir ~/.stumble/nodes/default revoke-harness <harness-uuid>
 ```
 
-The registration response is the only place the plaintext bearer token appears; the Home Node stores its hash. Revocation affects existing HTTP, MCP, and CLI contexts immediately. Harness identity is recorded with successful writes. Tokens, grants, write audits, and private User state remain node-local and are not included in federation Pod lists, manifests, events, or package exports.
+The plaintext bearer token is returned once. Grants, tokens, Taste Profiles,
+Feedback Signals, Feed history, and Candidates remain Home-Node private.
 
-Only a direct local owner context may bootstrap isolated interactive `administration` and `approval` harnesses; unattended or delegated grants of either capability are forbidden. Later authority expansion remains reserved for the Pending Proposal approval flow. A harness may otherwise delegate only an unattended subset of its own capabilities and Pod scope. On a public bind, every non-public API operation requires a bearer token; unauthenticated owner bootstrap is loopback-only.
+The normal discovery flow is:
 
-Legacy dev tokens remain available for compatibility but are linked to a Harness identity and receive no implicit capabilities. Register a scoped Harness for agent work.
-
-HTTP exposes `POST /harnesses` and `DELETE /harnesses/:id`. MCP exposes `register_agent_harness` and `revoke_agent_harness`; construct an authenticated router with the one-time token. All three adapters return the same core authorization reason, with HTTP mapping denials to `403 Forbidden` and CLI returning a non-zero exit status.
-
-## Sensitive-change approval
-
-Public Pod exposure, public Package Revisions, public-content removal, Harness Grant expansion, and Trust Policy changes are stored as expiring Pending Proposals. Approved public removal withdraws only the public Pod Placement and preserves the Content Item, assets, Saves, and other private projections. The proposal records a typed requested change, affected resources, proposer, expiry, expected consequences, and its terminal decision. It applies only when a different interactive Harness with `approval` authority accepts it; unattended and proposing Harnesses cannot self-approve. Accepted, rejected, and expired proposals remain in the Home Node's SQLite audit history.
+1. Read the Pod Package.
+2. List and claim a due Discovery Task.
+3. Discover externally using harness-owned capabilities.
+4. Submit a structured, provenance-bearing Candidate.
+5. Complete or fail the task.
+6. Retrieve a stable finite Feed Batch and record explicit feedback.
 
 ```bash
-podctl --token "$PROPOSER_TOKEN" propose-change --from change.json --expires-in-seconds 3600
-podctl --token "$APPROVER_TOKEN" get-proposal <proposal-id>
-podctl --token "$APPROVER_TOKEN" approve-proposal <proposal-id>
-# or: podctl --token "$APPROVER_TOKEN" reject-proposal <proposal-id> --reason "not ready"
+podctl --token "$TOKEN" get-pod-package my-pod
+podctl --token "$TOKEN" list-ready-discovery-tasks
+podctl --token "$TOKEN" claim-discovery-task <task-id>
+podctl --token "$TOKEN" submit-candidate --from candidate.json
+podctl --token "$TOKEN" complete-discovery-task <task-id>
+podctl --token "$TOKEN" feed --size 7
 ```
 
-`change.json` is a tagged `SensitiveChange`, for example `{"kind":"publish_pod","pod_id":"<pod-uuid>"}`. HTTP exposes `POST /pending-proposals`, `GET /pending-proposals/:id`, and the `/approve` and `/reject` actions. MCP exposes the equivalent `create_pending_proposal`, `get_pending_proposal`, `approve_pending_proposal`, and `reject_pending_proposal` tools. Routine Feed reads, feedback, synchronization, Candidate Submission, and already-authorized curation continue to use their existing one-step operations.
-
-## Local Mode Examples
+Pod Packages use `CONTEXT.md`, `SKILL.md`, `sources.yaml`, `filters.yaml`,
+calibration examples, and signed history. Source Rules describe what to inspect,
+seek, and schedule; they never contain executable connectors or credentials.
 
 ```bash
-podctl init-node
-podctl list-pods
-podctl create-pod --name "Beautiful Interfaces" --slug beautiful-interfaces
-podctl submit --pod beautiful-interfaces --url https://worrydream.com/MagicInk/ --title "Magic Ink" --note "Foundational UI thinking"
-podctl discover --pod beautiful-interfaces --query "weird practical UI inspiration" --avoid politics --avoid "generic AI hype"
-podctl brief --pod beautiful-interfaces
-podctl export-skill-pack --pod beautiful-interfaces --out ./pods/beautiful-interfaces
+podctl create-pod-package --name "Rust Systems" --slug rust-systems --from ./rust-systems
+podctl get-pod-package rust-systems
+podctl validate-pod-package rust-systems
+podctl export-pod-package rust-systems ./rust-systems-export
+podctl import-pod-package rust-systems ./rust-systems-export
 ```
 
-## Portable Pod Packages
+HTTP uses `POST /pod-packages` and `/pods/:slug/package` routes. MCP uses
+`create_private_pod_with_package`, `get_pod_package`, `validate_pod_package`,
+`export_pod_package`, and `import_pod_package`.
 
-A portable Pod Package directory contains exactly `CONTEXT.md`, `SKILL.md`,
-`sources.yaml`, `filters.yaml`, `examples.good.md`, `examples.bad.md`, and the
-signed `events.jsonl` history.
-`CONTEXT.md` defines subject scope and boundaries; `SKILL.md` contains scoped,
-untrusted curation instructions. Source Rules are declarative `inspect`, `seek`,
-and `schedule` suggestions and cannot contain connector commands or credentials.
+## Canonical adapter operations
 
-```bash
-podctl create-pod-package \
-  --name "Rust Systems" \
-  --slug rust-systems \
-  --from ./pods/rust-systems
-podctl get-skill-pack rust-systems
-podctl validate-skill-pack rust-systems
-podctl export-skill-pack rust-systems ./pods/rust-systems-exported
-podctl import-skill-pack rust-systems ./pods/rust-systems-exported
-```
+First-release catalogs expose high-level operations including:
 
-Creation is atomic and always creates a private Pod. Accepted package versions
-are immutable, owner/proposer-attributed, and recorded in signed Pod Events.
-Imports ignore no extra files: unsupported files—including grants, permissions,
-or credentials—are rejected, and package exports never include node-local
-Harness Grants. HTTP uses `POST /pod-packages` plus the existing
-`/pods/:slug/skill-pack` routes; MCP exposes
-`create_private_pod_with_package` and the package read/validate/import/export
-tools.
+- `submit_candidate` and `inspect_candidate`
+- Discovery Task materialization, claim, renew, complete, and fail
+- `get_feed_batch`, `complete_feed_batch`, and `record_feed_feedback`
+- Pod Package creation, validation, import, and export
+- Harness registration/revocation and Pending Proposal approval
+- signed Pod Event export and direct Subscription synchronization
 
-## Dillon Interest Agent
+HTTP exposes the equivalent `/candidates`, `/discovery-tasks`, `/feed`,
+`/pod-packages`, `/harnesses`, and `/pending-proposals` resources. Adapter
+contract tests verify stable IDs, provenance, allowed actions, and errors across
+HTTP, MCP, and CLI.
 
-Run the local node, then run the HTTP agent that knows the interests `tech`, `ai`, and `aliens`. It creates or reuses the `dillon-tech-ai-aliens` pod, stores those interests as user preferences, runs discovery, and generates a private brief.
+## Retired pre-release contracts
 
-Agent submission policy: AI/harness agents do not submit links by default. They may submit a link only when the user provides/approves the URL, or when an explicit seed flag is used for demo data.
-
-Pod skill policy: agent harnesses must read the target pod skill pack before submitting, discovering, or generating a brief. MCP tool responses include a `pod_skill_read` receipt, and `interest-agent` fetches `/pods/<slug>/skill-pack` before each submit/discover/brief action.
-
-```bash
-mkdir -p ~/.stumble/nodes/default
-cargo run -p stumble-api -- --mode local --bind 127.0.0.1:8787 --data-dir ~/.stumble/nodes/default
-cargo run -p stumble-agent -- --api http://127.0.0.1:8787 --label "Dillon Tech AI Aliens Agent"
-cargo run -p stumble-agent -- --api http://127.0.0.1:8787 --label "Dillon Tech AI Aliens Agent" --keep-alive
-cargo run -p stumble-agent -- --api http://127.0.0.1:8787 --label "Dillon Tech AI Aliens Agent" --seed-starter-links
-cargo run -p stumble-agent -- --api http://127.0.0.1:8787 --pod-slug dillon-tech-ai-aliens --submit-link-url https://www.seti.org/ --submit-link-title "SETI Institute" --submit-link-tags aliens,seti,signals
-```
-
-## Hosted Mode Examples
-
-```bash
-podctl --data-dir ~/.stumble/nodes/hosted serve --mode hosted --bind 0.0.0.0:8787
-podctl create-tenant --slug acme --name "Acme Research"
-podctl create-api-token --user demo-user --tenant acme --label "phone agent"
-podctl discover --api http://localhost:8787 --token st_dev_token --pod beautiful-interfaces --query "agent UI patterns"
-```
-
-## HTTP Examples
-
-```bash
-curl http://localhost:8787/health
-curl http://localhost:8787/pods
-curl -X POST http://localhost:8787/pods \
-  -H 'content-type: application/json' \
-  -d '{"name":"Beautiful Interfaces","slug":"beautiful-interfaces","description":"Thoughtful, strange, useful interface design.","visibility":"public"}'
-curl -X POST http://localhost:8787/pods/beautiful-interfaces/discover \
-  -H 'content-type: application/json' \
-  -d '{"query":"weird practical UI inspiration","avoid":["politics","generic AI hype"],"limit":7,"mode":"deep_match"}'
-curl -X POST http://localhost:8787/pods/design-stuff/intake-link \
-  -H 'content-type: application/json' \
-  -d '{"url":"https://example.com/article","note":"User-approved link intake.","tags":["design"]}'
-curl -X POST http://localhost:8787/route-link \
-  -H 'content-type: application/json' \
-  -d '{"url":"https://x.com/example/status/1","tags":["uap","signals"]}'
-curl -X POST http://localhost:8787/intake-link \
-  -H 'content-type: application/json' \
-  -d '{"url":"https://x.com/example/status/1","tags":["uap","signals"],"min_confidence":5}'
-curl -X POST http://localhost:8787/briefs/generate \
-  -H 'content-type: application/json' \
-  -d '{"pod_slugs":["beautiful-interfaces"],"query":"UI inspiration"}'
-```
-
-`/pods/:slug/intake-link` fetches page metadata, creates a heuristic summary, extracts a representative Open Graph/Twitter image when present, submits the link, and stores the image in `submission_assets`. AI-generated images can be stored through the same asset model with source `ai_generated` when an agent harness generates or receives an approved image.
-
-`/route-link` scores a fetched link against existing pod names, descriptions, and skill packs without storing it. `/intake-link` uses the same router and stores only when one pod clears the confidence threshold and is clearly ahead of the next candidate; otherwise it returns candidates plus a draft `suggested_new_pod` with `needs_confirmation: true`.
-
-## Remote/Hosted HTTP Examples
-
-```bash
-curl -X POST https://pods.example.com/auth/dev-token \
-  -H 'content-type: application/json' \
-  -d '{"user_id":"demo-user","tenant_slug":"acme","label":"chatgpt"}'
-curl https://pods.example.com/me -H 'authorization: Bearer st_dev_token'
-curl -X POST https://pods.example.com/pods/beautiful-interfaces/submit \
-  -H 'authorization: Bearer st_dev_token' \
-  -H 'content-type: application/json' \
-  -d '{"url":"https://example.com/demo","title":"Odd UI Demo","note":"Tactile interaction pattern"}'
-```
-
-## Federation Examples
-
-```bash
-curl http://localhost:8787/federation/node
-curl http://localhost:8787/federation/pods
-curl http://localhost:8787/federation/pods/beautiful-interfaces/manifest
-curl http://localhost:8787/federation/pods/beautiful-interfaces/events
-curl -X POST http://localhost:8787/federation/sync/peer_default_hosted
-```
-
-## Custom Discovery Hub Examples
-
-The canonical signed announcement, trusted-peer, replaceable Index Node, local Trust Policy, Pod Endorsement, and intentional Explore contracts are documented in [`docs/discovery.md`](docs/discovery.md). Direct Pod URLs remain authoritative and do not depend on the legacy custom-hub endpoints below.
-
-The discovery hub indexes public node and pod metadata so a user's home node can find public pods that match explicit interests. It does not export private preferences, saved links, notes, reading history, or private briefs.
-
-```bash
-curl http://localhost:8787/.well-known/stumble-node
-curl 'http://localhost:8787/discovery/pods?limit=10'
-curl 'http://localhost:8787/discovery/pods?q=aliens%20signals&limit=5'
-curl 'http://localhost:8787/home/discover-public-pods?topics=aliens,uap,signals&limit=5'
-curl 'http://localhost:8787/hub/search-pods?q=aliens%20signals&limit=5'
-curl -X POST http://localhost:8787/hub/refresh
-```
-
-`GET /discovery/pods` is the agent-facing discovery feed. It returns this node's local public pods separately from global public pods known through the hub index. With no `q`, it behaves like a feed; with `q`, it behaves like a ranked search.
-
-`GET /hub/search-pods` automatically refreshes the local hub index with this node's public pods before searching. Private and invite-only pods are excluded from that index.
-
-For the full federated discovery loop, remote nodes register or announce their reachable base URL, then hubs pull `/.well-known/stumble-node`, `/federation/pods`, public pod manifests, and public pod events to keep the global feed fresh. Only public pod metadata and public events should be indexed; private preferences, private pods, notes, saved links, reading history, and private briefs must stay local.
-
-The API process runs a cancellable in-process hub refresh daemon every 24 hours by default. Configure it with `STUMBLE_HUB_REFRESH_INTERVAL_SECONDS` or disable it with `STUMBLE_DISABLE_HUB_REFRESH=true`. `POST /hub/refresh` runs the same pull immediately. Public event import and signature verification are offloaded to Tokio's blocking pool so CPU-heavy verification does not occupy async worker threads.
-
-For real federation, bind the server on a reachable interface and advertise the public HTTPS base URL that other nodes should use:
-
-```bash
-STUMBLE_BASE_URL=https://pods.example.com \
-cargo run -p stumble-api -- --bind 0.0.0.0:8787
-```
-
-Register another public node and public pod with this hub:
-
-```bash
-curl http://localhost:8787/federation/node
-curl -X POST http://localhost:8787/hub/register-node \
-  -H 'content-type: application/json' \
-  -d '{"node_id":"<node_id_from_federation_node>","base_url":"http://localhost:8787","public_key":"<public_key_from_federation_node>","protocol_version":"stumble/0.1","display_name":"Local node"}'
-curl -X POST http://localhost:8787/hub/register-pod \
-  -H 'content-type: application/json' \
-  -d '{"node_id":"<node_id_from_federation_node>","node_base_url":"http://localhost:8787","pod_slug":"public-uap-research","pod_name":"Public UAP Research","description":"Public pod about UAP and signals.","tags":["uap","signals"],"skill_pack_version":1,"latest_event_hash":null,"manifest_url":"http://localhost:8787/federation/pods/public-uap-research/manifest","events_url":"http://localhost:8787/federation/pods/public-uap-research/events"}'
-```
-
-`/.well-known/stumble-node` advertises the `stumble/0.1` protocol and the node's discovery endpoints.
-
-## MCP Tool Examples
-
-The MVP includes a clean MCP adapter boundary and tool dispatcher in `stumble-mcp`. It exposes the intended tool names and calls the same `AgentTools` implementation as HTTP/CLI:
+Crawler/source-connector operations, direct link submissions, in-node discovery,
+and brief generation are not first-release workflows. Hidden CLI compatibility
+commands and legacy HTTP/MCP calls fail explicitly with HTTP `410 Gone` or the
+equivalent non-zero adapter error:
 
 ```json
-{"tool":"list_pods","arguments":{}}
-{"tool":"discover_in_pod","arguments":{"pod_slug":"beautiful-interfaces","query":"weird practical UI inspiration","avoid":["politics","generic AI hype"],"limit":7}}
-{"tool":"submit_link_to_pod","arguments":{"pod_slug":"beautiful-interfaces","url":"https://example.com","title":"Example","note":"Why it belongs"}}
-{"tool":"get_pod_brief","arguments":{"pod_slugs":["beautiful-interfaces"],"query":"daily brief"}}
-{"tool":"export_pod_events","arguments":{"pod_slug":"beautiful-interfaces"}}
+{
+  "code": "legacy_contract_retired",
+  "contract": "crawler_source_connector",
+  "protocol_version": "stumble/1.0",
+  "replacement": "discovery_tasks+submit_candidate"
+}
 ```
 
-MCP limitation: this MVP does not bind to a full third-party MCP transport crate yet. The `McpToolRouter` isolates the adapter and can be mounted into a concrete stdio/HTTP MCP server without duplicating business logic.
+Persisted legacy briefs remain readable migration data only. Agent Harnesses
+present a Feed Batch in whatever conversational, voice, or visual format the
+User prefers; Stumble does not create a separate brief-centered feed.
 
-## Discovery Tasks and scheduling
+## Federation compatibility
 
-Agent Harnesses with the `discovery_tasks` capability can materialize due Source Rules, list and claim tasks, renew leases, and complete or fail attempts through HTTP, MCP, or `podctl`. Each scheduled task is idempotent for its Pod, Source Rule, Pod Package version, and due period; manual work uses `create-discovery-task` and enters the same lease contract.
+Every Origin Node advertises `stumble/1.0` through
+`/.well-known/stumble-node`. A Home Node verifies the advertised version before
+projecting any signed event. Incompatible nodes fail negotiation, so an older
+node cannot interpret first-release Content Item, Accepted Placement, Package,
+or tombstone event shapes as its pre-release event contract.
 
-For a local fallback, build `podctl`, export a scoped `STUMBLE_DISCOVERY_TOKEN`, then run `scripts/install-discovery-launchd.sh`. The installed adapter periodically runs `scripts/wake-discovery.sh` against the running Home Node HTTP API, so HTTP and MCP consumers see the same newly materialized work. It atomically writes a mode-`0600` structured `discovery_ready` event to `$STUMBLE_DATA_DIR/discovery-ready.json`. If `STUMBLE_DISCOVERY_HARNESS_COMMAND` names an executable, the adapter also invokes that executable with the event on standard input; otherwise a harness can watch the event inbox. The adapter only wakes a harness and never opens or controls a browser. The same wake script can be invoked from cron on non-macOS systems; unset `STUMBLE_API_URL` to use fresh local `podctl` processes instead.
+See [synchronization](docs/synchronization.md) for direct-address behavior.
 
-## Candidate Submissions
-
-External discovery enters through authenticated Candidate Submissions. Each JSON
-request includes the source URL and known metadata, permitted excerpt and
-summary, content type and tags, provenance, separate placement reasons and
-bounded confidence values, both harness and client idempotency keys, and—when
-task-driven—the claimed Discovery Task and pinned Pod Package version.
+## Validation
 
 ```bash
-podctl --data-dir ~/.stumble/nodes/default --token "$STUMBLE_DISCOVERY_TOKEN" \
-  submit-candidate --from ./candidate.json
-podctl --data-dir ~/.stumble/nodes/default --token "$STUMBLE_DISCOVERY_TOKEN" \
-  inspect-candidate <candidate-uuid>
+cargo fmt --check
+cargo test --workspace
 ```
-
-HTTP exposes `POST /candidates` and `GET /candidates/:id`; MCP exposes
-`submit_candidate` and `inspect_candidate`. Repeated canonical URLs share one
-private Candidate while retaining each independent submission and proposed
-placement as evidence. Candidate review remains pending: confidence never
-creates an authoritative Pod Placement, and Candidates never enter Pod event or
-federation exports.

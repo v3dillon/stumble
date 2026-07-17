@@ -15,6 +15,7 @@ chrono.workspace = true
 clap.workspace = true
 stumble-api = { path = "../stumble-api" }
 stumble-core = { path = "../stumble-core" }
+stumble-sync = { path = "../stumble-sync" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -22,5 +23,4 @@ uuid.workspace = true
 
 [dev-dependencies]
 stumble-mcp = { path = "../stumble-mcp" }
-stumble-sync = { path = "../stumble-sync" }
 tower.workspace = true

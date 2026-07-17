@@ -3,10 +3,8 @@ members = [
   "crates/stumble-core",
   "crates/stumble-api",
   "crates/stumble-mcp",
-  "crates/stumble-crawler",
   "crates/stumble-sync",
   "crates/stumble-cli",
-  "crates/stumble-agent",
 ]
 resolver = "2"
 

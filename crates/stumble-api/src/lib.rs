@@ -10,7 +10,6 @@ use serde_json::json;
 use std::net::SocketAddr;
 use stumble_core::*;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use url::Url;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -71,11 +70,24 @@ impl From<AgentToolsError> for ApiError {
     }
 }
 
-#[derive(Debug, Clone)]
-struct PageMetadata {
-    title: Option<String>,
-    summary: Option<String>,
-    image_url: Option<String>,
+impl From<stumble_sync::PeerSyncError> for ApiError {
+    fn from(value: stumble_sync::PeerSyncError) -> Self {
+        match value {
+            stumble_sync::PeerSyncError::Core(source) => source.into(),
+            source @ stumble_sync::PeerSyncError::Request { .. } => Self {
+                status: StatusCode::BAD_GATEWAY,
+                message: source.to_string(),
+            },
+            source @ stumble_sync::PeerSyncError::ImportTask(_) => Self {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: source.to_string(),
+            },
+            source => Self {
+                status: StatusCode::BAD_REQUEST,
+                message: source.to_string(),
+            },
+        }
+    }
 }
 
 pub fn router(tools: AgentTools) -> Router {
@@ -101,40 +113,60 @@ pub fn router_with_options(
         .route("/health", get(health))
         .route("/.well-known/stumble-node", get(well_known_node))
         .route("/openapi-lite", get(openapi_lite))
-        .route("/route-link", post(route_link))
-        .route("/intake-link", post(auto_route_intake_link))
+        .route("/route-link", post(retired_submission_contract))
+        .route("/intake-link", post(retired_submission_contract))
         .route("/pods", get(list_pods).post(create_pod))
         .route("/pod-packages", post(create_private_pod_with_package))
         .route("/pods/:slug/join", post(join_pod))
-        .route("/pods/:slug/submit", post(submit_link))
-        .route("/pods/:slug/intake-link", post(intake_link))
+        .route("/pods/:slug/submit", post(retired_submission_contract))
+        .route("/pods/:slug/intake-link", post(retired_submission_contract))
         .route(
             "/pods/:slug/submissions/:id",
-            delete(remove_submission_from_pod),
+            delete(retired_submission_contract),
         )
         .route(
-            "/pods/:slug/skill-pack",
+            "/pods/:slug/package",
             get(get_skill_pack).patch(patch_skill_pack_handler),
         )
         .route(
-            "/pods/:slug/skill-pack/export",
+            "/pods/:slug/package/export",
             post(export_skill_pack_handler),
         )
         .route(
-            "/pods/:slug/skill-pack/import",
+            "/pods/:slug/package/import",
             post(import_skill_pack_handler),
         )
-        .route("/pods/:slug/skill-pack/fork", post(fork_skill_pack_handler))
+        .route("/pods/:slug/package/fork", post(fork_skill_pack_handler))
         .route(
-            "/pods/:slug/skill-pack/validate",
+            "/pods/:slug/package/validate",
             post(validate_skill_pack_handler),
         )
-        .route("/pods/:slug/sources", post(add_source))
-        .route("/pods/:slug/crawl", post(crawl_pod))
-        .route("/pods/:slug/discover", post(discover))
-        .route("/pods/:slug/stumble", post(stumble))
-        .route("/briefs", get(list_briefs))
-        .route("/briefs/generate", post(generate_brief))
+        .route(
+            "/pods/:slug/skill-pack",
+            get(retired_package_contract).patch(retired_package_contract),
+        )
+        .route(
+            "/pods/:slug/skill-pack/export",
+            post(retired_package_contract),
+        )
+        .route(
+            "/pods/:slug/skill-pack/import",
+            post(retired_package_contract),
+        )
+        .route(
+            "/pods/:slug/skill-pack/fork",
+            post(retired_package_contract),
+        )
+        .route(
+            "/pods/:slug/skill-pack/validate",
+            post(retired_package_contract),
+        )
+        .route("/pods/:slug/sources", post(retired_crawler_contract))
+        .route("/pods/:slug/crawl", post(retired_crawler_contract))
+        .route("/pods/:slug/discover", post(retired_presentation_contract))
+        .route("/pods/:slug/stumble", post(retired_presentation_contract))
+        .route("/briefs", get(retired_presentation_contract))
+        .route("/briefs/generate", post(retired_presentation_contract))
         .route("/feed", get(get_feed_batch))
         .route("/feed/:id/complete", post(complete_feed_batch))
         .route("/feed/items/:id/feedback", post(record_feed_feedback))
@@ -147,9 +179,9 @@ pub fn router_with_options(
             get(get_taste_profile).patch(update_taste_profile),
         )
         .route("/taste-profile/learned/reset", post(reset_learned_taste))
-        .route("/links/:id/assets", get(link_assets))
-        .route("/links/:id/save", post(save_link))
-        .route("/links/:id/rate", post(rate_link))
+        .route("/links/:id/assets", get(retired_submission_contract))
+        .route("/links/:id/save", post(retired_feedback_contract))
+        .route("/links/:id/rate", post(retired_feedback_contract))
         .route("/me/preferences", patch(update_preferences))
         .route("/discovery/pods", get(pod_discovery_feed))
         .route("/home/discover-public-pods", get(home_discover_public_pods))
@@ -157,7 +189,7 @@ pub fn router_with_options(
         .route("/me", get(me))
         .route("/tenants", get(list_tenants).post(create_tenant))
         .route("/api-tokens", post(create_api_token))
-        .route("/api-tokens/:id", delete(revoke_api_token))
+        .route("/api-tokens/:id", delete(retired_api_token_contract))
         .route("/harnesses", post(register_agent_harness))
         .route("/harnesses/:id", delete(revoke_agent_harness))
         .route("/pending-proposals", post(create_pending_proposal))
@@ -196,7 +228,14 @@ pub fn router_with_options(
             "/federation/pods/:slug/events",
             get(federation_events).post(federation_import_events),
         )
-        .route("/federation/sync/:peer_id", post(federation_sync))
+        .route(
+            "/federation/sync/:peer_id/:pod_slug",
+            post(federation_sync_pod),
+        )
+        .route(
+            "/federation/sync/:peer_id",
+            post(retired_peer_sync_contract),
+        )
         .route("/hub/register-node", post(hub_register_node))
         .route("/hub/register-pod", post(hub_register_pod))
         .route("/hub/refresh", post(hub_refresh))
@@ -274,48 +313,73 @@ fn route_docs() -> Vec<ApiRouteDoc> {
         },
         ApiRouteDoc {
             method: "GET",
-            path: "/candidates/:id",
-            description: "inspect a private Candidate and its independent evidence",
+            path: "/pods/:slug/package",
+            description: "read the current versioned Pod Package",
         },
         ApiRouteDoc {
             method: "POST",
-            path: "/route-link",
-            description: "fetch metadata, rank pod candidates, and suggest a new pod when routing needs confirmation without storing the link",
+            path: "/pods/:slug/package/validate",
+            description: "validate the current Pod Package",
         },
         ApiRouteDoc {
             method: "POST",
-            path: "/intake-link",
-            description: "route a link to the best pod, store only when confidence is high, and otherwise return candidates plus a suggested new pod",
+            path: "/pods/:slug/package/export",
+            description: "export a portable Pod Package",
         },
         ApiRouteDoc {
             method: "POST",
-            path: "/pods/:slug/intake-link",
-            description: "fetch a link, summarize metadata, submit it, and store a representative image asset",
+            path: "/pods/:slug/package/import",
+            description: "import a validated portable Pod Package",
         },
         ApiRouteDoc {
-            method: "DELETE",
-            path: "/pods/:slug/submissions/:id",
-            description: "remove a link from a pod; purges the submission and its assets when no pod still references it",
+            method: "POST",
+            path: "/pods/:slug/package/fork",
+            description: "fork a Pod Package into a new Pod",
         },
         ApiRouteDoc {
             method: "GET",
-            path: "/links/:id/assets",
-            description: "list representative image assets for a submitted link",
+            path: "/discovery-tasks",
+            description: "list visible Discovery Tasks",
         },
         ApiRouteDoc {
             method: "POST",
-            path: "/pods/:slug/discover",
-            description: "rank links using AgentTools",
+            path: "/discovery-tasks",
+            description: "materialize due Discovery Tasks",
         },
         ApiRouteDoc {
             method: "POST",
-            path: "/pods/:slug/stumble",
-            description: "discover with controlled randomness",
+            path: "/discovery-tasks/immediate",
+            description: "create conversational discovery through the task contract",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/discovery-tasks/ready",
+            description: "list claimable Discovery Tasks",
         },
         ApiRouteDoc {
             method: "POST",
-            path: "/briefs/generate",
-            description: "generate private brief from one or more pods",
+            path: "/discovery-tasks/:id/claim",
+            description: "claim a Discovery Task lease",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/discovery-tasks/:id/renew",
+            description: "renew a Discovery Task lease",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/discovery-tasks/:id/complete",
+            description: "complete a Discovery Task",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/discovery-tasks/:id/fail",
+            description: "record a failed Discovery Task attempt",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/candidates/:id",
+            description: "inspect a private Candidate and its independent evidence",
         },
         ApiRouteDoc {
             method: "POST",
@@ -366,6 +430,11 @@ fn route_docs() -> Vec<ApiRouteDoc> {
             method: "POST",
             path: "/federation/pods/:slug/events",
             description: "import signed public events from a trusted peer",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/federation/sync/:peer_id/:pod_slug",
+            description: "synchronize signed events from a trusted peer",
         },
     ]
 }
@@ -428,148 +497,6 @@ async fn join_pod(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn submit_link(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(slug): Path<String>,
-    Json(request): Json<SubmitLinkRequest>,
-) -> Result<Json<Submission>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.submit_link_to_pod(&ctx, &slug, request)?))
-}
-
-async fn remove_submission_from_pod(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path((slug, submission_id)): Path<(String, Uuid)>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(json!(state
-        .tools
-        .request_remove_submission_from_pod(
-            &ctx,
-            &slug,
-            submission_id,
-            chrono::Utc::now(),
-        )?)))
-}
-
-async fn route_link(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<RouteLinkRequest>,
-) -> Result<Json<RouteLinkResponse>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    let metadata = fetch_page_metadata(&request.url).await?;
-    Ok(Json(state.tools.route_link_to_pods(
-        &ctx,
-        RouteLinkRequest {
-            url: request.url,
-            title: request.title.or(metadata.title),
-            summary: request.summary.or(metadata.summary),
-            tags: request.tags,
-        },
-        2.5,
-    )?))
-}
-
-async fn auto_route_intake_link(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<AutoRouteIntakeRequest>,
-) -> Result<Json<AutoRouteIntakeResponse>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    let metadata = fetch_page_metadata(&request.url).await?;
-    let routing = state.tools.route_link_to_pods(
-        &ctx,
-        RouteLinkRequest {
-            url: request.url.clone(),
-            title: metadata.title.clone(),
-            summary: metadata.summary.clone(),
-            tags: request.tags.clone(),
-        },
-        request.min_confidence.unwrap_or(2.5),
-    )?;
-    let Some(selected) = routing.selected.clone() else {
-        return Ok(Json(AutoRouteIntakeResponse {
-            routing,
-            intake: None,
-        }));
-    };
-    let intake = intake_link_with_metadata(
-        &state.tools,
-        &ctx,
-        &selected.pod_slug,
-        LinkIntakeRequest {
-            url: request.url,
-            note: request.note,
-            tags: request.tags,
-            representative_image: request.representative_image,
-        },
-        metadata,
-    )?;
-    Ok(Json(AutoRouteIntakeResponse {
-        routing,
-        intake: Some(intake),
-    }))
-}
-
-async fn intake_link(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(slug): Path<String>,
-    Json(request): Json<LinkIntakeRequest>,
-) -> Result<Json<LinkIntakeResponse>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    let metadata = fetch_page_metadata(&request.url).await?;
-    Ok(Json(intake_link_with_metadata(
-        &state.tools,
-        &ctx,
-        &slug,
-        request,
-        metadata,
-    )?))
-}
-
-fn intake_link_with_metadata(
-    tools: &AgentTools,
-    ctx: &AuthContext,
-    slug: &str,
-    request: LinkIntakeRequest,
-    metadata: PageMetadata,
-) -> Result<LinkIntakeResponse, ApiError> {
-    let image_request = request
-        .representative_image
-        .clone()
-        .or_else(|| metadata.image_url.clone().map(page_image_request));
-    let submission = tools.submit_link_to_pod(
-        ctx,
-        slug,
-        SubmitLinkRequest {
-            url: request.url,
-            title: metadata.title.clone(),
-            description: metadata.summary.clone(),
-            note: request.note,
-            tags: request.tags,
-            discovered_by_crawler: false,
-        },
-    )?;
-    let mut assets = tools.assets_for_submission(ctx, submission.id)?;
-    if let Some(image_request) = image_request {
-        let asset = tools.add_submission_asset(ctx, submission.id, image_request)?;
-        if !assets.iter().any(|existing| existing.id == asset.id) {
-            assets.push(asset);
-        }
-    }
-    Ok(LinkIntakeResponse {
-        submission,
-        assets,
-        fetched_title: metadata.title,
-        fetched_summary: metadata.summary,
-        representative_image_url: metadata.image_url,
-    })
-}
-
 async fn get_skill_pack(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -625,27 +552,6 @@ async fn validate_skill_pack_handler(
 ) -> Result<Json<ValidationReport>, ApiError> {
     let ctx = auth_or_default(&state, &headers)?;
     Ok(Json(state.tools.validate_pod_skill_pack(&ctx, &slug)?))
-}
-
-#[derive(Debug, Deserialize)]
-struct AddSourceRequest {
-    source_type: CrawlerSourceType,
-    url: String,
-}
-
-async fn add_source(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(slug): Path<String>,
-    Json(request): Json<AddSourceRequest>,
-) -> Result<Json<CrawlerSource>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.add_source_to_pod(
-        &ctx,
-        &slug,
-        request.source_type,
-        request.url,
-    )?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -793,56 +699,46 @@ async fn inspect_candidate(
     Ok(Json(state.tools.inspect_candidate(&ctx, id)?))
 }
 
-async fn crawl_pod(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(slug): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    let manifest = state.tools.pod_manifest(&ctx, &slug)?;
-    Ok(Json(json!({
-        "status": "queued",
-        "pod": manifest.pod.slug,
-        "note": "MVP crawler boundary is available in stumble-crawler; HTTP endpoint records intent."
-    })))
+async fn retired_submission_contract() -> impl IntoResponse {
+    (
+        StatusCode::GONE,
+        Json(LegacyContract::LegacySubmission.error()),
+    )
 }
 
-async fn discover(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(slug): Path<String>,
-    Json(request): Json<DiscoverRequest>,
-) -> Result<Json<Vec<DiscoveryItem>>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.discover_in_pod(&ctx, &slug, request)?))
+async fn retired_crawler_contract() -> impl IntoResponse {
+    (
+        StatusCode::GONE,
+        Json(LegacyContract::CrawlerSourceConnector.error()),
+    )
 }
 
-async fn stumble(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(slug): Path<String>,
-    Json(mut request): Json<DiscoverRequest>,
-) -> Result<Json<Vec<DiscoveryItem>>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    request.mode = DiscoveryMode::Stumble;
-    Ok(Json(state.tools.discover_in_pod(&ctx, &slug, request)?))
+async fn retired_presentation_contract() -> impl IntoResponse {
+    (
+        StatusCode::GONE,
+        Json(LegacyContract::LegacyFeedPresentation.error()),
+    )
 }
 
-async fn list_briefs(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<Brief>>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.list_briefs_for_harness(&ctx)?))
+async fn retired_package_contract() -> impl IntoResponse {
+    (
+        StatusCode::GONE,
+        Json(LegacyContract::LegacySkillPack.error()),
+    )
 }
 
-async fn generate_brief(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<GenerateBriefRequest>,
-) -> Result<Json<Brief>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.generate_brief(&ctx, request)?))
+async fn retired_feedback_contract() -> impl IntoResponse {
+    (
+        StatusCode::GONE,
+        Json(LegacyContract::LegacyFeedback.error()),
+    )
+}
+
+async fn retired_peer_sync_contract() -> impl IntoResponse {
+    (
+        StatusCode::GONE,
+        Json(LegacyContract::LegacyPeerSync.error()),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -977,34 +873,6 @@ async fn reset_learned_taste(
     Ok(Json(state.tools.reset_learned_taste(&ctx, request)?))
 }
 
-async fn save_link(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<Uuid>,
-) -> Result<StatusCode, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    state.tools.save_link(&ctx, id)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn link_assets(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<Uuid>,
-) -> Result<Json<Vec<SubmissionAsset>>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.assets_for_submission(&ctx, id)?))
-}
-
-async fn rate_link(
-    State(_state): State<ApiState>,
-    Path(_id): Path<Uuid>,
-) -> Json<serde_json::Value> {
-    Json(
-        json!({"status":"accepted","note":"rate_link is represented as local feedback in the core MVP"}),
-    )
-}
-
 async fn update_preferences(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -1104,8 +972,11 @@ async fn create_api_token(
     Ok(Json(state.tools.create_dev_token_as(&ctx, request)?))
 }
 
-async fn revoke_api_token(Path(_id): Path<Uuid>) -> StatusCode {
-    StatusCode::NO_CONTENT
+async fn retired_api_token_contract() -> impl IntoResponse {
+    (
+        StatusCode::GONE,
+        Json(LegacyContract::LegacyApiToken.error()),
+    )
 }
 
 async fn register_agent_harness(
@@ -1234,12 +1105,16 @@ async fn federation_import_events(
     Ok(Json(json!({"imported": imported})))
 }
 
-async fn federation_sync(Path(peer_id): Path<Uuid>) -> Json<serde_json::Value> {
-    Json(json!({
-        "peer_id": peer_id,
-        "status": "accepted",
-        "note": "Use stumble-sync for outbound HTTP sync; endpoint exists to trigger worker integration."
-    }))
+async fn federation_sync_pod(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path((peer_id, pod_slug)): Path<(Uuid, String)>,
+) -> Result<Json<stumble_sync::SyncReport>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    let peer = state.tools.trusted_peer(&ctx, peer_id)?;
+    Ok(Json(
+        stumble_sync::sync_pod_from_peer(&state.tools, &ctx, &peer, &pod_slug).await?,
+    ))
 }
 
 async fn hub_register_node(
@@ -1351,161 +1226,6 @@ fn ensure_dev_tokens_allowed(state: &ApiState) -> Result<(), ApiError> {
     })
 }
 
-async fn fetch_page_metadata(url: &str) -> Result<PageMetadata, ApiError> {
-    let base_url = Url::parse(url).map_err(|error| ApiError {
-        status: StatusCode::BAD_REQUEST,
-        message: format!("bad url: {error}"),
-    })?;
-    let client = reqwest::Client::builder()
-        .user_agent("stumble-link-intake/0.1")
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()
-        .map_err(|error| ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: format!("failed to build HTTP client: {error}"),
-        })?;
-    let html = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|error| ApiError {
-            status: StatusCode::BAD_GATEWAY,
-            message: format!("failed to fetch link: {error}"),
-        })?
-        .error_for_status()
-        .map_err(|error| ApiError {
-            status: StatusCode::BAD_GATEWAY,
-            message: format!("link returned an error: {error}"),
-        })?
-        .text()
-        .await
-        .map_err(|error| ApiError {
-            status: StatusCode::BAD_GATEWAY,
-            message: format!("failed to read link body: {error}"),
-        })?;
-    let title = extract_title(&html).or_else(|| extract_meta(&html, "property", "og:title"));
-    let summary = extract_meta(&html, "name", "description")
-        .or_else(|| extract_meta(&html, "property", "og:description"))
-        .or_else(|| extract_meta(&html, "name", "twitter:description"))
-        .or_else(|| title.as_ref().map(|title| format!("Page titled {title}.")));
-    let image_url = extract_x_media_image(&html)
-        .or_else(|| extract_meta(&html, "property", "og:image"))
-        .or_else(|| extract_meta(&html, "name", "twitter:image"))
-        .and_then(|image| resolve_url(&base_url, &image));
-    Ok(PageMetadata {
-        title,
-        summary,
-        image_url,
-    })
-}
-
-fn page_image_request(url: String) -> RepresentativeImageRequest {
-    RepresentativeImageRequest {
-        source: SubmissionAssetSource::PageImage,
-        url: Some(url),
-        local_path: None,
-        mime_type: None,
-        alt_text: Some("Representative image extracted from page metadata.".to_string()),
-    }
-}
-
-fn extract_title(html: &str) -> Option<String> {
-    let lower = html.to_lowercase();
-    let start = lower.find("<title")?;
-    let open_end = lower[start..].find('>')? + start + 1;
-    let close = lower[open_end..].find("</title>")? + open_end;
-    clean_html_value(&html[open_end..close])
-}
-
-fn extract_meta(html: &str, attr_name: &str, attr_value: &str) -> Option<String> {
-    let lower = html.to_lowercase();
-    let mut offset = 0;
-    while let Some(relative_start) = lower[offset..].find("<meta") {
-        let start = offset + relative_start;
-        let Some(relative_end) = lower[start..].find('>') else {
-            break;
-        };
-        let end = start + relative_end + 1;
-        let tag = &html[start..end];
-        let tag_lower = tag.to_lowercase();
-        if has_attr_value(&tag_lower, attr_name, attr_value) {
-            if let Some(content) = attr(tag, "content") {
-                return clean_html_value(&content);
-            }
-        }
-        offset = end;
-    }
-    None
-}
-
-fn extract_x_media_image(html: &str) -> Option<String> {
-    let markers = [
-        "media_url_https:&quot;",
-        "\"media_url_https\":\"",
-        "https://pbs.twimg.com/amplify_video_thumb/",
-        "https://pbs.twimg.com/media/",
-    ];
-    for marker in markers {
-        if let Some(start) = html.find(marker) {
-            let value_start = start + marker.len();
-            if marker.starts_with("https://") {
-                let value = &html[start..];
-                let end = value
-                    .find(|c: char| c == '"' || c == '\'' || c == '<' || c.is_whitespace())
-                    .unwrap_or(value.len());
-                return clean_html_value(&value[..end]);
-            }
-            let value = &html[value_start..];
-            let end = value.find(['"', '&', '<']).unwrap_or(value.len());
-            return clean_html_value(&value[..end]);
-        }
-    }
-    None
-}
-
-fn has_attr_value(tag_lower: &str, attr_name: &str, attr_value: &str) -> bool {
-    let attr_value = attr_value.to_lowercase();
-    attr(tag_lower, attr_name).is_some_and(|value| value.to_lowercase() == attr_value)
-}
-
-fn attr(tag: &str, name: &str) -> Option<String> {
-    let lower = tag.to_lowercase();
-    let needle = format!("{name}=");
-    let start = lower.find(&needle)? + needle.len();
-    let bytes = tag.as_bytes();
-    let quote = *bytes.get(start)?;
-    if quote != b'"' && quote != b'\'' {
-        return None;
-    }
-    let value_start = start + 1;
-    let value_end = tag[value_start..].find(quote as char)? + value_start;
-    Some(tag[value_start..value_end].to_string())
-}
-
-fn clean_html_value(value: &str) -> Option<String> {
-    let cleaned = value
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if cleaned.is_empty() {
-        None
-    } else {
-        Some(cleaned)
-    }
-}
-
-fn resolve_url(base: &Url, value: &str) -> Option<String> {
-    Url::parse(value)
-        .or_else(|_| base.join(value))
-        .ok()
-        .map(|url| url.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1545,9 +1265,10 @@ mod tests {
             .unwrap();
         let response = router(tools)
             .oneshot(
-                Request::post(format!("/links/{}/save", Uuid::nil()))
+                Request::post(format!("/feed/items/{}/feedback", Uuid::nil()))
                     .header("authorization", format!("Bearer {}", issued.token.expose()))
-                    .body(Body::empty())
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"kind":"save"}"#))
                     .unwrap(),
             )
             .await
@@ -1582,5 +1303,36 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn federation_catalog_exposes_only_the_pod_scoped_sync_contract() {
+        let routes = route_docs();
+        assert!(routes.iter().any(|route| {
+            route.method == "POST" && route.path == "/federation/sync/:peer_id/:pod_slug"
+        }));
+        assert!(!routes
+            .iter()
+            .any(|route| { route.method == "POST" && route.path == "/federation/sync/:peer_id" }));
+    }
+
+    #[tokio::test]
+    async fn unscoped_peer_sync_returns_the_versioned_retirement_contract() {
+        let response = router(AgentTools::new(seed_store()))
+            .oneshot(
+                Request::post(format!("/federation/sync/{}", Uuid::nil()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::GONE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["code"], "legacy_contract_retired");
+        assert_eq!(error["protocol_version"], CURRENT_PROTOCOL_VERSION);
+        assert_eq!(error["replacement"], "sync_pod");
     }
 }

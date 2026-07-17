@@ -8,6 +8,7 @@ version.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 stumble-core = { path = "../stumble-core" }
+stumble-sync = { path = "../stumble-sync" }
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true

@@ -169,6 +169,51 @@ fn trust_peer(tools: &AgentTools, peer: &NodeInfo, base_url: &str) -> TrustedPee
         .unwrap()
 }
 
+#[test]
+fn trusted_peer_lookup_enforces_authorization_tenant_and_enabled_state() {
+    let tools = AgentTools::new(seed_store());
+    let admin = harness(
+        &tools,
+        "peer reader",
+        vec![HarnessCapability::Administration],
+    );
+    let unauthorized = harness(&tools, "feed reader", vec![HarnessCapability::FeedRead]);
+    let peer = tools
+        .trusted_peers(&admin)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+    assert_eq!(tools.trusted_peer(&admin, peer.id).unwrap().id, peer.id);
+    assert!(matches!(
+        tools.trusted_peer(&unauthorized, peer.id),
+        Err(AgentToolsError::Forbidden { .. })
+    ));
+
+    {
+        let store = tools.store();
+        let mut store = store.write().unwrap();
+        store.trusted_peers.get_mut(&peer.id).unwrap().enabled = false;
+    }
+    assert!(matches!(
+        tools.trusted_peer(&admin, peer.id),
+        Err(AgentToolsError::Store(StoreError::UntrustedPeer))
+    ));
+
+    {
+        let store = tools.store();
+        let mut store = store.write().unwrap();
+        let peer = store.trusted_peers.get_mut(&peer.id).unwrap();
+        peer.enabled = true;
+        peer.tenant_id = Some(uuid::Uuid::now_v7());
+    }
+    assert!(matches!(
+        tools.trusted_peer(&admin, peer.id),
+        Err(AgentToolsError::Store(StoreError::UntrustedPeer))
+    ));
+}
+
 fn approve_trust_policy_change(tools: &AgentTools, change: TrustPolicyChange) {
     let proposer = harness(
         tools,

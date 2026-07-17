@@ -42,6 +42,98 @@ pub enum DirectSubscriptionError {
     Core(#[from] AgentToolsError),
 }
 
+/// Failure while synchronizing signed Pod Events from a trusted peer.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum PeerSyncError {
+    /// A trusted peer artifact could not be fetched or decoded.
+    #[error("failed to fetch trusted peer artifacts from {url}")]
+    Request {
+        /// Artifact URL that failed.
+        url: String,
+        /// Underlying HTTP transport or response-decoding failure.
+        #[source]
+        source: reqwest::Error,
+    },
+    /// The peer advertises an event contract this node cannot interpret.
+    #[error("incompatible protocol version {received}; this node supports {supported}")]
+    IncompatibleProtocol {
+        /// Version advertised by the peer.
+        received: String,
+        /// Version supported by this node.
+        supported: &'static str,
+    },
+    /// The peer presented a key different from the trusted record.
+    #[error("remote public key does not match the trusted peer")]
+    PublicKeyMismatch,
+    /// The blocking event-import task failed before returning a result.
+    #[error("trusted peer import task failed")]
+    ImportTask(#[source] tokio::task::JoinError),
+    /// Core authorization, verification, projection, or persistence failed.
+    #[error(transparent)]
+    Core(#[from] AgentToolsError),
+}
+
+trait PeerSyncTransport {
+    async fn node_info(&self, base_url: &str) -> Result<NodeInfo, PeerSyncError>;
+    async fn events(&self, url: &str) -> Result<Vec<EventLog>, PeerSyncError>;
+}
+
+struct HttpPeerSyncTransport {
+    client: reqwest::Client,
+}
+
+impl PeerSyncTransport for HttpPeerSyncTransport {
+    async fn node_info(&self, base_url: &str) -> Result<NodeInfo, PeerSyncError> {
+        let well_known_url = format!("{base_url}/.well-known/stumble-node");
+        let response = self.client.get(&well_known_url).send().await;
+        if let Ok(response) = response.and_then(reqwest::Response::error_for_status) {
+            return response
+                .json::<WellKnownNode>()
+                .await
+                .map(|well_known| well_known.node)
+                .map_err(|source| PeerSyncError::Request {
+                    url: well_known_url,
+                    source,
+                });
+        }
+        let node_url = format!("{base_url}/federation/node");
+        self.client
+            .get(&node_url)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|source| PeerSyncError::Request {
+                url: node_url.clone(),
+                source,
+            })?
+            .json::<NodeInfo>()
+            .await
+            .map_err(|source| PeerSyncError::Request {
+                url: node_url,
+                source,
+            })
+    }
+
+    async fn events(&self, url: &str) -> Result<Vec<EventLog>, PeerSyncError> {
+        self.client
+            .get(url)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|source| PeerSyncError::Request {
+                url: url.to_string(),
+                source,
+            })?
+            .json::<Vec<EventLog>>()
+            .await
+            .map_err(|source| PeerSyncError::Request {
+                url: url.to_string(),
+                source,
+            })
+    }
+}
+
 /// Fetches a directly addressed public Pod and creates a local Subscription.
 ///
 /// # Errors
@@ -171,18 +263,42 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(
         })
 }
 
+/// Fetches and imports signed events for one Pod from a trusted peer.
+///
+/// # Errors
+///
+/// Returns an error before import when the peer cannot be reached, advertises
+/// an incompatible protocol, presents a different key, or event import fails.
 pub async fn sync_pod_from_peer(
     tools: &AgentTools,
     ctx: &AuthContext,
     peer: &TrustedPeer,
     pod_slug: &str,
-) -> anyhow::Result<SyncReport> {
-    let url = format!(
-        "{}/federation/pods/{}/events",
-        peer.base_url.trim_end_matches('/'),
-        pod_slug
-    );
-    let events = reqwest::get(url).await?.json::<Vec<EventLog>>().await?;
+) -> Result<SyncReport, PeerSyncError> {
+    let transport = HttpPeerSyncTransport {
+        client: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|source| PeerSyncError::Request {
+                url: peer.base_url.clone(),
+                source,
+            })?,
+    };
+    sync_pod_from_peer_with_transport(tools, ctx, peer, pod_slug, &transport).await
+}
+
+async fn sync_pod_from_peer_with_transport(
+    tools: &AgentTools,
+    ctx: &AuthContext,
+    peer: &TrustedPeer,
+    pod_slug: &str,
+    transport: &impl PeerSyncTransport,
+) -> Result<SyncReport, PeerSyncError> {
+    let base = peer.base_url.trim_end_matches('/');
+    let remote = transport.node_info(base).await?;
+    validate_peer_identity(peer, &remote)?;
+    let url = format!("{}/federation/pods/{}/events", base, pod_slug);
+    let events = transport.events(&url).await?;
     let fetched_events = events.len();
     let imported_events =
         import_peer_events_on_blocking(tools.clone(), ctx.clone(), peer.id, events).await?;
@@ -191,6 +307,24 @@ pub async fn sync_pod_from_peer(
         pod_slug: pod_slug.to_string(),
         fetched_events,
         imported_events,
+    })
+}
+
+fn validate_peer_identity(peer: &TrustedPeer, remote: &NodeInfo) -> Result<(), PeerSyncError> {
+    validate_peer_protocol(&remote.supported_protocol_version)?;
+    if remote.public_key != peer.public_key {
+        return Err(PeerSyncError::PublicKeyMismatch);
+    }
+    Ok(())
+}
+
+fn validate_peer_protocol(version: &str) -> Result<(), PeerSyncError> {
+    if version == CURRENT_PROTOCOL_VERSION {
+        return Ok(());
+    }
+    Err(PeerSyncError::IncompatibleProtocol {
+        received: version.to_string(),
+        supported: CURRENT_PROTOCOL_VERSION,
     })
 }
 
@@ -236,6 +370,7 @@ async fn refresh_registered_node(
 ) -> anyhow::Result<HubRefreshReport> {
     let base = registered.base_url.trim_end_matches('/');
     let remote_node = fetch_remote_node_info(client, base).await?;
+    validate_peer_protocol(&remote_node.supported_protocol_version)?;
     if remote_node.node_id != registered.node_id {
         anyhow::bail!(
             "remote node id {} did not match registered node id {}",
@@ -349,10 +484,11 @@ async fn import_peer_events_on_blocking(
     ctx: AuthContext,
     peer_id: PeerId,
     events: Vec<EventLog>,
-) -> anyhow::Result<usize> {
+) -> Result<usize, PeerSyncError> {
     tokio::task::spawn_blocking(move || tools.import_pod_events(&ctx, peer_id, events))
-        .await?
-        .map_err(Into::into)
+        .await
+        .map_err(PeerSyncError::ImportTask)?
+        .map_err(PeerSyncError::Core)
 }
 
 async fn import_hub_events_on_blocking(
@@ -385,6 +521,82 @@ fn discovery_tags(pod: &Pod) -> Vec<String> {
         }
     }
     tags
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FakePeerTransport {
+        node: NodeInfo,
+    }
+
+    impl PeerSyncTransport for FakePeerTransport {
+        async fn node_info(&self, _base_url: &str) -> Result<NodeInfo, PeerSyncError> {
+            Ok(self.node.clone())
+        }
+
+        async fn events(&self, _url: &str) -> Result<Vec<EventLog>, PeerSyncError> {
+            panic!("events must not be fetched before peer negotiation succeeds")
+        }
+    }
+
+    fn peer(public_key: &str) -> TrustedPeer {
+        TrustedPeer {
+            id: Uuid::now_v7(),
+            tenant_id: None,
+            display_name: "peer".into(),
+            base_url: "https://peer.example".into(),
+            public_key: public_key.into(),
+            trust_level: TrustLevel::ReadOnly,
+            enabled: true,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn incompatible_peer_protocol_stops_before_event_fetch() {
+        let tools = AgentTools::new(seed_store());
+        let ctx = tools.default_auth_context().unwrap();
+        let peer = peer("trusted-key");
+        let transport = FakePeerTransport {
+            node: NodeInfo {
+                node_id: Uuid::now_v7(),
+                display_name: "old peer".into(),
+                public_key: "trusted-key".into(),
+                supported_protocol_version: "stumble/0.1".into(),
+            },
+        };
+
+        let result =
+            sync_pod_from_peer_with_transport(&tools, &ctx, &peer, "example-pod", &transport).await;
+
+        assert!(matches!(
+            result,
+            Err(PeerSyncError::IncompatibleProtocol { received, supported })
+                if received == "stumble/0.1" && supported == CURRENT_PROTOCOL_VERSION
+        ));
+    }
+
+    #[tokio::test]
+    async fn peer_key_mismatch_stops_before_event_fetch() {
+        let tools = AgentTools::new(seed_store());
+        let ctx = tools.default_auth_context().unwrap();
+        let peer = peer("trusted-key");
+        let transport = FakePeerTransport {
+            node: NodeInfo {
+                node_id: Uuid::now_v7(),
+                display_name: "impostor".into(),
+                public_key: "different-key".into(),
+                supported_protocol_version: CURRENT_PROTOCOL_VERSION.into(),
+            },
+        };
+
+        let result =
+            sync_pod_from_peer_with_transport(&tools, &ctx, &peer, "example-pod", &transport).await;
+
+        assert!(matches!(result, Err(PeerSyncError::PublicKeyMismatch)));
+    }
 }
 
 pub fn export_events_jsonl(events: &[EventLog]) -> anyhow::Result<String> {

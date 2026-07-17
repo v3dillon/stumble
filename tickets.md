@@ -220,19 +220,19 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 ## Retire legacy crawler and submission contracts
 
-**Status:** ready-for-agent
+**Status:** complete
 
 **What to build:** Complete the expand–migrate–contract transition from crawler, source-connector, submission, and brief-centered behavior to the approved headless Candidate, Content Item, Pod Package, Discovery Task, and Feed contracts.
 
 **Blocked by:** Claim scheduled Discovery Tasks; Curate and route Content Items across Pods; Complete the constrained Feed Mix.
 
-- [ ] All first-release workflows use the canonical domain vocabulary and high-level harness operations.
-- [ ] Legacy persisted data migrates without losing canonical identity, placements, feedback, or events.
-- [ ] Obsolete crawler and dedicated connector operations are removed or return an explicit versioned compatibility error rather than a placeholder success.
-- [ ] Brief behavior is either expressed as Agent Harness presentation of a Feed Batch or clearly retained as a compatibility adapter.
-- [ ] HTTP, MCP, and CLI tool catalogs contain no reserved placeholder operations for first-release behavior.
-- [ ] Adapter contract tests prove equivalent IDs, provenance, errors, and allowed actions across transports.
-- [ ] Protocol version negotiation prevents new event shapes from being misread by older nodes.
+- [x] All first-release workflows use the canonical domain vocabulary and high-level harness operations.
+- [x] Legacy persisted data migrates without losing canonical identity, placements, feedback, or events.
+- [x] Obsolete crawler and dedicated connector operations are removed or return an explicit versioned compatibility error rather than a placeholder success.
+- [x] Brief behavior is either expressed as Agent Harness presentation of a Feed Batch or clearly retained as a compatibility adapter.
+- [x] HTTP, MCP, and CLI tool catalogs contain no reserved placeholder operations for first-release behavior.
+- [x] Adapter contract tests prove equivalent IDs, provenance, errors, and allowed actions across transports.
+- [x] Protocol version negotiation prevents new event shapes from being misread by older nodes.
 
 ## Prove the complete first release
 

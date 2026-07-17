@@ -877,7 +877,7 @@ mod tests {
                 display_name: "Public Alien Node".to_string(),
                 base_url: "https://alien-node.example".to_string(),
                 public_key: node.public_key.clone(),
-                protocol_version: "stumble/0.1".to_string(),
+                protocol_version: CURRENT_PROTOCOL_VERSION.to_string(),
             })
             .unwrap();
         tools
@@ -1002,7 +1002,7 @@ mod tests {
                 display_name: "Remote Public Node".to_string(),
                 base_url: "https://remote-node.example".to_string(),
                 public_key: remote_node.public_key,
-                protocol_version: "stumble/0.1".to_string(),
+                protocol_version: CURRENT_PROTOCOL_VERSION.to_string(),
             })
             .unwrap();
         tools
@@ -1053,7 +1053,7 @@ mod tests {
                 display_name: "Remote Alien Node".to_string(),
                 base_url: "https://remote-alien-node.example".to_string(),
                 public_key: remote_node.public_key.clone(),
-                protocol_version: "stumble/0.1".to_string(),
+                protocol_version: CURRENT_PROTOCOL_VERSION.to_string(),
             })
             .unwrap();
 
@@ -1249,7 +1249,7 @@ mod tests {
                 display_name: "Public Node".to_string(),
                 base_url: "http://public-node.example".to_string(),
                 public_key: node.public_key,
-                protocol_version: "stumble/0.1".to_string(),
+                protocol_version: CURRENT_PROTOCOL_VERSION.to_string(),
             })
             .unwrap_err()
             .to_string();
@@ -1266,7 +1266,7 @@ mod tests {
                 display_name: "Local Node".to_string(),
                 base_url: "http://127.0.0.1:8787".to_string(),
                 public_key: node.public_key,
-                protocol_version: "stumble/0.1".to_string(),
+                protocol_version: CURRENT_PROTOCOL_VERSION.to_string(),
             })
             .unwrap();
         let pod = tools
@@ -1297,7 +1297,7 @@ mod tests {
                 display_name: "Public Node".to_string(),
                 base_url: "https://public-node.example".to_string(),
                 public_key: node.public_key,
-                protocol_version: "stumble/0.1".to_string(),
+                protocol_version: CURRENT_PROTOCOL_VERSION.to_string(),
             })
             .unwrap();
         let error = tools

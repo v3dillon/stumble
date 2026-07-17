@@ -4,6 +4,80 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+/// Federation and adapter contract understood by this first-release node.
+pub const CURRENT_PROTOCOL_VERSION: &str = "stumble/1.0";
+
+/// Machine-readable error returned when a pre-release contract is invoked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[error(
+    r#"{{"code":"legacy_contract_retired","contract":"{contract}","protocol_version":"{protocol_version}","replacement":"{replacement}"}}"#
+)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct LegacyContractError {
+    /// Stable compatibility error code.
+    pub code: &'static str,
+    /// Retired operation or contract family.
+    pub contract: &'static str,
+    /// Protocol version returning the error.
+    pub protocol_version: &'static str,
+    /// Canonical first-release operation replacing the retired contract.
+    pub replacement: &'static str,
+}
+
+/// Retired pre-release contract families with canonical replacements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LegacyContract {
+    /// Direct link submission bypassing Candidate review.
+    LegacySubmission,
+    /// Node-owned crawling or dedicated source connectors.
+    CrawlerSourceConnector,
+    /// In-node discovery, Stumble, or brief generation.
+    LegacyFeedPresentation,
+    /// Link-oriented feedback operations.
+    LegacyFeedback,
+    /// Pre-Pod-Package skill-pack naming.
+    LegacySkillPack,
+    /// Legacy development API-token revocation.
+    LegacyApiToken,
+    /// Peer-wide synchronization without a Pod scope.
+    LegacyPeerSync,
+}
+
+impl LegacyContract {
+    /// Returns the transport-neutral compatibility error for this contract.
+    #[must_use]
+    pub const fn error(self) -> LegacyContractError {
+        let (contract, replacement) = match self {
+            Self::LegacySubmission => ("legacy_submission", "submit_candidate"),
+            Self::CrawlerSourceConnector => (
+                "crawler_source_connector",
+                "discovery_tasks+submit_candidate",
+            ),
+            Self::LegacyFeedPresentation => ("legacy_feed_presentation", "get_feed_batch"),
+            Self::LegacyFeedback => ("legacy_feedback", "record_feed_feedback"),
+            Self::LegacySkillPack => ("legacy_skill_pack", "pod_package"),
+            Self::LegacyApiToken => ("legacy_api_token", "revoke_agent_harness"),
+            Self::LegacyPeerSync => ("legacy_peer_sync", "sync_pod"),
+        };
+        LegacyContractError::new(contract, replacement)
+    }
+}
+
+impl LegacyContractError {
+    /// Creates a versioned compatibility error for a retired contract.
+    #[must_use]
+    pub const fn new(contract: &'static str, replacement: &'static str) -> Self {
+        Self {
+            code: "legacy_contract_retired",
+            contract,
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            replacement,
+        }
+    }
+}
+
 pub type TenantId = Uuid;
 pub type UserId = Uuid;
 pub type PodId = Uuid;

@@ -49,8 +49,10 @@ async fn representative_adapters_return_equivalent_authorization_denials() {
             data_dir.path().to_str().unwrap(),
             "--token",
             &token,
-            "block-source",
-            "example.com",
+            "feed-feedback",
+            &Uuid::nil().to_string(),
+            "--kind",
+            "save",
         ])
         .output()
         .unwrap();
@@ -62,17 +64,18 @@ async fn representative_adapters_return_equivalent_authorization_denials() {
     let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
     let mcp_error = mcp
         .call(McpToolCall {
-            tool: "save_link".into(),
-            arguments: json!({"submission_id": Uuid::nil()}),
+            tool: "record_feed_feedback".into(),
+            arguments: json!({"content_item_id": Uuid::nil(), "kind": "save"}),
         })
         .unwrap_err();
     assert!(mcp_error.to_string().contains(expected));
 
     let response = router(tools)
         .oneshot(
-            Request::post(format!("/links/{}/save", Uuid::nil()))
+            Request::post(format!("/feed/items/{}/feedback", Uuid::nil()))
                 .header("authorization", format!("Bearer {token}"))
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"kind":"save"}"#))
                 .unwrap(),
         )
         .await
@@ -198,27 +201,27 @@ fn mcp_creates_reads_validates_exports_and_imports_pod_packages() {
     assert_eq!(mcp_created["package"]["version"], 1);
     let mcp_read = mcp
         .call(McpToolCall {
-            tool: "get_pod_skill".into(),
+            tool: "get_pod_package".into(),
             arguments: json!({"pod_slug": "mcp-package"}),
         })
         .unwrap();
     assert_eq!(mcp_read["version"], 1);
     let mcp_validation = mcp
         .call(McpToolCall {
-            tool: "validate_pod_skill_pack".into(),
+            tool: "validate_pod_package".into(),
             arguments: json!({"pod_slug": "mcp-package"}),
         })
         .unwrap();
     assert_eq!(mcp_validation["valid"], true);
     let mcp_export = mcp
         .call(McpToolCall {
-            tool: "export_pod_skill_pack".into(),
+            tool: "export_pod_package".into(),
             arguments: json!({"pod_slug": "mcp-package"}),
         })
         .unwrap();
     let mcp_import = mcp
         .call(McpToolCall {
-            tool: "import_pod_skill_pack".into(),
+            tool: "import_pod_package".into(),
             arguments: json!({"pod_slug": "mcp-package", "files": mcp_export["files"]}),
         })
         .unwrap();
@@ -251,7 +254,7 @@ async fn http_creates_reads_validates_exports_and_imports_pod_packages() {
     assert_eq!(http_created["package"]["version"], 1);
     let http_read = router(tools.clone())
         .oneshot(
-            Request::get("/pods/http-package/skill-pack")
+            Request::get("/pods/http-package/package")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -261,7 +264,7 @@ async fn http_creates_reads_validates_exports_and_imports_pod_packages() {
     assert_eq!(http_read.status(), axum::http::StatusCode::OK);
     let http_validation = router(tools.clone())
         .oneshot(
-            Request::post("/pods/http-package/skill-pack/validate")
+            Request::post("/pods/http-package/package/validate")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -271,7 +274,7 @@ async fn http_creates_reads_validates_exports_and_imports_pod_packages() {
     assert_eq!(http_validation.status(), axum::http::StatusCode::OK);
     let http_export = router(tools.clone())
         .oneshot(
-            Request::post("/pods/http-package/skill-pack/export")
+            Request::post("/pods/http-package/package/export")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -286,7 +289,7 @@ async fn http_creates_reads_validates_exports_and_imports_pod_packages() {
     .unwrap();
     let http_import = router(tools.clone())
         .oneshot(
-            Request::post("/pods/http-package/skill-pack/import")
+            Request::post("/pods/http-package/package/import")
                 .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(
@@ -392,23 +395,23 @@ fn cli_rejects_extra_files_then_round_trips_pod_package() {
             .output()
             .unwrap()
     };
-    let read = run_cli(&["get-skill-pack", "cli-package"]);
+    let read = run_cli(&["get-pod-package", "cli-package"]);
     assert!(read.status.success());
     let read: serde_json::Value = serde_json::from_slice(&read.stdout).unwrap();
     assert_eq!(read["version"], 1);
-    let validation = run_cli(&["validate-skill-pack", "cli-package"]);
+    let validation = run_cli(&["validate-pod-package", "cli-package"]);
     assert!(validation.status.success());
     let validation: serde_json::Value = serde_json::from_slice(&validation.stdout).unwrap();
     assert_eq!(validation["valid"], true);
     let export_dir = data_dir.path().join("cli-export");
     let export = run_cli(&[
-        "export-skill-pack",
+        "export-pod-package",
         "cli-package",
         export_dir.to_str().unwrap(),
     ]);
     assert!(export.status.success());
     let import = run_cli(&[
-        "import-skill-pack",
+        "import-pod-package",
         "cli-package",
         export_dir.to_str().unwrap(),
     ]);

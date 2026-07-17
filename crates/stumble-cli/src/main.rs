@@ -81,6 +81,7 @@ enum Command {
         #[arg(action = clap::ArgAction::Set)]
         is_priority: bool,
     },
+    #[command(hide = true)]
     Submit {
         #[arg(long)]
         pod: String,
@@ -98,15 +99,18 @@ enum Command {
     InspectCandidate {
         id: CandidateId,
     },
+    #[command(hide = true)]
     AddSource {
         #[arg(long)]
         pod: String,
         #[arg(long)]
         url: String,
     },
+    #[command(hide = true)]
     Crawl {
         pod: String,
     },
+    #[command(hide = true)]
     Discover {
         #[arg(long)]
         pod: String,
@@ -115,12 +119,14 @@ enum Command {
         #[arg(long = "avoid")]
         avoid: Vec<String>,
     },
+    #[command(hide = true)]
     Stumble {
         #[arg(long)]
         pod: String,
         #[arg(long, default_value = "surprise me")]
         query: String,
     },
+    #[command(hide = true)]
     Brief {
         #[arg(long = "pod")]
         pods: Vec<String>,
@@ -168,24 +174,26 @@ enum Command {
         #[arg(long, conflicts_with = "topic")]
         source: Option<String>,
     },
+    #[command(hide = true)]
     BlockSource {
         source: String,
     },
+    #[command(hide = true)]
     BlockTopic {
         topic: String,
     },
-    GetSkillPack {
+    GetPodPackage {
         pod: String,
     },
-    ExportSkillPack {
+    ExportPodPackage {
         pod: String,
         out: PathBuf,
     },
-    ImportSkillPack {
+    ImportPodPackage {
         pod: String,
         from: PathBuf,
     },
-    ForkSkillPack {
+    ForkPodPackage {
         #[arg(long)]
         source_pod: String,
         #[arg(long)]
@@ -193,7 +201,7 @@ enum Command {
         #[arg(long)]
         slug: String,
     },
-    ValidateSkillPack {
+    ValidatePodPackage {
         pod: String,
     },
     CreateTenant {
@@ -209,6 +217,7 @@ enum Command {
         label: String,
     },
     ListApiTokens,
+    #[command(hide = true)]
     RevokeApiToken {
         id: uuid::Uuid,
     },
@@ -283,6 +292,7 @@ enum Command {
         public_key: String,
     },
     ListPeers,
+    #[command(hide = true)]
     SyncPeer {
         peer_id: uuid::Uuid,
     },
@@ -322,6 +332,11 @@ impl From<HarnessKindArg> for AgentHarnessKind {
             HarnessKindArg::Unattended => Self::Unattended,
         }
     }
+}
+
+fn exit_legacy_contract(error: LegacyContractError) -> ! {
+    eprintln!("{error}");
+    std::process::exit(2);
 }
 
 #[tokio::main]
@@ -436,25 +451,11 @@ async fn main() -> anyhow::Result<()> {
             print_json(&SetPrioritySubscriptionRequest::new(pod_id, is_priority))?;
         }
         Command::Submit {
-            pod,
-            url,
-            title,
-            note,
-        } => {
-            let submission = tools.submit_link_to_pod(
-                &ctx,
-                &pod,
-                SubmitLinkRequest {
-                    url,
-                    title,
-                    description: None,
-                    note,
-                    tags: vec![],
-                    discovered_by_crawler: false,
-                },
-            )?;
-            print_json(&submission)?;
-        }
+            pod: _,
+            url: _,
+            title: _,
+            note: _,
+        } => exit_legacy_contract(LegacyContract::LegacySubmission.error()),
         Command::SubmitCandidate { from } => {
             let request = serde_json::from_str::<CandidateSubmissionRequest>(
                 &std::fs::read_to_string(from)?,
@@ -464,55 +465,17 @@ async fn main() -> anyhow::Result<()> {
         Command::InspectCandidate { id } => {
             print_json(&tools.inspect_candidate(&ctx, id)?)?;
         }
-        Command::AddSource { pod, url } => {
-            print_json(&tools.add_source_to_pod(&ctx, &pod, CrawlerSourceType::Rss, url)?)?;
+        Command::AddSource { pod: _, url: _ } | Command::Crawl { pod: _ } => {
+            exit_legacy_contract(LegacyContract::CrawlerSourceConnector.error())
         }
-        Command::Crawl { pod } => {
-            let manifest = tools.pod_manifest(&ctx, &pod)?;
-            print_json(&serde_json::json!({"status":"queued","pod": manifest.pod.slug}))?;
+        Command::Discover {
+            pod: _,
+            query: _,
+            avoid: _,
         }
-        Command::Discover { pod, query, avoid } => {
-            let items = tools.discover_in_pod(
-                &ctx,
-                &pod,
-                DiscoverRequest {
-                    query,
-                    avoid,
-                    limit: 7,
-                    mode: DiscoveryMode::DeepMatch,
-                    user_id: ctx.user_id,
-                },
-            )?;
-            print_json(&items)?;
-        }
-        Command::Stumble { pod, query } => {
-            let items = tools.discover_in_pod(
-                &ctx,
-                &pod,
-                DiscoverRequest {
-                    query,
-                    avoid: vec![],
-                    limit: 7,
-                    mode: DiscoveryMode::Stumble,
-                    user_id: ctx.user_id,
-                },
-            )?;
-            print_json(&items)?;
-        }
-        Command::Brief { pods, query } => {
-            let pod_slugs = if pods.is_empty() {
-                vec!["beautiful-interfaces".to_string()]
-            } else {
-                pods
-            };
-            print_json(&tools.generate_brief(
-                &ctx,
-                GenerateBriefRequest {
-                    pod_slugs,
-                    query,
-                    user_id: ctx.user_id,
-                },
-            )?)?;
+        | Command::Stumble { pod: _, query: _ }
+        | Command::Brief { pods: _, query: _ } => {
+            exit_legacy_contract(LegacyContract::LegacyFeedPresentation.error())
         }
         Command::Feed {
             size,
@@ -569,14 +532,11 @@ async fn main() -> anyhow::Result<()> {
             );
             print_json(&tools.reset_learned_taste(&ctx, request)?)?;
         }
-        Command::BlockSource { source } => {
-            tools.block_source(&ctx, source)?;
+        Command::BlockSource { source: _ } | Command::BlockTopic { topic: _ } => {
+            exit_legacy_contract(LegacyContract::LegacyFeedback.error())
         }
-        Command::BlockTopic { topic } => {
-            tools.block_topic(&ctx, topic)?;
-        }
-        Command::GetSkillPack { pod } => print_json(&tools.get_skill_pack(&ctx, &pod)?)?,
-        Command::ExportSkillPack { pod, out } => {
+        Command::GetPodPackage { pod } => print_json(&tools.get_skill_pack(&ctx, &pod)?)?,
+        Command::ExportPodPackage { pod, out } => {
             let export = tools.export_skill_pack(&ctx, &pod)?;
             std::fs::create_dir_all(&out)?;
             for (name, contents) in export.files {
@@ -584,11 +544,11 @@ async fn main() -> anyhow::Result<()> {
             }
             println!("exported {pod}");
         }
-        Command::ImportSkillPack { pod, from } => {
+        Command::ImportPodPackage { pod, from } => {
             let files = read_portable_package_directory(&from)?;
             print_json(&tools.import_skill_pack(&ctx, &pod, files)?)?;
         }
-        Command::ForkSkillPack {
+        Command::ForkPodPackage {
             source_pod,
             name,
             slug,
@@ -604,7 +564,7 @@ async fn main() -> anyhow::Result<()> {
                 },
             )?)?;
         }
-        Command::ValidateSkillPack { pod } => {
+        Command::ValidatePodPackage { pod } => {
             print_json(&tools.validate_pod_skill_pack(&ctx, &pod)?)?
         }
         Command::CreateTenant { slug, name } => {
@@ -628,7 +588,9 @@ async fn main() -> anyhow::Result<()> {
             let store = store.read().unwrap();
             print_json(&store.api_tokens.values().collect::<Vec<_>>())?;
         }
-        Command::RevokeApiToken { id } => println!("revocation placeholder accepted for {id}"),
+        Command::RevokeApiToken { id: _ } => {
+            exit_legacy_contract(LegacyContract::LegacyApiToken.error())
+        }
         Command::RegisterHarness {
             label,
             kind,
@@ -723,14 +685,14 @@ async fn main() -> anyhow::Result<()> {
             )?)?;
         }
         Command::ListPeers => {
-            tools.require_harness_capability(&ctx, HarnessCapability::Administration)?;
-            let store = tools.store();
-            let store = store.read().unwrap();
-            print_json(&store.trusted_peers.values().collect::<Vec<_>>())?;
+            print_json(&tools.trusted_peers(&ctx)?)?;
         }
-        Command::SyncPeer { peer_id } => println!("sync queued for peer {peer_id}"),
+        Command::SyncPeer { peer_id: _ } => {
+            exit_legacy_contract(LegacyContract::LegacyPeerSync.error())
+        }
         Command::SyncPod { pod, peer_id } => {
-            println!("sync queued for pod {pod} with peer {peer_id}")
+            let peer = tools.trusted_peer(&ctx, peer_id)?;
+            print_json(&stumble_sync::sync_pod_from_peer(&tools, &ctx, &peer, &pod).await?)?;
         }
         Command::ExportEvents { pod } => print_json(&tools.export_pod_events(&ctx, &pod)?)?,
         Command::ImportEvents {
@@ -749,8 +711,18 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::VerifyEvents { pod } => {
             let events = tools.export_pod_events(&ctx, &pod)?;
+            let node = tools.node_info(&ctx)?;
+            let verified = events
+                .iter()
+                .map(|event| verify_event(event, &node.public_key))
+                .collect::<Result<Vec<_>, _>>()?;
+            if verified.iter().any(|is_valid| !is_valid) {
+                return Err(anyhow::anyhow!(
+                    "one or more signed Pod Events failed verification"
+                ));
+            }
             print_json(
-                &serde_json::json!({"pod": pod, "public_events": events.len(), "verified": events.iter().filter(|e| e.verified).count()}),
+                &serde_json::json!({"pod": pod, "public_events": events.len(), "verified": verified.len()}),
             )?;
         }
     }

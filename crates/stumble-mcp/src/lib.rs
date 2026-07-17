@@ -52,10 +52,8 @@ impl McpToolRouter {
             "create_pod",
             "create_private_pod_with_package",
             "join_pod",
-            "submit_link_to_pod",
             "submit_candidate",
             "inspect_candidate",
-            "add_source_to_pod",
             "materialize_discovery_tasks",
             "list_discovery_tasks",
             "list_ready_discovery_tasks",
@@ -65,30 +63,17 @@ impl McpToolRouter {
             "renew_discovery_task",
             "complete_discovery_task",
             "fail_discovery_task",
-            "crawl_pod_sources",
-            "discover_in_pod",
-            "stumble_pod",
-            "get_pod_brief",
-            "save_link",
-            "rate_link",
-            "block_source",
-            "block_topic",
-            "explain_recommendation",
-            "get_pod_skill",
-            "list_pod_skills",
-            "export_pod_skill_pack",
-            "import_pod_skill_pack",
-            "fork_pod_skill_pack",
-            "validate_pod_skill_pack",
-            "suggest_pod_skill_update",
+            "get_pod_package",
+            "export_pod_package",
+            "import_pod_package",
+            "fork_pod_package",
+            "validate_pod_package",
             "get_node_info",
             "list_trusted_peers",
             "add_trusted_peer",
-            "sync_peer",
             "sync_pod_with_peer",
             "export_pod_events",
             "import_pod_events",
-            "verify_pod_events",
         ]
     }
 
@@ -211,25 +196,6 @@ impl McpToolRouter {
                 self.tools.join_pod(&self.ctx, &pod_slug)?;
                 Ok(json!({"joined": pod_slug}))
             }
-            "submit_link_to_pod" => {
-                let pod_slug = arg_string(&call.arguments, "pod_slug")?;
-                let skill_context = self.tools.pod_agent_context(&self.ctx, &pod_slug)?;
-                let request = SubmitLinkRequest {
-                    url: arg_string(&call.arguments, "url")?,
-                    title: opt_string(&call.arguments, "title"),
-                    description: opt_string(&call.arguments, "description"),
-                    note: opt_string(&call.arguments, "note"),
-                    tags: string_list(&call.arguments, "tags"),
-                    discovered_by_crawler: false,
-                };
-                let submission = self
-                    .tools
-                    .submit_link_to_pod(&self.ctx, &pod_slug, request)?;
-                Ok(json!({
-                    "pod_skill_read": skill_read_receipt(&skill_context),
-                    "submission": submission
-                }))
-            }
             "submit_candidate" => {
                 let request = serde_json::from_value(call.arguments)?;
                 Ok(json!(self.tools.submit_candidate(&self.ctx, request)?))
@@ -239,16 +205,6 @@ impl McpToolRouter {
                 Ok(json!(self
                     .tools
                     .inspect_candidate(&self.ctx, candidate_id)?))
-            }
-            "add_source_to_pod" => {
-                let pod_slug = arg_string(&call.arguments, "pod_slug")?;
-                let url = arg_string(&call.arguments, "url")?;
-                Ok(json!(self.tools.add_source_to_pod(
-                    &self.ctx,
-                    &pod_slug,
-                    CrawlerSourceType::Rss,
-                    url
-                )?))
             }
             "materialize_discovery_tasks" => Ok(json!(self
                 .tools
@@ -311,73 +267,15 @@ impl McpToolRouter {
                     reason
                 )?))
             }
-            "discover_in_pod" | "stumble_pod" => {
-                let pod_slug = arg_string(&call.arguments, "pod_slug")?;
-                let skill_context = self.tools.pod_agent_context(&self.ctx, &pod_slug)?;
-                let mode = if call.tool == "stumble_pod" {
-                    DiscoveryMode::Stumble
-                } else {
-                    DiscoveryMode::DeepMatch
-                };
-                let request = DiscoverRequest {
-                    query: arg_string(&call.arguments, "query")?,
-                    avoid: string_list(&call.arguments, "avoid"),
-                    limit: call
-                        .arguments
-                        .get("limit")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(7) as usize,
-                    mode,
-                    user_id: self.ctx.user_id,
-                };
-                let items = self.tools.discover_in_pod(&self.ctx, &pod_slug, request)?;
-                Ok(json!({
-                    "pod_skill_read": skill_read_receipt(&skill_context),
-                    "items": items
-                }))
-            }
-            "get_pod_brief" => {
-                let pod_slugs = string_list(&call.arguments, "pod_slugs");
-                let skill_contexts = pod_slugs
-                    .iter()
-                    .map(|slug| self.tools.pod_agent_context(&self.ctx, slug))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let request = GenerateBriefRequest {
-                    pod_slugs,
-                    query: opt_string(&call.arguments, "query"),
-                    user_id: self.ctx.user_id,
-                };
-                let brief = self.tools.generate_brief(&self.ctx, request)?;
-                Ok(json!({
-                    "pod_skills_read": skill_contexts.iter().map(skill_read_receipt).collect::<Vec<_>>(),
-                    "brief": brief
-                }))
-            }
-            "save_link" => {
-                let id = arg_string(&call.arguments, "submission_id")?.parse()?;
-                self.tools.save_link(&self.ctx, id)?;
-                Ok(json!({"saved": id}))
-            }
-            "block_source" => {
-                let source = arg_string(&call.arguments, "source")?;
-                self.tools.block_source(&self.ctx, source.clone())?;
-                Ok(json!({"blocked_source": source}))
-            }
-            "block_topic" => {
-                let topic = arg_string(&call.arguments, "topic")?;
-                self.tools.block_topic(&self.ctx, topic.clone())?;
-                Ok(json!({"blocked_topic": topic}))
-            }
-            "get_pod_skill" => {
+            "get_pod_package" => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
                 Ok(json!(self.tools.get_skill_pack(&self.ctx, &pod_slug)?))
             }
-            "list_pod_skills" => Ok(json!(self.tools.list_pods_for_harness(&self.ctx)?)),
-            "export_pod_skill_pack" => {
+            "export_pod_package" => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
                 Ok(json!(self.tools.export_skill_pack(&self.ctx, &pod_slug)?))
             }
-            "import_pod_skill_pack" => {
+            "import_pod_package" => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
                 let files = call
                     .arguments
@@ -390,7 +288,7 @@ impl McpToolRouter {
                     serde_json::from_value(files)?
                 )?))
             }
-            "fork_pod_skill_pack" => {
+            "fork_pod_package" => {
                 let source = arg_string(&call.arguments, "source_pod_slug")?;
                 let target: CreatePodRequest =
                     serde_json::from_value(call.arguments["target"].clone())?;
@@ -398,13 +296,14 @@ impl McpToolRouter {
                     .tools
                     .fork_skill_pack(&self.ctx, &source, target)?))
             }
-            "validate_pod_skill_pack" => {
+            "validate_pod_package" => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
                 Ok(json!(self
                     .tools
                     .validate_pod_skill_pack(&self.ctx, &pod_slug)?))
             }
             "get_node_info" => Ok(json!(self.tools.node_info(&self.ctx)?)),
+            "list_trusted_peers" => Ok(json!(self.tools.trusted_peers(&self.ctx)?)),
             "add_trusted_peer" => {
                 let display_name = arg_string(&call.arguments, "display_name")?;
                 let base_url = arg_string(&call.arguments, "base_url")?;
@@ -417,33 +316,63 @@ impl McpToolRouter {
                     chrono::Utc::now(),
                 )?))
             }
-            "export_pod_events" | "verify_pod_events" => {
+            "export_pod_events" => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
                 Ok(json!(self.tools.export_pod_events(&self.ctx, &pod_slug)?))
             }
-            "explain_recommendation"
-            | "crawl_pod_sources"
-            | "rate_link"
-            | "suggest_pod_skill_update"
-            | "sync_peer"
-            | "sync_pod_with_peer"
-            | "import_pod_events"
-            | "list_trusted_peers" => Ok(
-                json!({"status":"adapter_boundary","tool": call.tool, "note":"Tool name is reserved and routed through AgentTools-compatible boundaries in the MVP."}),
-            ),
+            "import_pod_events" => {
+                let peer_id = arg_string(&call.arguments, "peer_id")?.parse()?;
+                let events = call
+                    .arguments
+                    .get("events")
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("missing argument events"))?;
+                Ok(json!({"imported_events": self.tools.import_pod_events(
+                    &self.ctx,
+                    peer_id,
+                    serde_json::from_value(events)?,
+                )?}))
+            }
+            "sync_pod_with_peer" => Err(anyhow::anyhow!(
+                "sync_pod_with_peer requires the asynchronous MCP dispatcher"
+            )),
+            "submit_link_to_pod" => Err(LegacyContract::LegacySubmission.error().into()),
+            "add_source_to_pod" | "crawl_pod_sources" => {
+                Err(LegacyContract::CrawlerSourceConnector.error().into())
+            }
+            "discover_in_pod" | "stumble_pod" | "get_pod_brief" => {
+                Err(LegacyContract::LegacyFeedPresentation.error().into())
+            }
+            "save_link" | "rate_link" | "block_source" | "block_topic" => {
+                Err(LegacyContract::LegacyFeedback.error().into())
+            }
+            "get_pod_skill"
+            | "list_pod_skills"
+            | "export_pod_skill_pack"
+            | "import_pod_skill_pack"
+            | "fork_pod_skill_pack"
+            | "validate_pod_skill_pack" => Err(LegacyContract::LegacySkillPack.error().into()),
             unknown => Err(anyhow::anyhow!("unknown MCP tool {unknown}")),
         }
     }
-}
 
-fn skill_read_receipt(context: &PodAgentContext) -> serde_json::Value {
-    json!({
-        "pod_slug": context.pod_slug,
-        "pod_name": context.pod_name,
-        "skill_pack_version": context.skill_pack_version,
-        "skill_md_bytes": context.skill_md.len(),
-        "valid": context.validation.valid,
-    })
+    /// Dispatches tools that may perform outbound synchronization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid arguments, authorization failures,
+    /// incompatible peers, network failures, or underlying tool failures.
+    pub async fn call_async(&self, call: McpToolCall) -> anyhow::Result<Value> {
+        if call.tool != "sync_pod_with_peer" {
+            return self.call(call);
+        }
+        let peer_id = arg_string(&call.arguments, "peer_id")?.parse()?;
+        let pod_slug = arg_string(&call.arguments, "pod_slug")?;
+        let peer = self.tools.trusted_peer(&self.ctx, peer_id)?;
+        Ok(json!(
+            stumble_sync::sync_pod_from_peer(&self.tools, &self.ctx, &peer, &pod_slug,).await?
+        ))
+    }
 }
 
 fn arg_string(args: &Value, key: &str) -> anyhow::Result<String> {
@@ -457,18 +386,6 @@ fn opt_string(args: &Value, key: &str) -> Option<String> {
     args.get(key)
         .and_then(|v| v.as_str())
         .map(ToString::to_string)
-}
-
-fn string_list(args: &Value, key: &str) -> Vec<String> {
-    args.get(key)
-        .and_then(|v| v.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|v| v.as_str().map(ToString::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -494,8 +411,8 @@ mod tests {
         let router = McpToolRouter::authenticated(tools, issued.token.expose()).unwrap();
         let error = router
             .call(McpToolCall {
-                tool: "save_link".into(),
-                arguments: json!({"submission_id": Uuid::nil()}),
+                tool: "record_feed_feedback".into(),
+                arguments: json!({"content_item_id": Uuid::nil(), "kind": "save"}),
             })
             .unwrap_err();
         assert!(error.to_string().contains("harness grant lacks feedback"));

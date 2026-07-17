@@ -141,6 +141,39 @@ fn accept_item(tools: &AgentTools, pod: &Pod) {
 }
 
 #[test]
+fn incompatible_protocol_is_rejected_before_events_are_projected() {
+    let origin = AgentTools::new(seed_store());
+    let home = AgentTools::new(seed_store());
+    let pod = create_public_pod(&origin, "future-event-shapes");
+    accept_item(&origin, &pod);
+    let mut snapshot = origin
+        .federation_pod_snapshot(&origin.default_auth_context().unwrap(), &pod.slug, None)
+        .unwrap();
+    snapshot.node.supported_protocol_version = "stumble/0.1".into();
+    let subscriber = harness(
+        &home,
+        "protocol negotiator",
+        vec![HarnessCapability::SubscriptionManagement],
+    );
+
+    let result = home.subscribe_public_pod(
+        &subscriber,
+        SubscribePublicPodRequest::new(
+            "https://origin.example/federation/pods/future-event-shapes",
+            snapshot,
+        ),
+        Utc::now(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(AgentToolsError::IncompatibleProtocol { received, supported })
+            if received == "stumble/0.1" && supported == CURRENT_PROTOCOL_VERSION
+    ));
+    assert!(home.pod_by_slug(&pod.slug, subscriber.tenant_id).is_err());
+}
+
+#[test]
 fn subscribed_home_node_synchronizes_incrementally_and_reads_remote_content_offline() {
     // Arrange: publish accepted content on a reachable Origin Node.
     let origin_dir = TestDataDir::new("origin");
