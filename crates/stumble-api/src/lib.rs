@@ -185,12 +185,12 @@ fn route_docs() -> Vec<ApiRouteDoc> {
         ApiRouteDoc {
             method: "POST",
             path: "/route-link",
-            description: "fetch metadata and rank the best pod candidates without storing the link",
+            description: "fetch metadata, rank pod candidates, and suggest a new pod when routing needs confirmation without storing the link",
         },
         ApiRouteDoc {
             method: "POST",
             path: "/intake-link",
-            description: "route a link to the best pod and store it only when confidence is high",
+            description: "route a link to the best pod, store only when confidence is high, and otherwise return candidates plus a suggested new pod",
         },
         ApiRouteDoc {
             method: "POST",
@@ -742,7 +742,7 @@ async fn federation_pods(
     headers: HeaderMap,
 ) -> Result<Json<Vec<Pod>>, ApiError> {
     let ctx = auth_or_default(&state.tools, &headers)?;
-    Ok(Json(state.tools.list_public_pods(ctx.tenant_id)?))
+    Ok(Json(state.tools.list_public_pods(&ctx)?))
 }
 
 async fn federation_manifest(

@@ -20,12 +20,22 @@ struct Args {
     api: String,
     #[arg(long, default_value = "Dillon Interest Agent")]
     label: String,
+    #[arg(long, default_value = POD_SLUG)]
+    pod_slug: String,
     #[arg(long)]
     keep_alive: bool,
     #[arg(long, default_value_t = 300)]
     rediscover_interval_seconds: u64,
     #[arg(long)]
     seed_starter_links: bool,
+    #[arg(long = "submit-link-url")]
+    submit_link_urls: Vec<String>,
+    #[arg(long)]
+    submit_link_title: Option<String>,
+    #[arg(long)]
+    submit_link_note: Option<String>,
+    #[arg(long, value_delimiter = ',')]
+    submit_link_tags: Vec<String>,
 }
 
 #[tokio::main]
@@ -62,20 +72,31 @@ async fn main() -> Result<()> {
         )
         .await?;
 
-    ensure_pod(&authed).await?;
-    let pod_skill = read_pod_skill(&authed, POD_SLUG).await?;
-    let submitted = if args.seed_starter_links {
-        submit_interest_links(&authed).await?
+    ensure_pod(&authed, &args.pod_slug).await?;
+    let pod_skill = read_pod_skill(&authed, &args.pod_slug).await?;
+    let mut submitted = if args.seed_starter_links {
+        submit_interest_links(&authed, &args.pod_slug).await?
     } else {
         Vec::new()
     };
-    let discoveries = discover(&authed).await?;
-    let _brief_skill = read_pod_skill(&authed, POD_SLUG).await?;
+    submitted.append(
+        &mut submit_user_provided_links(
+            &authed,
+            &args.pod_slug,
+            &args.submit_link_urls,
+            args.submit_link_title.as_deref(),
+            args.submit_link_note.as_deref(),
+            &args.submit_link_tags,
+        )
+        .await?,
+    );
+    let discoveries = discover(&authed, &args.pod_slug).await?;
+    let _brief_skill = read_pod_skill(&authed, &args.pod_slug).await?;
     let brief: serde_json::Value = authed
         .post_json(
             "/briefs/generate",
             &GenerateBriefRequest {
-                pod_slugs: vec![POD_SLUG.to_string()],
+                pod_slugs: vec![args.pod_slug.clone()],
                 query: Some("practical tech, AI, and aliens research trail".to_string()),
                 user_id: None,
             },
@@ -88,10 +109,10 @@ async fn main() -> Result<()> {
             "agent": args.label,
             "node": authed.api,
             "interests_stored": preferences,
-            "pod_slug": POD_SLUG,
+            "pod_slug": args.pod_slug,
             "pod_skill_read": skill_read_receipt(&pod_skill),
             "submitted_links": submitted,
-            "submission_policy": "No agent-generated links are submitted unless --seed-starter-links is explicitly set or the user provides/approves a URL.",
+            "submission_policy": "No agent-generated links are submitted unless --seed-starter-links is explicitly set or --submit-link-url provides a user-approved URL.",
             "discoveries": discoveries,
             "brief": brief,
             "status": "agent communicated with local node, created/used pod, submitted links, and discovered items"
@@ -108,7 +129,7 @@ async fn main() -> Result<()> {
                 args.rediscover_interval_seconds,
             ))
             .await;
-            match discover(&authed).await {
+            match discover(&authed, &args.pod_slug).await {
                 Ok(items) => {
                     let titles = items
                         .iter()
@@ -162,11 +183,11 @@ async fn create_token(
         .context("failed to create dev token")
 }
 
-async fn ensure_pod(authed: &AuthedClient) -> Result<()> {
+async fn ensure_pod(authed: &AuthedClient, pod_slug: &str) -> Result<()> {
     let pods: serde_json::Value = authed.get_json("/pods").await?;
     let exists = pods.as_array().is_some_and(|pods| {
         pods.iter()
-            .any(|pod| pod.get("slug").and_then(|v| v.as_str()) == Some(POD_SLUG))
+            .any(|pod| pod.get("slug").and_then(|v| v.as_str()) == Some(pod_slug))
     });
     if exists {
         return Ok(());
@@ -176,7 +197,7 @@ async fn ensure_pod(authed: &AuthedClient) -> Result<()> {
             "/pods",
             &CreatePodRequest {
                 name: "Dillon Tech AI Aliens".to_string(),
-                slug: POD_SLUG.to_string(),
+                slug: pod_slug.to_string(),
                 description: "A personal discovery pod for serious tech, practical AI, alien/UAP research, space signals, and weird evidence trails without politics or generic hype.".to_string(),
                 visibility: Visibility::Private,
             },
@@ -185,8 +206,11 @@ async fn ensure_pod(authed: &AuthedClient) -> Result<()> {
     Ok(())
 }
 
-async fn submit_interest_links(authed: &AuthedClient) -> Result<Vec<serde_json::Value>> {
-    let _skill = read_pod_skill(authed, POD_SLUG).await?;
+async fn submit_interest_links(
+    authed: &AuthedClient,
+    pod_slug: &str,
+) -> Result<Vec<serde_json::Value>> {
+    let _skill = read_pod_skill(authed, pod_slug).await?;
     let links = [
         (
             "Attention Is All You Need",
@@ -224,7 +248,7 @@ async fn submit_interest_links(authed: &AuthedClient) -> Result<Vec<serde_json::
     for (title, url, note, tags) in links {
         let item = authed
             .post_json_allow_bad_request(
-                &format!("/pods/{POD_SLUG}/submit"),
+                &format!("/pods/{pod_slug}/submit"),
                 &SubmitLinkRequest {
                     url: url.to_string(),
                     title: Some(title.to_string()),
@@ -240,11 +264,43 @@ async fn submit_interest_links(authed: &AuthedClient) -> Result<Vec<serde_json::
     Ok(submitted)
 }
 
-async fn discover(authed: &AuthedClient) -> Result<Vec<DiscoveryItem>> {
-    let _skill = read_pod_skill(authed, POD_SLUG).await?;
+async fn submit_user_provided_links(
+    authed: &AuthedClient,
+    pod_slug: &str,
+    urls: &[String],
+    title: Option<&str>,
+    note: Option<&str>,
+    tags: &[String],
+) -> Result<Vec<serde_json::Value>> {
+    if urls.is_empty() {
+        return Ok(Vec::new());
+    }
+    let _skill = read_pod_skill(authed, pod_slug).await?;
+    let mut submitted = Vec::new();
+    for url in urls {
+        let item = authed
+            .post_json_allow_bad_request(
+                &format!("/pods/{pod_slug}/submit"),
+                &SubmitLinkRequest {
+                    url: url.to_string(),
+                    title: title.map(ToString::to_string),
+                    description: note.map(ToString::to_string),
+                    note: note.map(ToString::to_string),
+                    tags: tags.to_vec(),
+                    discovered_by_crawler: false,
+                },
+            )
+            .await?;
+        submitted.push(item);
+    }
+    Ok(submitted)
+}
+
+async fn discover(authed: &AuthedClient, pod_slug: &str) -> Result<Vec<DiscoveryItem>> {
+    let _skill = read_pod_skill(authed, pod_slug).await?;
     authed
         .post_json(
-            &format!("/pods/{POD_SLUG}/discover"),
+            &format!("/pods/{pod_slug}/discover"),
             &DiscoverRequest {
                 query: "Find grounded, weird-but-practical links about tech, AI, aliens, UAP, and space signals".to_string(),
                 avoid: vec!["politics".to_string(), "generic ai hype".to_string()],

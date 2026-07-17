@@ -58,6 +58,7 @@ cargo run -p stumble-api -- --mode local --bind 127.0.0.1:8787 --data-dir ~/.stu
 cargo run -p stumble-agent -- --api http://127.0.0.1:8787 --label "Dillon Tech AI Aliens Agent"
 cargo run -p stumble-agent -- --api http://127.0.0.1:8787 --label "Dillon Tech AI Aliens Agent" --keep-alive
 cargo run -p stumble-agent -- --api http://127.0.0.1:8787 --label "Dillon Tech AI Aliens Agent" --seed-starter-links
+cargo run -p stumble-agent -- --api http://127.0.0.1:8787 --pod-slug dillon-tech-ai-aliens --submit-link-url https://www.seti.org/ --submit-link-title "SETI Institute" --submit-link-tags aliens,seti,signals
 ```
 
 ## Hosted Mode Examples
@@ -96,7 +97,7 @@ curl -X POST http://localhost:8787/briefs/generate \
 
 `/pods/:slug/intake-link` fetches page metadata, creates a heuristic summary, extracts a representative Open Graph/Twitter image when present, submits the link, and stores the image in `submission_assets`. AI-generated images can be stored through the same asset model with source `ai_generated` when an agent harness generates or receives an approved image.
 
-`/route-link` scores a fetched link against existing pod names, descriptions, and skill packs without storing it. `/intake-link` uses the same router and stores only when one pod clears the confidence threshold and is clearly ahead of the next candidate; otherwise it returns candidates with `needs_confirmation: true`.
+`/route-link` scores a fetched link against existing pod names, descriptions, and skill packs without storing it. `/intake-link` uses the same router and stores only when one pod clears the confidence threshold and is clearly ahead of the next candidate; otherwise it returns candidates plus a draft `suggested_new_pod` with `needs_confirmation: true`.
 
 ## Remote/Hosted HTTP Examples
 

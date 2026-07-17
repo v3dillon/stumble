@@ -1,29 +1,38 @@
 # Stumble Agent Guide
 
-This file is for AI coding agents and browser agents that need to install, run, and use a Stumble node.
+For AI coding/browser agents using a local Stumble HTTP node. A "node" is not
+Node.js. Protocol version: `stumble/0.1`.
 
-Stumble is a Rust workspace for an agent-native shared discovery system. A "node" here means a local Stumble HTTP node, not Node.js. The protocol version is `stumble/0.1`.
+This is not a standalone installer. If the Rust workspace is missing, ask for a
+checkout path or Git repository URL. Do not invent repo URLs, hardcode local
+paths, or assume `podctl` or `stumble-api` are installed.
 
-This file is not a standalone installer. To run Stumble, the agent must have access to the Stumble source checkout that contains `Cargo.toml` and `crates/stumble-cli/Cargo.toml`. If the user passes a directory path, treat that directory as the candidate Stumble checkout and verify it before running commands. If this file is uploaded alone or copied into an attachments directory without the Rust workspace, treat it as documentation only and ask the user for either:
+## Agent rules
 
-- the local path to their Stumble checkout, or
-- a Git repository URL they want cloned.
+Before creating pods, submitting links, discovering, or briefing, ask for:
 
-Do not invent a repository URL, do not hardcode a machine-specific path, and do not assume `podctl` or `stumble-api` are already deployed.
+- 3 to 8 interests or topics.
+- 1 to 5 topics or sources to avoid.
+- Private or public pod visibility.
+- Optional: a short agent-run label.
 
-## What to do first
+Default to private, local operation. Submit links only when the user provides
+the URL, approves the URL, or explicitly asks for seeded demo data.
 
-1. Ask the user for their discovery interests before creating pods or briefs:
-   - 3 to 8 interests or topics they want to explore.
-   - 1 to 5 topics or sources they want to avoid.
-   - Whether the pod should be private or public.
-   - Optional: a short label for this agent run.
-2. Do not submit agent-found links by default. Submit a link only when the user provides the URL, approves the URL, or explicitly asks for seeded demo data.
-3. Keep private data local. Discovery hubs index public node and pod metadata only; do not send private preferences, saved links, reading history, notes, or private briefs to hubs.
+Keep private data local. Never send private preferences, saved links, reading
+history, notes, private briefs, bearer tokens, API keys, or secrets to discovery
+hubs. Ask before publishing anything public or using paid/external automation.
 
-## Install and verify
+Before any pod work, read the pod skill pack:
 
-Do not hardcode a local checkout path. First find the Stumble workspace root. If this `llms.txt` file was opened from disk, use the directory containing it as the starting directory; otherwise start from the current working directory and walk upward until the workspace files are found.
+```bash
+curl -sS "$API/pods/$POD_SLUG/skill-pack" \
+  -H "authorization: Bearer $TOKEN"
+```
+
+## Verify checkout
+
+Find the workspace root and run checks from there:
 
 ```bash
 find_stumble_root() {
@@ -35,107 +44,69 @@ find_stumble_root() {
     fi
     dir="$(dirname "$dir")"
   done
-  echo "Could not find Stumble workspace root. Set STUMBLE_ROOT to the checkout path." >&2
   return 1
 }
 
-STUMBLE_ROOT="${STUMBLE_ROOT:-$(find_stumble_root)}"
+STUMBLE_ROOT="${STUMBLE_ROOT:-$(find_stumble_root)}" || {
+  echo "Set STUMBLE_ROOT to the Stumble checkout path." >&2
+  exit 1
+}
+
 cd "$STUMBLE_ROOT"
-```
-
-If that fails, stop and ask the user for `STUMBLE_ROOT` or a Git URL. If the user gives a local path or passes a directory with the prompt, set `STUMBLE_ROOT` to that path and verify it contains `Cargo.toml` and `crates/stumble-cli/Cargo.toml`:
-
-```bash
-STUMBLE_ROOT="/path/from/user"
-test -f "$STUMBLE_ROOT/Cargo.toml"
-test -f "$STUMBLE_ROOT/crates/stumble-cli/Cargo.toml"
-cd "$STUMBLE_ROOT"
-```
-
-If the user gives a Git URL, clone it into a normal working directory and then run the same root check:
-
-```bash
-git clone "$STUMBLE_REPO_URL" stumble
-STUMBLE_ROOT="$(cd stumble && pwd)"
-test -f "$STUMBLE_ROOT/Cargo.toml"
-test -f "$STUMBLE_ROOT/crates/stumble-cli/Cargo.toml"
-cd "$STUMBLE_ROOT"
-```
-
-Then install and verify from `$STUMBLE_ROOT`:
-
-```bash
-rustup default stable
 cargo fmt --check
 cargo test
 cargo run -p stumble-cli -- --help
 ```
 
-If dependencies are already installed, still run `cargo test` before making behavior changes.
-
-## Run the CLI from source
-
-`podctl` is not assumed to be deployed or globally installed. After resolving and entering `$STUMBLE_ROOT`, run the CLI through Cargo:
+If the user gives a Git URL, clone it, set `STUMBLE_ROOT` to the clone, then run
+the same checks:
 
 ```bash
-cargo run -p stumble-cli -- --help
-cargo run -p stumble-cli -- --data-dir "$HOME/.stumble/nodes/default" init-node
-cargo run -p stumble-cli -- --data-dir "$HOME/.stumble/nodes/default" list-pods
-```
-
-To serve the HTTP API through the CLI, use the same source-run pattern:
-
-```bash
-mkdir -p "$HOME/.stumble/nodes/default"
-cargo run -p stumble-cli -- --data-dir "$HOME/.stumble/nodes/default" serve --mode local --bind "127.0.0.1:8787" --port 8787
-```
-
-If the user explicitly wants a local `podctl` command on their PATH, install it from this checkout:
-
-```bash
+STUMBLE_REPO_URL="REPLACE_WITH_USER_OR_DEPLOYED_GIT_URL"
+git clone "$STUMBLE_REPO_URL" stumble
+STUMBLE_ROOT="$(cd stumble && pwd)"
 cd "$STUMBLE_ROOT"
+
+cargo fmt --check
+cargo test
+cargo run -p stumble-cli -- --help
+```
+
+## Run local node
+
+Use a unique data directory per agent unless the user asks to reuse an existing
+node. Use `--port 0` for an OS-assigned port, or pass the user's chosen port.
+
+```bash
+AGENT_LABEL="${AGENT_LABEL:-agent-$(date +%Y%m%d-%H%M%S)}"
+DATA_DIR="${STUMBLE_DATA_DIR:-$HOME/.stumble/nodes/$AGENT_LABEL}"
+mkdir -p "$DATA_DIR"
+
+cargo run -p stumble-api -- \
+  --mode local \
+  --bind "127.0.0.1:8787" \
+  --port 0 \
+  --data-dir "$DATA_DIR"
+```
+
+Use the printed URL in another shell:
+
+```bash
+API="http://127.0.0.1:REPLACE_WITH_PRINTED_PORT"
+curl -sS "$API/health"
+curl -sS "$API/.well-known/stumble-node"
+```
+
+Install `podctl` only if the user wants it on `PATH`:
+
+```bash
 cargo install --path crates/stumble-cli --bin podctl
 podctl --help
 ```
 
-Do not assume `podctl` exists before running `cargo install` or checking `command -v podctl`.
+## Normal workflow
 
-## Run a local node on a selected port
-
-Use a per-agent data directory so multiple agents can run side by side without sharing state.
-
-Use `--port` to choose the node port. Use `--port 0` when the user wants the operating system to assign an available port without agent-side port scanning.
-
-```bash
-AGENT_LABEL="${AGENT_LABEL:-agent-$(date +%Y%m%d-%H%M%S)}"
-DATA_DIR="${STUMBLE_DATA_DIR:-$HOME/.stumble/nodes/$AGENT_LABEL}"
-mkdir -p "$DATA_DIR"
-cargo run -p stumble-api -- --mode local --bind "127.0.0.1:8787" --port 0 --data-dir "$DATA_DIR"
-```
-
-The node prints its actual URL, for example `stumble-api running in Local mode at http://127.0.0.1:59421`, and persists to `$DATA_DIR/store.json`.
-
-In a second shell, confirm the node is healthy:
-
-```bash
-API="http://127.0.0.1:REPLACE_WITH_PRINTED_PORT"
-curl "$API/health"
-curl "$API/.well-known/stumble-node"
-```
-
-If the user asks for a specific port, pass it directly:
-
-```bash
-AGENT_LABEL="${AGENT_LABEL:-agent-$(date +%Y%m%d-%H%M%S)}"
-DATA_DIR="${STUMBLE_DATA_DIR:-$HOME/.stumble/nodes/$AGENT_LABEL}"
-PORT="${PORT:-8787}"
-mkdir -p "$DATA_DIR"
-cargo run -p stumble-api -- --mode local --bind "127.0.0.1:8787" --port "$PORT" --data-dir "$DATA_DIR"
-```
-
-## Authenticate for user preferences
-
-Create a local dev token for this agent session:
+Create a local development token:
 
 ```bash
 TOKEN="$(curl -sS -X POST "$API/auth/dev-token" \
@@ -144,79 +115,39 @@ TOKEN="$(curl -sS -X POST "$API/auth/dev-token" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
 ```
 
-`/auth/dev-token` is for local development. Do not expose a node with this endpoint on `0.0.0.0` or a public network unless a real authentication boundary has been added.
-
-Store user interests and avoid topics after asking the user:
+Use the user's answers in request bodies. Prefer private pods unless the user
+explicitly asks for public discovery.
 
 ```bash
+POD_SLUG="personal-discovery"
+
 curl -sS -X PATCH "$API/me/preferences" \
   -H "authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' \
-  -d '{
-    "interests": ["tech", "ai", "interfaces"],
-    "blocked_topics": ["politics", "generic ai hype"],
-    "blocked_sources": null,
-    "preferred_brief_length": 7,
-    "preferred_discovery_mode": "deep_match"
-  }'
-```
+  -d '{"interests":["tech","ai","interfaces"],"blocked_topics":["politics"],"blocked_sources":null,"preferred_brief_length":7,"preferred_discovery_mode":"deep_match"}'
 
-Replace the example interests and blocked topics with the user's answers.
-
-## Create or use a discovery pod
-
-Use a focused pod for the user's stated interests. Prefer private pods unless the user explicitly wants public discovery.
-
-```bash
 curl -sS -X POST "$API/pods" \
   -H "authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' \
-  -d '{
-    "name": "Personal Discovery",
-    "slug": "personal-discovery",
-    "description": "User-approved discovery pod for the stated interests.",
-    "visibility": "private"
-  }'
-```
+  -d '{"name":"Personal Discovery","slug":"personal-discovery","description":"User-approved discovery pod.","visibility":"private"}'
 
-Before submitting, discovering, or briefing a pod, read its skill pack:
-
-```bash
-curl -sS "$API/pods/personal-discovery/skill-pack" \
+curl -sS "$API/pods/$POD_SLUG/skill-pack" \
   -H "authorization: Bearer $TOKEN"
-```
 
-Discover inside the pod:
-
-```bash
-curl -sS -X POST "$API/pods/personal-discovery/discover" \
+curl -sS -X POST "$API/pods/$POD_SLUG/discover" \
   -H "authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' \
-  -d '{
-    "query": "find grounded, useful links for the user interests",
-    "avoid": ["politics", "generic ai hype"],
-    "limit": 7,
-    "mode": "deep_match",
-    "user_id": null
-  }'
-```
+  -d '{"query":"find grounded, useful links for the user interests","avoid":["politics"],"limit":7,"mode":"deep_match","user_id":null}'
 
-Generate a private brief:
-
-```bash
 curl -sS -X POST "$API/briefs/generate" \
   -H "authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' \
-  -d '{
-    "pod_slugs": ["personal-discovery"],
-    "query": "brief for the user interests",
-    "user_id": null
-  }'
+  -d '{"pod_slugs":["personal-discovery"],"query":"brief for the user interests","user_id":null}'
 ```
 
-## Access and discover discovery hubs
+## Public discovery
 
-A Stumble node exposes public discovery metadata at:
+Public metadata endpoints:
 
 ```bash
 curl -sS "$API/.well-known/stumble-node"
@@ -224,7 +155,12 @@ curl -sS "$API/federation/node"
 curl -sS "$API/federation/pods"
 ```
 
-Discover public pods from the home node using explicit topics. This must not export private preferences:
+Only register or publish public node and pod metadata when the user explicitly
+approves. For real federation, bind on a reachable interface and set the
+approved HTTPS URL with `STUMBLE_BASE_URL`. `127.0.0.1` registrations are useful
+only for local hubs on the same machine.
+
+Discover public pods using explicit topics, not private preferences:
 
 ```bash
 TOPICS="tech,ai,interfaces"
@@ -232,89 +168,17 @@ curl -sS "$API/home/discover-public-pods?topics=$TOPICS&limit=5" \
   -H "authorization: Bearer $TOKEN"
 ```
 
-Search the local hub index:
+## Endpoint reference
 
-```bash
-curl -sS "$API/discovery/pods?limit=10"
-curl -sS "$API/discovery/pods?q=tech%20ai%20interfaces&limit=5"
-curl -sS "$API/hub/search-pods?q=tech%20ai%20interfaces&limit=5"
-curl -sS -X POST "$API/hub/refresh"
-```
-
-`GET /discovery/pods` is the agent-facing public discovery feed. It returns local public pods separately from global public pods known through the hub index. With no `q`, it is a feed; with `q`, it is a ranked search.
-
-`GET /hub/search-pods` refreshes this node's public pod index before searching. It indexes public node and pod metadata only; private and invite-only pods stay out of hub results.
-
-For the full federated discovery loop, remote nodes register or announce their reachable base URL, then hubs pull `/.well-known/stumble-node`, `/federation/pods`, public pod manifests, and public pod events to keep the global feed fresh. Index only public pod metadata and public events. Never index private preferences, private pods, notes, saved links, reading history, private briefs, tokens, or secrets.
-
-The API process runs a cancellable in-process hub refresh daemon every 24 hours by default. Set `STUMBLE_HUB_REFRESH_INTERVAL_SECONDS` to tune it, or `STUMBLE_DISABLE_HUB_REFRESH=true` to disable it. `POST /hub/refresh` runs the same pull immediately. Public event import and signature verification are offloaded to Tokio's blocking pool so CPU-heavy verification does not occupy async worker threads.
-
-When binding to a public interface, advertise the reachable HTTPS URL explicitly:
-
-```bash
-STUMBLE_BASE_URL="https://pods.example.com" cargo run -p stumble-api -- --bind 0.0.0.0:8787
-```
-
-Register another public node and public pod with a hub only when the user approves public publication. Create the public pod first, then register only its public metadata:
-
-```bash
-NODE_JSON="$(curl -sS "$API/federation/node")"
-NODE_ID="$(printf '%s' "$NODE_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["node_id"])')"
-PUBLIC_KEY="$(printf '%s' "$NODE_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["public_key"])')"
-PUBLIC_POD_SLUG="public-discovery"
-
-curl -sS -X POST "$API/hub/register-node" \
-  -H 'content-type: application/json' \
-  -d "{
-    \"node_id\":\"$NODE_ID\",
-    \"base_url\":\"$API\",
-    \"public_key\":\"$PUBLIC_KEY\",
-    \"protocol_version\":\"stumble/0.1\",
-    \"display_name\":\"Local Stumble node\"
-  }"
-
-curl -sS -X POST "$API/hub/register-pod" \
-  -H 'content-type: application/json' \
-  -d "{
-    \"node_id\":\"$NODE_ID\",
-    \"node_base_url\":\"$API\",
-    \"pod_slug\":\"$PUBLIC_POD_SLUG\",
-    \"pod_name\":\"Public Discovery\",
-    \"description\":\"Public pod for user-approved discovery topics.\",
-    \"tags\":[\"tech\",\"ai\",\"interfaces\"],
-    \"skill_pack_version\":1,
-    \"latest_event_hash\":null,
-    \"manifest_url\":\"$API/federation/pods/$PUBLIC_POD_SLUG/manifest\",
-    \"events_url\":\"$API/federation/pods/$PUBLIC_POD_SLUG/events\"
-  }"
-```
-
-When registering a pod, update `node_id`, `node_base_url`, URLs, slug, name, description, and tags to match the actual node, port, and user-approved public pod.
-
-`127.0.0.1` registrations are useful only for local hubs running on the same machine. For real federation or remote discovery, use a reachable HTTPS base URL approved by the user; do not publish private localhost-only metadata as if it were reachable by other nodes.
-
-## Useful endpoints
-
-- `GET /health`: node health check.
-- `GET /.well-known/stumble-node`: public protocol and discovery endpoint advertisement.
-- `POST /auth/dev-token`: create local bearer token for agent session.
-- `PATCH /me/preferences`: store authenticated user interests and filters.
-- `GET /pods`: list pods.
-- `POST /pods`: create a pod.
-- `GET /pods/:slug/skill-pack`: read pod instructions before agent work.
+- `GET /health`: health check.
+- `GET /.well-known/stumble-node`: public protocol metadata.
+- `POST /auth/dev-token`: local development bearer token.
+- `PATCH /me/preferences`: authenticated interests and filters.
+- `GET /pods`, `POST /pods`: list or create pods.
+- `GET /pods/:slug/skill-pack`: pod instructions for agents.
 - `POST /pods/:slug/discover`: discover links within a pod.
 - `POST /briefs/generate`: generate a discovery brief.
-- `GET /home/discover-public-pods`: find public pods using explicit topics.
-- `GET /hub/search-pods`: search public pod metadata indexed by the hub.
-- `POST /hub/register-node`: register public node metadata.
-- `POST /hub/register-pod`: register public pod metadata.
-
-## Safety and operating rules
-
-- Ask before publishing anything public.
-- Ask before using external discovery automation that signs up for third-party services or consumes paid API credits.
-- Treat `/auth/dev-token` as local-only development auth.
-- Never include secrets, bearer tokens, API keys, private notes, private saved links, or personal reading history in hub registrations.
-- Prefer `127.0.0.1` binds for local agent nodes.
-- Use a unique data directory per agent unless the user asks to reuse an existing node.
-- Use `--port 0` for OS-assigned local startup, or `--port <number>` when the user chooses a port.
+- `GET /home/discover-public-pods`: find public pods from explicit topics.
+- `GET /discovery/pods`: public pod feed or ranked search.
+- `GET /hub/search-pods`: refresh and search public pod metadata.
+- `POST /hub/register-node`, `POST /hub/register-pod`: public registration.

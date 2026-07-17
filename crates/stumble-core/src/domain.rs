@@ -579,6 +579,7 @@ pub struct RouteLinkResponse {
     pub selected: Option<PodRouteCandidate>,
     pub needs_confirmation: bool,
     pub confidence_threshold: f32,
+    pub suggested_new_pod: Option<CreatePodRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

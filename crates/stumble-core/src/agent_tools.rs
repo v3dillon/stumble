@@ -8,9 +8,9 @@ use crate::skill_pack::{
     skill_pack_payload, validate_skill_pack,
 };
 use crate::store::{save_store_snapshot, InMemoryStore, StoreError, StorePersistenceError};
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -95,14 +95,23 @@ impl AgentTools {
 
     /// Pods that are safe to expose on the unauthenticated federation surface.
     /// Only `Public` pods are returned; private and invite-only pods are withheld.
-    pub fn list_public_pods(
-        &self,
-        tenant_id: Option<TenantId>,
-    ) -> Result<Vec<Pod>, AgentToolsError> {
-        Ok(self
-            .list_pods(tenant_id)?
-            .into_iter()
-            .filter(|pod| pod.visibility == Visibility::Public)
+    pub fn list_public_pods(&self, ctx: &AuthContext) -> Result<Vec<Pod>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        Ok(store
+            .pods
+            .values()
+            .filter(|pod| {
+                (pod.tenant_id == ctx.tenant_id || pod.tenant_id.is_none())
+                    && pod.visibility == Visibility::Public
+                    && pod
+                        .origin_node_id
+                        .is_none_or(|origin_node_id| origin_node_id == node.id)
+            })
+            .cloned()
             .collect())
     }
 
@@ -127,8 +136,22 @@ impl AgentTools {
         ctx: &AuthContext,
         pod_slug: &str,
     ) -> Result<PodManifest, AgentToolsError> {
+        let node_id = {
+            let store = self
+                .store
+                .read()
+                .map_err(|_| AgentToolsError::LockPoisoned)?;
+            store.node_for_tenant(ctx.tenant_id)?.id
+        };
         let manifest = self.pod_manifest(ctx, pod_slug)?;
         if manifest.pod.visibility != Visibility::Public {
+            return Err(StoreError::NotFound(format!("pod {pod_slug}")).into());
+        }
+        if manifest
+            .pod
+            .origin_node_id
+            .is_some_and(|origin_node_id| origin_node_id != node_id)
+        {
             return Err(StoreError::NotFound(format!("pod {pod_slug}")).into());
         }
         Ok(manifest)
@@ -141,8 +164,21 @@ impl AgentTools {
         ctx: &AuthContext,
         pod_slug: &str,
     ) -> Result<Vec<EventLog>, AgentToolsError> {
+        let node_id = {
+            let store = self
+                .store
+                .read()
+                .map_err(|_| AgentToolsError::LockPoisoned)?;
+            store.node_for_tenant(ctx.tenant_id)?.id
+        };
         let pod = self.pod_by_slug(pod_slug, ctx.tenant_id)?;
         if pod.visibility != Visibility::Public {
+            return Err(StoreError::NotFound(format!("pod {pod_slug}")).into());
+        }
+        if pod
+            .origin_node_id
+            .is_some_and(|origin_node_id| origin_node_id != node_id)
+        {
             return Err(StoreError::NotFound(format!("pod {pod_slug}")).into());
         }
         self.export_pod_events(ctx, pod_slug)
@@ -172,6 +208,10 @@ impl AgentTools {
                 )
             })
             .collect::<Vec<_>>();
+        let existing_slugs = candidates
+            .iter()
+            .map(|candidate| candidate.pod_slug.clone())
+            .collect::<HashSet<_>>();
         candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
         let selected = candidates.first().cloned().and_then(|top| {
             let second_score = candidates
@@ -184,11 +224,22 @@ impl AgentTools {
                 None
             }
         });
+        let needs_confirmation = selected.is_none();
+        let suggested_new_pod = if needs_confirmation {
+            Some(suggest_new_pod_for_link(
+                &request,
+                &candidates,
+                &existing_slugs,
+            ))
+        } else {
+            None
+        };
         Ok(RouteLinkResponse {
-            needs_confirmation: selected.is_none(),
+            needs_confirmation,
             selected,
             candidates,
             confidence_threshold,
+            suggested_new_pod,
         })
     }
 
@@ -635,24 +686,27 @@ impl AgentTools {
         ctx: &AuthContext,
         request: GenerateBriefRequest,
     ) -> Result<Brief, AgentToolsError> {
+        let user_id = request.user_id.or(ctx.user_id);
+        let query = request
+            .query
+            .clone()
+            .unwrap_or_else(|| "daily brief".to_string());
         let mut all_items = Vec::new();
         for slug in &request.pod_slugs {
             let mut items = self.discover_in_pod(
                 ctx,
                 slug,
                 DiscoverRequest {
-                    query: request
-                        .query
-                        .clone()
-                        .unwrap_or_else(|| "daily brief".to_string()),
+                    query: query.clone(),
                     avoid: vec![],
                     limit: 4,
                     mode: DiscoveryMode::DeepMatch,
-                    user_id: request.user_id,
+                    user_id,
                 },
             )?;
             all_items.append(&mut items);
         }
+        all_items = self.filter_brief_candidates(ctx, user_id, all_items)?;
         all_items.truncate(4);
         let roles = [
             "one thing to read",
@@ -676,7 +730,7 @@ impl AgentTools {
         let brief = Brief {
             id: Uuid::now_v7(),
             tenant_id: ctx.tenant_id,
-            user_id: request.user_id.or(ctx.user_id),
+            user_id,
             title: "Stumble Brief".to_string(),
             query: request.query,
             created_at: Utc::now(),
@@ -693,6 +747,46 @@ impl AgentTools {
         store.briefs.insert(brief.id, brief.clone());
         self.persist_locked(&store)?;
         Ok(brief)
+    }
+
+    fn filter_brief_candidates(
+        &self,
+        ctx: &AuthContext,
+        user_id: Option<UserId>,
+        items: Vec<DiscoveryItem>,
+    ) -> Result<Vec<DiscoveryItem>, AgentToolsError> {
+        let Some(user_id) = user_id else {
+            return Ok(items);
+        };
+        let stale_before = Utc::now() - Duration::days(30);
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let recently_briefed_own_links = store
+            .briefs
+            .values()
+            .filter(|brief| {
+                brief.tenant_id == ctx.tenant_id
+                    && brief.user_id == Some(user_id)
+                    && brief.created_at >= stale_before
+            })
+            .flat_map(|brief| brief.items.iter().map(|item| item.submission_id))
+            .collect::<HashSet<_>>();
+
+        Ok(items
+            .into_iter()
+            .filter(|item| {
+                let Some(submission) = store.submissions.get(&item.submission_id) else {
+                    return true;
+                };
+                if submission.submitted_by != Some(user_id) {
+                    return true;
+                }
+                submission.created_at < stale_before
+                    && !recently_briefed_own_links.contains(&item.submission_id)
+            })
+            .collect())
     }
 
     pub fn get_skill_pack(
@@ -1282,6 +1376,9 @@ impl AgentTools {
             .filter(|pod| {
                 (pod.tenant_id == ctx.tenant_id || pod.tenant_id.is_none())
                     && pod.visibility == Visibility::Public
+                    && pod
+                        .origin_node_id
+                        .is_none_or(|origin_node_id| origin_node_id == node.id)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -1501,6 +1598,7 @@ impl AgentTools {
             event.imported_from_peer_id = Some(peer_id);
             event.verified = true;
             event.tenant_id = ctx.tenant_id;
+            project_imported_public_event(&mut store, ctx, &event);
             store.event_log.push(event);
             imported += 1;
         }
@@ -1542,6 +1640,7 @@ impl AgentTools {
             event.imported_from_peer_id = None;
             event.verified = true;
             event.tenant_id = ctx.tenant_id;
+            project_imported_public_event(&mut store, ctx, &event);
             store.event_log.push(event);
             imported += 1;
         }
@@ -1576,6 +1675,149 @@ pub fn canonicalize_url(value: &str) -> Result<String, AgentToolsError> {
         url.query_pairs_mut().extend_pairs(pairs);
     }
     Ok(url.to_string())
+}
+
+fn project_imported_public_event(store: &mut InMemoryStore, ctx: &AuthContext, event: &EventLog) {
+    match event.event_type.as_str() {
+        "pod_created" => {
+            let Some(pod) = event
+                .payload_json
+                .get("pod")
+                .and_then(|value| serde_json::from_value::<Pod>(value.clone()).ok())
+            else {
+                return;
+            };
+            project_imported_pod(store, ctx, event.author_node_id, pod);
+        }
+        "link_submitted" => {
+            let Some(submission) = event
+                .payload_json
+                .get("submission")
+                .and_then(|value| serde_json::from_value::<Submission>(value.clone()).ok())
+            else {
+                return;
+            };
+            project_imported_submission(store, ctx, event, submission);
+        }
+        "link_removed" => {
+            let Some(submission_id) = event
+                .payload_json
+                .get("submission_id")
+                .and_then(|value| serde_json::from_value::<SubmissionId>(value.clone()).ok())
+            else {
+                return;
+            };
+            if let Some(pod_id) = store
+                .pods
+                .values()
+                .find(|pod| pod.slug == event.pod_slug && pod.tenant_id == ctx.tenant_id)
+                .map(|pod| pod.id)
+            {
+                store
+                    .submission_pods
+                    .retain(|link| !(link.pod_id == pod_id && link.submission_id == submission_id));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn project_imported_pod(
+    store: &mut InMemoryStore,
+    ctx: &AuthContext,
+    origin_node_id: NodeIdentityId,
+    mut pod: Pod,
+) -> PodId {
+    pod.tenant_id = ctx.tenant_id;
+    pod.visibility = Visibility::Public;
+    pod.created_by = None;
+    pod.origin_node_id = Some(origin_node_id);
+
+    if let Some(existing) = store
+        .pods
+        .values()
+        .find(|existing| existing.slug == pod.slug && existing.tenant_id == ctx.tenant_id)
+        .cloned()
+    {
+        ensure_projected_pod_support(store, &existing);
+        return existing.id;
+    }
+
+    let pod_id = pod.id;
+    store.pods.insert(pod_id, pod.clone());
+    ensure_projected_pod_support(store, &pod);
+    pod_id
+}
+
+fn ensure_projected_pod_support(store: &mut InMemoryStore, pod: &Pod) {
+    store.pod_rules.entry(pod.id).or_insert(PodRules {
+        pod_id: pod.id,
+        blocked_topics: vec![],
+        blocked_domains: vec![],
+        auto_promote_crawler_candidates: false,
+        federate_sources: true,
+    });
+    store
+        .pod_skill_packs
+        .entry(pod.id)
+        .or_insert_with(|| default_skill_pack(pod));
+}
+
+fn project_imported_submission(
+    store: &mut InMemoryStore,
+    ctx: &AuthContext,
+    event: &EventLog,
+    mut submission: Submission,
+) {
+    let pod_id = store
+        .pods
+        .values()
+        .find(|pod| pod.slug == event.pod_slug && pod.tenant_id == ctx.tenant_id)
+        .map(|pod| pod.id)
+        .unwrap_or_else(|| {
+            let pod = Pod {
+                id: Uuid::now_v7(),
+                tenant_id: ctx.tenant_id,
+                name: event.pod_slug.clone(),
+                slug: event.pod_slug.clone(),
+                description: "Imported public pod from a federated node.".to_string(),
+                visibility: Visibility::Public,
+                created_by: None,
+                created_at: event.created_at,
+                origin_node_id: Some(event.author_node_id),
+            };
+            project_imported_pod(store, ctx, event.author_node_id, pod)
+        });
+
+    submission.tenant_id = ctx.tenant_id;
+    submission.submitted_by = None;
+    submission.origin_event_id = Some(event.event_id);
+    let submission_id = store
+        .submissions
+        .values()
+        .find(|existing| {
+            existing.tenant_id == ctx.tenant_id
+                && (existing.id == submission.id
+                    || existing.canonical_url == submission.canonical_url)
+        })
+        .map(|existing| existing.id)
+        .unwrap_or_else(|| {
+            let id = submission.id;
+            store.submissions.insert(id, submission);
+            id
+        });
+
+    if !store
+        .submission_pods
+        .iter()
+        .any(|link| link.pod_id == pod_id && link.submission_id == submission_id)
+    {
+        store.submission_pods.push(SubmissionPod {
+            submission_id,
+            pod_id,
+            created_at: event.created_at,
+        });
+    }
 }
 
 fn validate_protocol_version(value: &str) -> Result<(), AgentToolsError> {
@@ -1682,6 +1924,135 @@ fn route_text(request: &RouteLinkRequest) -> String {
         request.tags.join(" ")
     )
     .to_lowercase()
+}
+
+fn suggest_new_pod_for_link(
+    request: &RouteLinkRequest,
+    candidates: &[PodRouteCandidate],
+    existing_slugs: &HashSet<String>,
+) -> CreatePodRequest {
+    let title = request
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty());
+    let tags = normalize_unique(request.tags.clone());
+    let name = tags
+        .first()
+        .map(|tag| title_case_words(tag))
+        .or_else(|| title.map(compact_title_for_pod))
+        .or_else(|| domain_label(&request.url).map(|domain| title_case_words(&domain)))
+        .unwrap_or_else(|| "New Links".to_string());
+    let slug = unique_slug(slugify(&name), existing_slugs);
+    let basis = if !tags.is_empty() {
+        format!("tagged {}", tags.join(", "))
+    } else if let Some(domain) = domain_label(&request.url) {
+        format!("from {domain}")
+    } else {
+        "from submitted links".to_string()
+    };
+    let description = if let Some(top) = candidates.first() {
+        format!(
+            "User-approved links {basis}. Suggested because no existing pod cleared the routing threshold; closest match was {} with score {:.1}.",
+            top.pod_name, top.score
+        )
+    } else {
+        format!(
+            "User-approved links {basis}. Suggested because there are no existing pods to route this link into."
+        )
+    };
+    CreatePodRequest {
+        name,
+        slug,
+        description,
+        visibility: Visibility::Private,
+    }
+}
+
+fn unique_slug(base: String, existing_slugs: &HashSet<String>) -> String {
+    if !existing_slugs.contains(&base) {
+        return base;
+    }
+    for idx in 2..=100 {
+        let candidate = format!("{base}-{idx}");
+        if !existing_slugs.contains(&candidate) {
+            return candidate;
+        }
+    }
+    format!("{base}-{}", Uuid::now_v7())
+}
+
+fn compact_title_for_pod(title: &str) -> String {
+    let words = title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .take(4)
+        .collect::<Vec<_>>();
+    if words.is_empty() {
+        "New Links".to_string()
+    } else {
+        title_case_words(&words.join(" "))
+    }
+}
+
+fn domain_label(url: &str) -> Option<String> {
+    let domain = Url::parse(url).ok()?.domain()?.to_string();
+    let mut parts = domain
+        .trim_start_matches("www.")
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() > 1 {
+        parts.pop();
+    }
+    parts.last().map(|part| part.replace('-', " "))
+}
+
+fn title_case_words(value: &str) -> String {
+    let words = value
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .take(4)
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut out = first.to_uppercase().collect::<String>();
+                    out.push_str(&chars.as_str().to_lowercase());
+                    out
+                }
+                None => String::new(),
+            }
+        })
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    if words.is_empty() {
+        "New Links".to_string()
+    } else {
+        words.join(" ")
+    }
+}
+
+fn slugify(value: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_dash = false;
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            last_was_dash = false;
+        } else if !last_was_dash && !slug.is_empty() {
+            slug.push('-');
+            last_was_dash = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "new-links".to_string()
+    } else {
+        slug
+    }
 }
 
 fn score_pod_route(

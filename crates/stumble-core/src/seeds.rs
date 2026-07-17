@@ -1,12 +1,12 @@
 use crate::agent_tools::AgentTools;
 use crate::domain::*;
-use crate::signing::{
-    create_node_identity, hash_api_token, new_plaintext_api_token, sign_public_event,
-};
+use crate::signing::{create_node_identity, hash_api_token, new_plaintext_api_token};
+#[cfg(test)]
 use crate::skill_pack::{default_skill_pack, pod_request_from_template};
 use crate::store::InMemoryStore;
-use chrono::{Duration, Utc};
-use serde_json::json;
+#[cfg(test)]
+use chrono::Duration;
+use chrono::Utc;
 use uuid::Uuid;
 
 pub fn seed_store() -> InMemoryStore {
@@ -96,246 +96,7 @@ pub fn seed_store() -> InMemoryStore {
         },
     );
 
-    let pods = [
-        (
-            "Beautiful Interfaces",
-            "beautiful-interfaces",
-            "Thoughtful, strange, useful interface design.",
-        ),
-        (
-            "Tools for Thought",
-            "tools-for-thought",
-            "Durable systems for thinking, writing, memory, and synthesis.",
-        ),
-        (
-            "Agentic Software",
-            "agentic-software",
-            "Practical agent workflows, interfaces, protocols, and engineering patterns.",
-        ),
-        (
-            "Weird Internet",
-            "weird-internet",
-            "Odd, humane, surprising corners of the web with artifacts.",
-        ),
-    ];
-    for (name, slug, description) in pods {
-        insert_seed_pod(&mut store, &local_node, name, slug, description);
-    }
-
     let user_ids: Vec<_> = store.users.keys().copied().collect();
-    let pod_ids: Vec<_> = store
-        .pods
-        .values()
-        .map(|pod| (pod.id, pod.slug.clone()))
-        .collect();
-    let submissions = vec![
-        (
-            "Magic Ink",
-            "https://worrydream.com/MagicInk/",
-            "beautiful-interfaces",
-            "visual artifact implementation detail interface",
-        ),
-        (
-            "Dynamicland",
-            "https://dynamicland.org/",
-            "beautiful-interfaces",
-            "spatial interface working demo independent research",
-        ),
-        (
-            "The Humane Representation of Thought",
-            "https://worrydream.com/HumaneRepresentationOfThought/",
-            "tools-for-thought",
-            "tools thinking visual explanation",
-        ),
-        (
-            "Ink and Switch Muse",
-            "https://www.inkandswitch.com/muse/",
-            "tools-for-thought",
-            "tools for thought research artifact",
-        ),
-        (
-            "Local-first Software",
-            "https://www.inkandswitch.com/local-first/",
-            "agentic-software",
-            "software architecture collaboration",
-        ),
-        (
-            "Model Context Protocol",
-            "https://modelcontextprotocol.io/",
-            "agentic-software",
-            "agent protocol integration",
-        ),
-        (
-            "Websim Experiments",
-            "https://websim.ai/",
-            "weird-internet",
-            "weird internet generative artifact",
-        ),
-        (
-            "Naive UI Lab",
-            "https://example.com/naive-ui-lab",
-            "beautiful-interfaces",
-            "unusual interaction pattern",
-        ),
-        (
-            "Agent Inbox Patterns",
-            "https://example.com/agent-inbox",
-            "agentic-software",
-            "agent user interface practical",
-        ),
-        (
-            "Personal Wiki Rituals",
-            "https://example.com/personal-wiki",
-            "tools-for-thought",
-            "notes memory synthesis",
-        ),
-        (
-            "Old Hypertext Garden",
-            "https://example.com/old-hypertext-garden",
-            "weird-internet",
-            "old gem hypertext",
-        ),
-        (
-            "Practical Color Pickers",
-            "https://example.com/color-picker",
-            "beautiful-interfaces",
-            "working demo implementation detail",
-        ),
-        (
-            "Spatial Notes",
-            "https://example.com/spatial-notes",
-            "tools-for-thought",
-            "spatial interface notes",
-        ),
-        (
-            "Agent Runbooks",
-            "https://example.com/agent-runbooks",
-            "agentic-software",
-            "agent workflow runbook",
-        ),
-        (
-            "Tiny Web Toys",
-            "https://example.com/tiny-web-toys",
-            "weird-internet",
-            "playful artifact",
-        ),
-        (
-            "Interface Archaeology",
-            "https://example.com/interface-archaeology",
-            "beautiful-interfaces",
-            "old gem interface",
-        ),
-        (
-            "Composable Memory",
-            "https://example.com/composable-memory",
-            "tools-for-thought",
-            "memory tools architecture",
-        ),
-        (
-            "Protocol Workbench",
-            "https://example.com/protocol-workbench",
-            "agentic-software",
-            "protocol demo",
-        ),
-        (
-            "Strange Search Engines",
-            "https://example.com/strange-search",
-            "weird-internet",
-            "search weird practical",
-        ),
-        (
-            "No Artifact Launch",
-            "https://example.com/no-artifact-launch",
-            "beautiful-interfaces",
-            "product launch without artifact generic AI hype",
-        ),
-    ];
-    for (idx, (title, url, pod_slug, tag_text)) in submissions.into_iter().enumerate() {
-        let pod_id = pod_ids.iter().find(|(_, slug)| slug == pod_slug).unwrap().0;
-        let id = Uuid::now_v7();
-        let parsed = url::Url::parse(url).expect("seed url");
-        let submission = Submission {
-            id,
-            tenant_id: None,
-            url: url.to_string(),
-            canonical_url: url.to_string(),
-            title: title.to_string(),
-            description: Some(format!("Seeded item for {pod_slug}.")),
-            domain: parsed.domain().unwrap_or("example.com").to_string(),
-            submitted_by: if idx % 3 == 0 {
-                user_ids.first().copied()
-            } else {
-                None
-            },
-            discovered_by_crawler: idx % 3 != 0,
-            submitter_note: if idx % 3 == 0 {
-                Some("Human note: worth reviewing for practical inspiration.".to_string())
-            } else {
-                None
-            },
-            summary: Some(format!("{title} is a seeded discovery item.")),
-            tags: tag_text
-                .split_whitespace()
-                .map(ToString::to_string)
-                .collect(),
-            embedding: None,
-            created_at: Utc::now() - Duration::days((idx * 31) as i64),
-            origin_event_id: None,
-        };
-        store.submissions.insert(id, submission.clone());
-        store.submission_pods.push(SubmissionPod {
-            submission_id: id,
-            pod_id,
-            created_at: Utc::now(),
-        });
-        if let Ok(event) = sign_public_event(
-            &local_node,
-            "link_submitted",
-            pod_slug,
-            json!({"submission_id": id, "title": title, "url": url}),
-            store.latest_event_hash(pod_slug),
-        ) {
-            store.event_log.push(event);
-        }
-    }
-
-    for (_, slug) in &pod_ids {
-        if let Some(pod) = store.pods.values().find(|pod| &pod.slug == slug) {
-            let source_id = Uuid::now_v7();
-            store.crawler_sources.insert(
-                source_id,
-                CrawlerSource {
-                    id: source_id,
-                    tenant_id: None,
-                    pod_id: pod.id,
-                    source_type: CrawlerSourceType::Rss,
-                    url: format!("https://example.com/{slug}/feed.xml"),
-                    enabled: true,
-                    crawl_interval_minutes: 1440,
-                    last_crawled_at: None,
-                    origin_event_id: None,
-                },
-            );
-        }
-    }
-    if let Some(user_id) = user_ids.first().copied() {
-        let bad = store
-            .submissions
-            .values()
-            .find(|submission| submission.title == "No Artifact Launch")
-            .map(|submission| submission.id);
-        if let Some(submission_id) = bad {
-            store.feedback_events.push(FeedbackEvent {
-                user_id,
-                tenant_id: None,
-                submission_id,
-                event_type: FeedbackKind::Dismissed,
-                reason: Some("Generic AI hype".to_string()),
-                created_at: Utc::now(),
-                local_only: true,
-            });
-        }
-    }
 
     let token = new_plaintext_api_token();
     let token_hash = hash_api_token(&token);
@@ -363,6 +124,7 @@ pub fn seed_agent_tools() -> AgentTools {
     AgentTools::new(seed_store())
 }
 
+#[cfg(test)]
 fn insert_seed_pod(
     store: &mut InMemoryStore,
     node: &NodeIdentity,
@@ -395,11 +157,11 @@ fn insert_seed_pod(
     store
         .pod_skill_packs
         .insert(pod.id, default_skill_pack(&pod));
-    if let Ok(event) = sign_public_event(
+    if let Ok(event) = crate::signing::sign_public_event(
         node,
         "pod_created",
         &pod.slug,
-        json!({"slug": pod.slug, "name": pod.name}),
+        serde_json::json!({"slug": pod.slug, "name": pod.name}),
         store.latest_event_hash(&pod.slug),
     ) {
         store.event_log.push(event);
@@ -412,6 +174,7 @@ mod tests {
     use super::*;
     use crate::agent_tools::canonicalize_url;
     use crate::signing::{create_node_identity, sign_public_event, verify_event};
+    use serde_json::json;
 
     fn ctx(store: &InMemoryStore) -> AuthContext {
         AuthContext {
@@ -421,9 +184,77 @@ mod tests {
         }
     }
 
+    fn add_public_seed_pod(store: &mut InMemoryStore, name: &str, slug: &str, description: &str) {
+        let node = store.default_node().unwrap();
+        insert_seed_pod(store, &node, name, slug, description);
+    }
+
+    fn add_beautiful_interfaces(store: &mut InMemoryStore) {
+        add_public_seed_pod(
+            store,
+            "Beautiful Interfaces",
+            "beautiful-interfaces",
+            "Thoughtful, strange, useful interface design.",
+        );
+    }
+
+    fn add_tools_for_thought(store: &mut InMemoryStore) {
+        add_public_seed_pod(
+            store,
+            "Tools for Thought",
+            "tools-for-thought",
+            "Durable systems for thinking, writing, memory, and synthesis.",
+        );
+    }
+
+    fn add_test_submission(
+        store: &mut InMemoryStore,
+        pod_slug: &str,
+        title: &str,
+        url: &str,
+        tag_text: &str,
+    ) -> SubmissionId {
+        let pod_id = store.pod_by_slug(pod_slug, None).unwrap().id;
+        let id = Uuid::now_v7();
+        let parsed = url::Url::parse(url).expect("test url");
+        let submission = Submission {
+            id,
+            tenant_id: None,
+            url: url.to_string(),
+            canonical_url: canonicalize_url(url).unwrap(),
+            title: title.to_string(),
+            description: Some(format!("Test item for {pod_slug}.")),
+            domain: parsed.domain().unwrap_or("example.com").to_string(),
+            submitted_by: None,
+            discovered_by_crawler: true,
+            submitter_note: None,
+            summary: Some(format!("{title} is a test discovery item.")),
+            tags: tag_text
+                .split_whitespace()
+                .map(ToString::to_string)
+                .collect(),
+            embedding: None,
+            created_at: Utc::now() - Duration::days(31),
+            origin_event_id: None,
+        };
+        store.submissions.insert(id, submission);
+        store.submission_pods.push(SubmissionPod {
+            submission_id: id,
+            pod_id,
+            created_at: Utc::now(),
+        });
+        id
+    }
+
     #[test]
     fn private_pods_are_hidden_from_the_federation_surface() {
-        let store = seed_store();
+        let mut store = seed_store();
+        add_public_seed_pod(
+            &mut store,
+            "Weird Internet",
+            "weird-internet",
+            "Odd, humane, surprising corners of the web with artifacts.",
+        );
         let tools = AgentTools::new(store.clone());
         let ctx = ctx(&store);
 
@@ -447,7 +278,7 @@ mod tests {
         assert!(all.iter().any(|pod| pod.slug == private.slug));
 
         // ...but the federation listing must expose public pods only.
-        let public = tools.list_public_pods(ctx.tenant_id).unwrap();
+        let public = tools.list_public_pods(&ctx).unwrap();
         assert!(
             public
                 .iter()
@@ -488,7 +319,8 @@ mod tests {
 
     #[test]
     fn private_pods_are_excluded_from_home_public_discovery() {
-        let store = seed_store();
+        let mut store = seed_store();
+        add_beautiful_interfaces(&mut store);
         let tools = AgentTools::new(store.clone());
         let ctx = ctx(&store);
 
@@ -528,8 +360,66 @@ mod tests {
     }
 
     #[test]
-    fn removing_a_submission_unlinks_then_purges_when_orphaned() {
+    fn route_link_suggests_new_private_pod_when_no_pods_match() {
         let store = seed_store();
+        let tools = AgentTools::new(store.clone());
+        let context = ctx(&store);
+
+        let routed = tools
+            .route_link_to_pods(
+                &context,
+                RouteLinkRequest {
+                    url: "https://example.com/robotics-lab".to_string(),
+                    title: Some("Robotics Lab Notes".to_string()),
+                    summary: Some("Hands-on robot perception experiments.".to_string()),
+                    tags: vec!["robotics".to_string(), "perception".to_string()],
+                },
+                2.5,
+            )
+            .unwrap();
+
+        assert!(routed.needs_confirmation);
+        assert!(routed.selected.is_none());
+        assert!(routed.candidates.is_empty());
+        let suggested = routed.suggested_new_pod.unwrap();
+        assert_eq!(suggested.name, "Robotics");
+        assert_eq!(suggested.slug, "robotics");
+        assert_eq!(suggested.visibility, Visibility::Private);
+    }
+
+    #[test]
+    fn route_link_selects_clear_existing_pod_without_new_pod_suggestion() {
+        let mut store = seed_store();
+        add_beautiful_interfaces(&mut store);
+        let tools = AgentTools::new(store.clone());
+        let context = ctx(&store);
+
+        let routed = tools
+            .route_link_to_pods(
+                &context,
+                RouteLinkRequest {
+                    url: "https://example.com/interface-demo".to_string(),
+                    title: Some("Interface Demo".to_string()),
+                    summary: Some("Practical interface design artifact.".to_string()),
+                    tags: vec!["interfaces".to_string(), "design".to_string()],
+                },
+                2.5,
+            )
+            .unwrap();
+
+        assert!(!routed.needs_confirmation);
+        assert_eq!(
+            routed.selected.as_ref().map(|pod| pod.pod_slug.as_str()),
+            Some("beautiful-interfaces")
+        );
+        assert!(routed.suggested_new_pod.is_none());
+    }
+
+    #[test]
+    fn removing_a_submission_unlinks_then_purges_when_orphaned() {
+        let mut store = seed_store();
+        add_beautiful_interfaces(&mut store);
+        add_tools_for_thought(&mut store);
         let tools = AgentTools::new(store.clone());
         let ctx = ctx(&store);
 
@@ -618,6 +508,7 @@ mod tests {
     #[test]
     fn duplicate_event_rejection_and_trusted_peer_rules() {
         let mut store = seed_store();
+        add_beautiful_interfaces(&mut store);
         let peer_node = create_node_identity("peer", None);
         let peer_id = Uuid::now_v7();
         store.trusted_peers.insert(
@@ -695,7 +586,8 @@ mod tests {
 
     #[test]
     fn skill_pack_import_export_validation_and_private_data_not_exported() {
-        let store = seed_store();
+        let mut store = seed_store();
+        add_beautiful_interfaces(&mut store);
         let tools = AgentTools::new(store.clone());
         let context = ctx(&store);
         let export = tools
@@ -715,7 +607,8 @@ mod tests {
 
     #[test]
     fn link_submission_and_canonical_dedupe() {
-        let store = seed_store();
+        let mut store = seed_store();
+        add_beautiful_interfaces(&mut store);
         let tools = AgentTools::new(store.clone());
         let context = ctx(&store);
         let first = tools
@@ -755,7 +648,15 @@ mod tests {
 
     #[test]
     fn blocked_source_topic_and_negative_signal_filtering() {
-        let store = seed_store();
+        let mut store = seed_store();
+        add_beautiful_interfaces(&mut store);
+        add_test_submission(
+            &mut store,
+            "beautiful-interfaces",
+            "No Artifact Launch",
+            "https://example.com/no-artifact-launch",
+            "product launch without artifact generic AI hype",
+        );
         let tools = AgentTools::new(store.clone());
         let context = ctx(&store);
         tools
@@ -780,7 +681,22 @@ mod tests {
 
     #[test]
     fn discovery_ranking_stumble_and_brief_generation() {
-        let store = seed_store();
+        let mut store = seed_store();
+        add_beautiful_interfaces(&mut store);
+        add_test_submission(
+            &mut store,
+            "beautiful-interfaces",
+            "Magic Ink",
+            "https://worrydream.com/MagicInk/",
+            "visual artifact implementation detail interface",
+        );
+        add_test_submission(
+            &mut store,
+            "beautiful-interfaces",
+            "Dynamicland",
+            "https://dynamicland.org/",
+            "spatial interface working demo independent research",
+        );
         let tools = AgentTools::new(store.clone());
         let context = ctx(&store);
         let items = tools
@@ -816,7 +732,8 @@ mod tests {
 
     #[test]
     fn crawler_candidate_promotion_creates_public_event() {
-        let store = seed_store();
+        let mut store = seed_store();
+        add_beautiful_interfaces(&mut store);
         let tools = AgentTools::new(store.clone());
         let context = ctx(&store);
         let source = tools
@@ -856,7 +773,8 @@ mod tests {
 
     #[test]
     fn representative_image_asset_storage_dedupes() {
-        let store = seed_store();
+        let mut store = seed_store();
+        add_beautiful_interfaces(&mut store);
         let tools = AgentTools::new(store.clone());
         let context = ctx(&store);
         let submission = tools
@@ -1071,6 +989,201 @@ mod tests {
             .iter()
             .chain(feed.global_public_pods.iter())
             .any(|item| item.pod.pod_slug == local_private.slug));
+    }
+
+    #[test]
+    fn imported_hub_events_materialize_remote_pod_links_for_briefs() {
+        let store = seed_store();
+        let tools = AgentTools::new(store.clone());
+        let context = ctx(&store);
+        let remote_node = create_node_identity("remote alien node", None);
+        tools
+            .register_hub_node(HubRegisterNodeRequest {
+                node_id: remote_node.id,
+                display_name: "Remote Alien Node".to_string(),
+                base_url: "https://remote-alien-node.example".to_string(),
+                public_key: remote_node.public_key.clone(),
+                protocol_version: "stumble/0.1".to_string(),
+            })
+            .unwrap();
+
+        let remote_pod = Pod {
+            id: Uuid::now_v7(),
+            tenant_id: None,
+            name: "Remote Aliens".to_string(),
+            slug: "remote-aliens".to_string(),
+            description: "Remote public pod about aliens, UAP, and signals.".to_string(),
+            visibility: Visibility::Public,
+            created_by: None,
+            created_at: Utc::now(),
+            origin_node_id: Some(remote_node.id),
+        };
+        let created_event = sign_public_event(
+            &remote_node,
+            "pod_created",
+            &remote_pod.slug,
+            json!({"pod": remote_pod.clone()}),
+            None,
+        )
+        .unwrap();
+        let remote_submission = Submission {
+            id: Uuid::now_v7(),
+            tenant_id: None,
+            url: "https://x.com/example/status/42".to_string(),
+            canonical_url: canonicalize_url("https://x.com/example/status/42?s=20").unwrap(),
+            title: "Remote Alien Signal Thread".to_string(),
+            description: Some("Alien and UAP signal discussion.".to_string()),
+            domain: "x.com".to_string(),
+            submitted_by: None,
+            discovered_by_crawler: false,
+            submitter_note: Some("Remote public alien pod link.".to_string()),
+            summary: Some("Alien and UAP signal discussion.".to_string()),
+            tags: vec![
+                "aliens".to_string(),
+                "uap".to_string(),
+                "signals".to_string(),
+            ],
+            embedding: None,
+            created_at: Utc::now(),
+            origin_event_id: None,
+        };
+        let submitted_event = sign_public_event(
+            &remote_node,
+            "link_submitted",
+            &remote_pod.slug,
+            json!({"submission": remote_submission.clone()}),
+            Some(created_event.content_hash.clone()),
+        )
+        .unwrap();
+
+        let imported = tools
+            .import_public_events_from_hub_node(
+                &context,
+                remote_node.id,
+                vec![created_event, submitted_event],
+            )
+            .unwrap();
+        assert_eq!(imported, 2);
+
+        tools.join_pod(&context, "remote-aliens").unwrap();
+        let discoveries = tools
+            .discover_in_pod(
+                &context,
+                "remote-aliens",
+                DiscoverRequest {
+                    query: "aliens uap signals".to_string(),
+                    avoid: vec![],
+                    limit: 7,
+                    mode: DiscoveryMode::DeepMatch,
+                    user_id: context.user_id,
+                },
+            )
+            .unwrap();
+        assert!(discoveries
+            .iter()
+            .any(|item| item.url == "https://x.com/example/status/42"));
+
+        let brief = tools
+            .generate_brief(
+                &context,
+                GenerateBriefRequest {
+                    pod_slugs: vec!["remote-aliens".to_string()],
+                    query: Some("aliens uap signals".to_string()),
+                    user_id: context.user_id,
+                },
+            )
+            .unwrap();
+        assert!(brief
+            .items
+            .iter()
+            .any(|item| item.url == "https://x.com/example/status/42"));
+    }
+
+    #[test]
+    fn brief_suppresses_fresh_own_links_until_they_are_stale() {
+        let store = seed_store();
+        let tools = AgentTools::new(store.clone());
+        let context = ctx(&store);
+        tools
+            .create_pod(
+                &context,
+                CreatePodRequest {
+                    name: "Agent Aliens".to_string(),
+                    slug: "agent-aliens".to_string(),
+                    description: "Alien links submitted by this agent.".to_string(),
+                    visibility: Visibility::Public,
+                },
+            )
+            .unwrap();
+        let own_submission = tools
+            .submit_link_to_pod(
+                &context,
+                "agent-aliens",
+                SubmitLinkRequest {
+                    url: "https://x.com/agent/status/1".to_string(),
+                    title: Some("Agent Alien Link".to_string()),
+                    description: Some("Aliens and UAP signal trail.".to_string()),
+                    note: Some("Submitted by this agent.".to_string()),
+                    tags: vec!["aliens".to_string(), "uap".to_string()],
+                    discovered_by_crawler: false,
+                },
+            )
+            .unwrap();
+
+        let brief = tools
+            .generate_brief(
+                &context,
+                GenerateBriefRequest {
+                    pod_slugs: vec!["agent-aliens".to_string()],
+                    query: Some("aliens uap".to_string()),
+                    user_id: context.user_id,
+                },
+            )
+            .unwrap();
+        assert!(!brief
+            .items
+            .iter()
+            .any(|item| item.submission_id == own_submission.id));
+
+        {
+            let store = tools.store();
+            let mut store = store.write().unwrap();
+            store
+                .submissions
+                .get_mut(&own_submission.id)
+                .unwrap()
+                .created_at = Utc::now() - Duration::days(31);
+        }
+
+        let stale_brief = tools
+            .generate_brief(
+                &context,
+                GenerateBriefRequest {
+                    pod_slugs: vec!["agent-aliens".to_string()],
+                    query: Some("aliens uap".to_string()),
+                    user_id: context.user_id,
+                },
+            )
+            .unwrap();
+        assert!(stale_brief
+            .items
+            .iter()
+            .any(|item| item.submission_id == own_submission.id));
+
+        let repeated_brief = tools
+            .generate_brief(
+                &context,
+                GenerateBriefRequest {
+                    pod_slugs: vec!["agent-aliens".to_string()],
+                    query: Some("aliens uap".to_string()),
+                    user_id: context.user_id,
+                },
+            )
+            .unwrap();
+        assert!(!repeated_brief
+            .items
+            .iter()
+            .any(|item| item.submission_id == own_submission.id));
     }
 
     #[test]

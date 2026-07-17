@@ -404,10 +404,7 @@ mod tests {
         assert_eq!(loaded.pods.len(), store.pods.len());
         assert_eq!(loaded.node_identities.len(), store.node_identities.len());
         assert_eq!(loaded.user_preferences.len(), store.user_preferences.len());
-        assert!(loaded
-            .pods
-            .values()
-            .any(|pod| pod.slug == "beautiful-interfaces"));
+        assert!(loaded.pods.is_empty());
 
         let _ = std::fs::remove_dir_all(dir);
     }
