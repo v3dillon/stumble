@@ -60,6 +60,21 @@ An Agent Harness follows this portable loop:
 HTTP, MCP, and `podctl` expose the same high-level contracts. Do not query or edit
 SQLite to complete any workflow.
 
+For MCP clients, start the stateless Streamable HTTP bridge on loopback against
+the same Home Node directory:
+
+```bash
+target/release/stumble-mcp --data-dir ~/.stumble/nodes/home \
+  --bind 127.0.0.1:8790
+```
+
+The MCP endpoint is `/mcp`. Every initialization, catalog, and tool request
+must carry `Authorization: Bearer <harness-token>`; invalid and revoked tokens
+are rejected before dispatch. Unexpected browser `Origin` headers are rejected,
+and the bridge refuses every direct non-loopback bind. Put TLS and
+standards-compliant OAuth in front of it before connecting
+a remote ChatGPT app; ChatGPT cannot supply a custom static API key.
+
 ## Scheduling fallback
 
 If the Agent Harness has no scheduler, the local adapter materializes due tasks

@@ -2,12 +2,29 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use stumble_core::*;
 
+mod streamable_http;
+
+pub use streamable_http::streamable_http_router;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolCall {
     pub tool: String,
     #[serde(default)]
     pub arguments: Value,
 }
+
+/// Classifies failures at the MCP tool-call protocol boundary.
+#[derive(Debug, thiserror::Error)]
+pub enum McpToolCallError {
+    #[error("invalid tool arguments: {0}")]
+    InvalidArguments(#[source] anyhow::Error),
+    #[error(transparent)]
+    Execution(#[from] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct InvalidToolArguments(String);
 
 #[derive(Clone)]
 pub struct McpToolRouter {
@@ -98,8 +115,8 @@ impl McpToolRouter {
             "record_feed_feedback" => {
                 let id = arg_string(&call.arguments, "content_item_id")?.parse()?;
                 let kind = arg_string(&call.arguments, "kind")?
-                    .parse()
-                    .map_err(anyhow::Error::msg)?;
+                    .parse::<FeedbackKind>()
+                    .map_err(|error| invalid_arguments(error.to_string()))?;
                 Ok(json!(self.tools.record_feed_feedback(
                     &self.ctx,
                     id,
@@ -281,7 +298,7 @@ impl McpToolRouter {
                     .arguments
                     .get("files")
                     .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("missing files"))?;
+                    .ok_or_else(|| invalid_arguments("missing argument files"))?;
                 Ok(json!(self.tools.import_skill_pack(
                     &self.ctx,
                     &pod_slug,
@@ -326,7 +343,7 @@ impl McpToolRouter {
                     .arguments
                     .get("events")
                     .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("missing argument events"))?;
+                    .ok_or_else(|| invalid_arguments("missing argument events"))?;
                 Ok(json!({"imported_events": self.tools.import_pod_events(
                     &self.ctx,
                     peer_id,
@@ -356,6 +373,27 @@ impl McpToolRouter {
         }
     }
 
+    /// Calls a tool while preserving the MCP distinction between malformed
+    /// arguments and failures produced by a valid tool execution.
+    pub fn call_checked(&self, call: McpToolCall) -> Result<Value, McpToolCallError> {
+        if !call.arguments.is_object() {
+            return Err(McpToolCallError::InvalidArguments(invalid_arguments(
+                "arguments must be an object",
+            )));
+        }
+        self.call(call).map_err(|error| {
+            if error.downcast_ref::<InvalidToolArguments>().is_some()
+                || error.downcast_ref::<serde_json::Error>().is_some()
+                || error.downcast_ref::<uuid::Error>().is_some()
+                || error.downcast_ref::<DiscoveryLeaseSecondsError>().is_some()
+            {
+                McpToolCallError::InvalidArguments(error)
+            } else {
+                McpToolCallError::Execution(error)
+            }
+        })
+    }
+
     /// Dispatches tools that may perform outbound synchronization.
     ///
     /// # Errors
@@ -379,7 +417,11 @@ fn arg_string(args: &Value, key: &str) -> anyhow::Result<String> {
     args.get(key)
         .and_then(|v| v.as_str())
         .map(ToString::to_string)
-        .ok_or_else(|| anyhow::anyhow!("missing argument {key}"))
+        .ok_or_else(|| invalid_arguments(format!("missing or non-string argument {key}")))
+}
+
+fn invalid_arguments(message: impl Into<String>) -> anyhow::Error {
+    InvalidToolArguments(message.into()).into()
 }
 
 fn opt_string(args: &Value, key: &str) -> Option<String> {

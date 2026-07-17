@@ -8,6 +8,17 @@ Batches.
 HTTP, MCP, and `podctl` call the shared `AgentTools` service in `stumble-core`.
 The first-release federation contract is `stumble/1.0`.
 
+For a local MCP client, run the authenticated Streamable HTTP bridge against
+the same Home Node directory:
+
+```bash
+cargo run -p stumble-mcp -- --data-dir ~/.stumble/nodes/home
+```
+
+The endpoint is `http://127.0.0.1:8790/mcp` by default and requires a current
+Stumble Harness bearer token. Keep it on loopback; expose it to a remote client
+only through authenticated HTTPS.
+
 ## Workspace
 
 - `stumble-core`: domain, SQLite persistence, curation, Feed, signing, and tools.
