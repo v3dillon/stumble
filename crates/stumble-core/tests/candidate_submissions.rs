@@ -78,17 +78,39 @@ fn candidate_harness(
 }
 
 fn create_test_pod(tools: &AgentTools, slug: &str) -> Pod {
-    tools
-        .create_pod(
-            &tools.default_auth_context().unwrap(),
-            CreatePodRequest {
-                name: slug.into(),
-                slug: slug.into(),
-                description: "Candidate acceptance Pod".into(),
-                visibility: Visibility::Public,
+    let owner = tools.default_auth_context().unwrap();
+    let proposer = candidate_harness(
+        tools,
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::PodCuration],
+        None,
+    );
+    let approver = candidate_harness(
+        tools,
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::Approval],
+        None,
+    );
+    let now = Utc::now();
+    let proposal = tools
+        .create_pending_proposal(
+            &proposer,
+            SensitiveChange::CreatePublicPod {
+                request: CreatePodRequest {
+                    name: slug.into(),
+                    slug: slug.into(),
+                    description: "Candidate acceptance Pod".into(),
+                    visibility: Visibility::Public,
+                },
             },
+            now,
+            now + chrono::Duration::hours(1),
         )
-        .unwrap()
+        .unwrap();
+    tools
+        .approve_pending_proposal(&approver, proposal.id, now)
+        .unwrap();
+    tools.pod_by_slug(slug, owner.tenant_id).unwrap()
 }
 
 #[test]

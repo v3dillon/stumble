@@ -458,16 +458,16 @@ mod tests {
 
         // Remove from one pod: still linked elsewhere, so not purged.
         assert!(!tools
-            .remove_submission_from_pod(&ctx, "beautiful-interfaces", submission.id)
+            .remove_submission_from_pod_for_test(&ctx, "beautiful-interfaces", submission.id)
             .unwrap());
         // Removing the same link again is a NotFound (it is already gone).
         assert!(tools
-            .remove_submission_from_pod(&ctx, "beautiful-interfaces", submission.id)
+            .remove_submission_from_pod_for_test(&ctx, "beautiful-interfaces", submission.id)
             .is_err());
 
         // Remove from the last pod: now orphaned, so the submission is purged.
         assert!(tools
-            .remove_submission_from_pod(&ctx, "tools-for-thought", submission.id)
+            .remove_submission_from_pod_for_test(&ctx, "tools-for-thought", submission.id)
             .unwrap());
         {
             let guard = tools.store();
@@ -905,7 +905,7 @@ mod tests {
         let tools = AgentTools::new(store.clone());
         let context = ctx(&store);
         let public = tools
-            .create_pod(
+            .create_pod_for_test(
                 &context,
                 CreatePodRequest {
                     name: "Aliens".to_string(),
@@ -956,7 +956,7 @@ mod tests {
         let tools = AgentTools::new(store.clone());
         let context = ctx(&store);
         let local_public = tools
-            .create_pod(
+            .create_pod_for_test(
                 &context,
                 CreatePodRequest {
                     name: "Aliens".to_string(),
@@ -1137,7 +1137,7 @@ mod tests {
         let tools = AgentTools::new(store.clone());
         let context = ctx(&store);
         tools
-            .create_pod(
+            .create_pod_for_test(
                 &context,
                 CreatePodRequest {
                     name: "Agent Aliens".to_string(),

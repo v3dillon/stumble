@@ -19,22 +19,37 @@ impl Drop for TestDataDir {
     }
 }
 
+fn create_public_pod(tools: &AgentTools, owner: &AuthContext, name: &str, slug: &str) -> Pod {
+    let proposer = harness_context(tools, owner, HarnessCapability::PodCuration, None);
+    let approver = harness_context(tools, owner, HarnessCapability::Approval, None);
+    let now = chrono::Utc::now();
+    let proposal = tools
+        .create_pending_proposal(
+            &proposer,
+            SensitiveChange::CreatePublicPod {
+                request: CreatePodRequest {
+                    name: name.into(),
+                    slug: slug.into(),
+                    description: String::new(),
+                    visibility: Visibility::Public,
+                },
+            },
+            now,
+            now + chrono::Duration::hours(1),
+        )
+        .unwrap();
+    tools
+        .approve_pending_proposal(&approver, proposal.id, now)
+        .unwrap();
+    tools.pod_by_slug(slug, owner.tenant_id).unwrap()
+}
+
 #[test]
 fn scoped_harness_grants_are_revocable_and_auditable() {
     let data_dir = TestDataDir::new("stumble-harness-grants");
     let tools = AgentTools::open_home_node(data_dir.path(), seed_store).unwrap();
     let owner = tools.default_auth_context().unwrap();
-    let allowed = tools
-        .create_pod(
-            &owner,
-            CreatePodRequest {
-                name: "Allowed".into(),
-                slug: "allowed".into(),
-                description: String::new(),
-                visibility: Visibility::Public,
-            },
-        )
-        .unwrap();
+    let allowed = create_public_pod(&tools, &owner, "Allowed", "allowed");
     tools
         .create_pod(
             &owner,
@@ -163,17 +178,7 @@ fn harness_context(
 fn grant_capabilities_are_independent_and_local_only() {
     let tools = AgentTools::new(seed_store());
     let owner = tools.default_auth_context().unwrap();
-    let pod = tools
-        .create_pod(
-            &owner,
-            CreatePodRequest {
-                name: "Capabilities".into(),
-                slug: "capabilities".into(),
-                description: String::new(),
-                visibility: Visibility::Public,
-            },
-        )
-        .unwrap();
+    let pod = create_public_pod(&tools, &owner, "Capabilities", "capabilities");
 
     let feed = harness_context(
         &tools,

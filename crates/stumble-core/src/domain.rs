@@ -208,6 +208,31 @@ impl std::str::FromStr for AgentHarnessId {
     }
 }
 
+/// Stable local identity of a sensitive-change proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PendingProposalId(Uuid);
+
+impl From<Uuid> for PendingProposalId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl std::fmt::Display for PendingProposalId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::str::FromStr for PendingProposalId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse().map(Self)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeploymentMode {
@@ -373,6 +398,8 @@ pub enum HarnessCapability {
     SubscriptionManagement,
     /// Manage node-local authority and administration.
     Administration,
+    /// Independently approve or reject sensitive changes.
+    Approval,
 }
 
 impl std::fmt::Display for HarnessCapability {
@@ -386,6 +413,7 @@ impl std::fmt::Display for HarnessCapability {
             Self::PackageManagement => "package_management",
             Self::SubscriptionManagement => "subscription_management",
             Self::Administration => "administration",
+            Self::Approval => "approval",
         })
     }
 }
@@ -403,9 +431,150 @@ impl std::str::FromStr for HarnessCapability {
             "package_management" => Ok(Self::PackageManagement),
             "subscription_management" => Ok(Self::SubscriptionManagement),
             "administration" => Ok(Self::Administration),
+            "approval" => Ok(Self::Approval),
             _ => Err(format!("unknown harness capability: {value}")),
         }
     }
+}
+
+/// A sensitive change that cannot take effect when it is proposed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SensitiveChange {
+    /// Create a new Pod with public exposure from its first accepted state.
+    CreatePublicPod { request: CreatePodRequest },
+    /// Expose an existing private Pod through public federation surfaces.
+    PublishPod { pod_id: PodId },
+    /// Expand the capabilities or Pod scope of an existing Harness Grant.
+    ExpandHarnessGrant {
+        harness_id: AgentHarnessId,
+        capabilities: Vec<HarnessCapability>,
+        pod_ids: Option<Vec<PodId>>,
+    },
+    /// Add a node to the local Trust Policy.
+    AddTrustedPeer {
+        display_name: String,
+        base_url: String,
+        public_key: String,
+    },
+    /// Apply a validated Package Revision to a public Pod.
+    RevisePublicPodPackage {
+        pod_id: PodId,
+        base_version: PackageVersion,
+        patch: SkillPackPatch,
+    },
+    /// Remove an accepted public Pod association for one Content Item.
+    RemovePublicSubmissionFromPod {
+        pod_id: PodId,
+        submission_id: SubmissionId,
+    },
+}
+
+/// Auditable lifecycle state of a [`PendingProposal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalStatus {
+    /// Awaiting an independent decision before expiry.
+    Pending,
+    /// Applied after independent approval.
+    Accepted,
+    /// Declined without applying the requested change.
+    Rejected,
+    /// Reached its expiry without applying the requested change.
+    Expired,
+}
+
+/// Expiring, auditable request for one sensitive authoritative change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingProposal {
+    /// Stable local proposal identity.
+    pub id: PendingProposalId,
+    /// Typed requested authoritative change.
+    pub requested_change: SensitiveChange,
+    /// Stable resource references affected by the change.
+    pub affected_resources: Vec<ProposalResource>,
+    /// User-facing consequences expected if approved.
+    pub expected_consequences: Vec<String>,
+    /// Structured before/after values shown to an approver.
+    pub structured_diff: Vec<ProposalResourceDiff>,
+    /// Harness that requested the change.
+    pub proposer: AgentHarnessId,
+    /// User for whom the proposer requested the change.
+    pub user_id: UserId,
+    /// Hosted tenant boundary of the requested change.
+    pub tenant_id: Option<TenantId>,
+    /// Time at which the proposal was created.
+    pub created_at: DateTime<Utc>,
+    /// Time after which the proposal cannot be approved.
+    pub expires_at: DateTime<Utc>,
+    /// Current auditable lifecycle state.
+    pub status: ProposalStatus,
+    /// Independent harness that decided the proposal, when applicable.
+    pub decided_by: Option<AgentHarnessId>,
+    /// Decision or expiry time, when terminal.
+    pub decided_at: Option<DateTime<Utc>>,
+    /// Optional reason supplied when rejecting the proposal.
+    pub rejection_reason: Option<String>,
+}
+
+/// One affected resource's inspectable state transition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposalResourceDiff {
+    /// Stable resource reference matching an entry in `affected_resources`.
+    pub resource: ProposalResource,
+    /// Current value, or `null` when the resource does not yet exist.
+    pub before: Value,
+    /// Requested value if the proposal is accepted.
+    pub after: Value,
+}
+
+/// Type-safe identity of a resource affected by a proposal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "identity", rename_all = "snake_case")]
+pub enum ProposalResource {
+    Pod(PodId),
+    PodSlug(String),
+    AgentHarness(AgentHarnessId),
+    TrustedPeerUrl(String),
+    PodPackage(PodId),
+    SubmissionPlacement {
+        pod_id: PodId,
+        submission_id: SubmissionId,
+    },
+}
+
+/// Outcome of requesting Pod creation through the sensitive-change policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "result", rename_all = "snake_case")]
+pub enum CreatePodOutcome {
+    Created(Pod),
+    PendingApproval(Box<PendingProposal>),
+}
+
+/// Outcome of requesting a Pod Placement removal through approval policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "result", rename_all = "snake_case")]
+pub enum RemoveSubmissionOutcome {
+    Removed { submission_purged: bool },
+    PendingApproval(Box<PendingProposal>),
+}
+
+/// Transport-neutral request to create a Pending Proposal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreatePendingProposalRequest {
+    /// Typed sensitive change to request.
+    pub requested_change: SensitiveChange,
+    /// Positive lifetime in seconds, capped at seven days by [`AgentTools`](crate::AgentTools).
+    pub expires_in_seconds: u64,
+}
+
+/// Transport-neutral request to reject a Pending Proposal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RejectPendingProposalRequest {
+    /// Inspectable reason for declining the change.
+    pub reason: String,
 }
 
 /// Capabilities and optional Pod boundary assigned to an Agent Harness.
@@ -616,7 +785,7 @@ pub struct TrustedPeer {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pod {
     pub id: PodId,
     pub tenant_id: Option<TenantId>,
@@ -1192,7 +1361,7 @@ pub struct AuthContext {
     pub harness_id: Option<AgentHarnessId>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreatePodRequest {
     pub name: String,
     pub slug: String,
@@ -1355,7 +1524,7 @@ pub struct GenerateBriefRequest {
     pub user_id: Option<UserId>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillPackPatch {
     #[serde(default)]
     pub context_md: Option<String>,

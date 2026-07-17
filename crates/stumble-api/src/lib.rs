@@ -148,6 +148,16 @@ pub fn router_with_options(
         .route("/api-tokens/:id", delete(revoke_api_token))
         .route("/harnesses", post(register_agent_harness))
         .route("/harnesses/:id", delete(revoke_agent_harness))
+        .route("/pending-proposals", post(create_pending_proposal))
+        .route("/pending-proposals/:id", get(get_pending_proposal))
+        .route(
+            "/pending-proposals/:id/approve",
+            post(approve_pending_proposal),
+        )
+        .route(
+            "/pending-proposals/:id/reject",
+            post(reject_pending_proposal),
+        )
         .route("/candidates", post(submit_candidate))
         .route("/candidates/:id", get(inspect_candidate))
         .route(
@@ -346,9 +356,13 @@ async fn create_pod(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Json(request): Json<CreatePodRequest>,
-) -> Result<Json<Pod>, ApiError> {
+) -> Result<Json<CreatePodOutcome>, ApiError> {
     let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.create_pod(&ctx, request)?))
+    Ok(Json(state.tools.request_create_pod(
+        &ctx,
+        request,
+        chrono::Utc::now(),
+    )?))
 }
 
 async fn create_private_pod_with_package(
@@ -388,14 +402,14 @@ async fn remove_submission_from_pod(
     Path((slug, submission_id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let ctx = auth_or_default(&state, &headers)?;
-    let purged = state
+    Ok(Json(json!(state
         .tools
-        .remove_submission_from_pod(&ctx, &slug, submission_id)?;
-    Ok(Json(json!({
-        "removed_from_pod": slug,
-        "submission_id": submission_id,
-        "submission_purged": purged,
-    })))
+        .request_remove_submission_from_pod(
+            &ctx,
+            &slug,
+            submission_id,
+            chrono::Utc::now(),
+        )?)))
 }
 
 async fn route_link(
@@ -937,6 +951,60 @@ async fn revoke_agent_harness(
     let ctx = auth_required(&state.tools, &headers)?;
     state.tools.revoke_agent_harness(&ctx, id)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn create_pending_proposal(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<CreatePendingProposalRequest>,
+) -> Result<Json<PendingProposal>, ApiError> {
+    let ctx = auth_required(&state.tools, &headers)?;
+    Ok(Json(state.tools.create_pending_proposal_from_request(
+        &ctx,
+        request,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn get_pending_proposal(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<PendingProposalId>,
+) -> Result<Json<PendingProposal>, ApiError> {
+    let ctx = auth_required(&state.tools, &headers)?;
+    Ok(Json(state.tools.pending_proposal(
+        &ctx,
+        id,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn approve_pending_proposal(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<PendingProposalId>,
+) -> Result<Json<PendingProposal>, ApiError> {
+    let ctx = auth_required(&state.tools, &headers)?;
+    Ok(Json(state.tools.approve_pending_proposal(
+        &ctx,
+        id,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn reject_pending_proposal(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<PendingProposalId>,
+    Json(request): Json<RejectPendingProposalRequest>,
+) -> Result<Json<PendingProposal>, ApiError> {
+    let ctx = auth_required(&state.tools, &headers)?;
+    Ok(Json(state.tools.reject_pending_proposal(
+        &ctx,
+        id,
+        chrono::Utc::now(),
+        request.reason,
+    )?))
 }
 
 async fn federation_node(

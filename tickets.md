@@ -86,19 +86,19 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 ## Require approval for sensitive changes
 
-**Status:** ready-for-agent
+**Status:** complete
 
 **What to build:** Represent sensitive public, authority, trust, autonomy, and removal changes as expiring Pending Proposals with structured diffs and independent approval.
 
 **Blocked by:** Authorize Agent Harnesses with scoped grants; Create and exchange portable Pod Packages.
 
-- [ ] Sensitive operations create a Pending Proposal rather than applying immediately.
-- [ ] Proposals state the requested change, affected resources, proposer, expiry, and expected consequences.
-- [ ] An interactive harness with approval permission can approve or reject a proposal.
-- [ ] An unattended harness cannot approve a proposal it created or expand its own grant.
-- [ ] Expired, rejected, and accepted proposals remain auditable.
-- [ ] Routine Feed, feedback, synchronization, Candidate Submission, and already-authorized curation operations remain one step.
-- [ ] Approval behavior is consistent across HTTP, MCP, and CLI.
+- [x] Sensitive operations create a Pending Proposal rather than applying immediately.
+- [x] Proposals state the requested change, affected resources, proposer, expiry, and expected consequences.
+- [x] An interactive harness with approval permission can approve or reject a proposal.
+- [x] An unattended harness cannot approve a proposal it created or expand its own grant.
+- [x] Expired, rejected, and accepted proposals remain auditable.
+- [x] Routine Feed, feedback, synchronization, Candidate Submission, and already-authorized curation operations remain one step.
+- [x] Approval behavior is consistent across HTTP, MCP, and CLI.
 
 ## Curate and route Content Items across Pods
 

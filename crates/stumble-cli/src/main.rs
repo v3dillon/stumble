@@ -153,6 +153,23 @@ enum Command {
     RevokeHarness {
         id: AgentHarnessId,
     },
+    ProposeChange {
+        #[arg(long)]
+        from: PathBuf,
+        #[arg(long, default_value = "3600")]
+        expires_in_seconds: u64,
+    },
+    GetProposal {
+        id: PendingProposalId,
+    },
+    ApproveProposal {
+        id: PendingProposalId,
+    },
+    RejectProposal {
+        id: PendingProposalId,
+        #[arg(long)]
+        reason: String,
+    },
     MaterializeDiscoveryTasks,
     ListDiscoveryTasks,
     ListReadyDiscoveryTasks,
@@ -308,16 +325,13 @@ async fn main() -> anyhow::Result<()> {
             slug,
             description,
         } => {
-            let pod = tools.create_pod(
-                &ctx,
-                CreatePodRequest {
-                    name,
-                    slug,
-                    description,
-                    visibility: Visibility::Public,
-                },
-            )?;
-            print_json(&pod)?;
+            let request = CreatePodRequest {
+                name,
+                slug,
+                description,
+                visibility: Visibility::Public,
+            };
+            print_json(&tools.request_create_pod(&ctx, request, chrono::Utc::now())?)?;
         }
         Command::CreatePodPackage {
             name,
@@ -499,6 +513,30 @@ async fn main() -> anyhow::Result<()> {
             tools.revoke_agent_harness(&ctx, id)?;
             println!("revoked {id}");
         }
+        Command::ProposeChange {
+            from,
+            expires_in_seconds,
+        } => {
+            let requested_change =
+                serde_json::from_str::<SensitiveChange>(&std::fs::read_to_string(from)?)?;
+            print_json(&tools.create_pending_proposal_from_request(
+                &ctx,
+                CreatePendingProposalRequest {
+                    requested_change,
+                    expires_in_seconds,
+                },
+                chrono::Utc::now(),
+            )?)?;
+        }
+        Command::GetProposal { id } => {
+            print_json(&tools.pending_proposal(&ctx, id, chrono::Utc::now())?)?;
+        }
+        Command::ApproveProposal { id } => {
+            print_json(&tools.approve_pending_proposal(&ctx, id, chrono::Utc::now())?)?;
+        }
+        Command::RejectProposal { id, reason } => {
+            print_json(&tools.reject_pending_proposal(&ctx, id, chrono::Utc::now(), reason)?)?;
+        }
         Command::MaterializeDiscoveryTasks => {
             print_json(&tools.materialize_due_discovery_tasks(&ctx, chrono::Utc::now())?)?
         }
@@ -542,8 +580,13 @@ async fn main() -> anyhow::Result<()> {
             base_url,
             public_key,
         } => {
-            let peer = tools.add_trusted_peer(&ctx, display_name, base_url, public_key)?;
-            println!("added peer {}", peer.id);
+            print_json(&tools.request_add_trusted_peer(
+                &ctx,
+                display_name,
+                base_url,
+                public_key,
+                chrono::Utc::now(),
+            )?)?;
         }
         Command::ListPeers => {
             tools.require_harness_capability(&ctx, HarnessCapability::Administration)?;

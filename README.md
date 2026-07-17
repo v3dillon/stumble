@@ -34,7 +34,7 @@ Use `--port <number>` to choose a port without changing the bind host; use `--po
 
 ## Agent Harness grants
 
-Register each interactive or unattended Agent Harness separately and grant only the capabilities it needs: `feed-read`, `feedback`, `discovery-tasks`, `candidate-submission`, `pod-curation`, `package-management`, `subscription-management`, and `administration`. Add one or more `--pod-id` values to restrict every Pod-facing operation; omit them for all local Pods.
+Register each interactive or unattended Agent Harness separately and grant only the capabilities it needs: `feed-read`, `feedback`, `discovery-tasks`, `candidate-submission`, `pod-curation`, `package-management`, `subscription-management`, `administration`, and `approval`. Add one or more `--pod-id` values to restrict every Pod-facing operation; omit them for all local Pods.
 
 ```bash
 podctl --data-dir ~/.stumble/nodes/default register-harness \
@@ -53,11 +53,24 @@ podctl --data-dir ~/.stumble/nodes/default revoke-harness <harness-uuid>
 
 The registration response is the only place the plaintext bearer token appears; the Home Node stores its hash. Revocation affects existing HTTP, MCP, and CLI contexts immediately. Harness identity is recorded with successful writes. Tokens, grants, write audits, and private User state remain node-local and are not included in federation Pod lists, manifests, events, or package exports.
 
-Only a direct local owner context may bootstrap an interactive `administration` harness; unattended and delegated administrative grants are forbidden. Later authority expansion remains reserved for the Pending Proposal approval flow. A harness may otherwise delegate only an unattended subset of its own capabilities and Pod scope. On a public bind, every non-public API operation requires a bearer token; unauthenticated owner bootstrap is loopback-only.
+Only a direct local owner context may bootstrap isolated interactive `administration` and `approval` harnesses; unattended or delegated grants of either capability are forbidden. Later authority expansion remains reserved for the Pending Proposal approval flow. A harness may otherwise delegate only an unattended subset of its own capabilities and Pod scope. On a public bind, every non-public API operation requires a bearer token; unauthenticated owner bootstrap is loopback-only.
 
 Legacy dev tokens remain available for compatibility but are linked to a Harness identity and receive no implicit capabilities. Register a scoped Harness for agent work.
 
 HTTP exposes `POST /harnesses` and `DELETE /harnesses/:id`. MCP exposes `register_agent_harness` and `revoke_agent_harness`; construct an authenticated router with the one-time token. All three adapters return the same core authorization reason, with HTTP mapping denials to `403 Forbidden` and CLI returning a non-zero exit status.
+
+## Sensitive-change approval
+
+Public Pod exposure, public Package Revisions, public-content removal, Harness Grant expansion, and Trust Policy changes are stored as expiring Pending Proposals. Approved public removal withdraws only the public Pod Placement and preserves the Content Item, assets, Saves, and other private projections. The proposal records a typed requested change, affected resources, proposer, expiry, expected consequences, and its terminal decision. It applies only when a different interactive Harness with `approval` authority accepts it; unattended and proposing Harnesses cannot self-approve. Accepted, rejected, and expired proposals remain in the Home Node's SQLite audit history.
+
+```bash
+podctl --token "$PROPOSER_TOKEN" propose-change --from change.json --expires-in-seconds 3600
+podctl --token "$APPROVER_TOKEN" get-proposal <proposal-id>
+podctl --token "$APPROVER_TOKEN" approve-proposal <proposal-id>
+# or: podctl --token "$APPROVER_TOKEN" reject-proposal <proposal-id> --reason "not ready"
+```
+
+`change.json` is a tagged `SensitiveChange`, for example `{"kind":"publish_pod","pod_id":"<pod-uuid>"}`. HTTP exposes `POST /pending-proposals`, `GET /pending-proposals/:id`, and the `/approve` and `/reject` actions. MCP exposes the equivalent `create_pending_proposal`, `get_pending_proposal`, `approve_pending_proposal`, and `reject_pending_proposal` tools. Routine Feed reads, feedback, synchronization, Candidate Submission, and already-authorized curation continue to use their existing one-step operations.
 
 ## Local Mode Examples
 

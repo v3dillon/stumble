@@ -38,6 +38,10 @@ impl McpToolRouter {
             "list_pods",
             "register_agent_harness",
             "revoke_agent_harness",
+            "create_pending_proposal",
+            "get_pending_proposal",
+            "approve_pending_proposal",
+            "reject_pending_proposal",
             "create_pod",
             "create_private_pod_with_package",
             "join_pod",
@@ -94,10 +98,48 @@ impl McpToolRouter {
                 self.tools.revoke_agent_harness(&self.ctx, id)?;
                 Ok(json!({"revoked": id}))
             }
+            "create_pending_proposal" => {
+                let request = serde_json::from_value(call.arguments)?;
+                Ok(json!(self.tools.create_pending_proposal_from_request(
+                    &self.ctx,
+                    request,
+                    chrono::Utc::now(),
+                )?))
+            }
+            "get_pending_proposal" => {
+                let id = arg_string(&call.arguments, "proposal_id")?.parse()?;
+                Ok(json!(self.tools.pending_proposal(
+                    &self.ctx,
+                    id,
+                    chrono::Utc::now(),
+                )?))
+            }
+            "approve_pending_proposal" => {
+                let id = arg_string(&call.arguments, "proposal_id")?.parse()?;
+                Ok(json!(self.tools.approve_pending_proposal(
+                    &self.ctx,
+                    id,
+                    chrono::Utc::now(),
+                )?))
+            }
+            "reject_pending_proposal" => {
+                let id = arg_string(&call.arguments, "proposal_id")?.parse()?;
+                let reason = arg_string(&call.arguments, "reason")?;
+                Ok(json!(self.tools.reject_pending_proposal(
+                    &self.ctx,
+                    id,
+                    chrono::Utc::now(),
+                    reason,
+                )?))
+            }
             "list_pods" => Ok(json!(self.tools.list_pods_for_harness(&self.ctx)?)),
             "create_pod" => {
                 let request: CreatePodRequest = serde_json::from_value(call.arguments)?;
-                Ok(json!(self.tools.create_pod(&self.ctx, request)?))
+                Ok(json!(self.tools.request_create_pod(
+                    &self.ctx,
+                    request,
+                    chrono::Utc::now(),
+                )?))
             }
             "create_private_pod_with_package" => {
                 let request: CreatePrivatePodWithPackageRequest =
@@ -305,6 +347,18 @@ impl McpToolRouter {
                     .validate_pod_skill_pack(&self.ctx, &pod_slug)?))
             }
             "get_node_info" => Ok(json!(self.tools.node_info(&self.ctx)?)),
+            "add_trusted_peer" => {
+                let display_name = arg_string(&call.arguments, "display_name")?;
+                let base_url = arg_string(&call.arguments, "base_url")?;
+                let public_key = arg_string(&call.arguments, "public_key")?;
+                Ok(json!(self.tools.request_add_trusted_peer(
+                    &self.ctx,
+                    display_name,
+                    base_url,
+                    public_key,
+                    chrono::Utc::now(),
+                )?))
+            }
             "export_pod_events" | "verify_pod_events" => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
                 Ok(json!(self.tools.export_pod_events(&self.ctx, &pod_slug)?))
@@ -316,8 +370,7 @@ impl McpToolRouter {
             | "sync_peer"
             | "sync_pod_with_peer"
             | "import_pod_events"
-            | "list_trusted_peers"
-            | "add_trusted_peer" => Ok(
+            | "list_trusted_peers" => Ok(
                 json!({"status":"adapter_boundary","tool": call.tool, "note":"Tool name is reserved and routed through AgentTools-compatible boundaries in the MVP."}),
             ),
             unknown => Err(anyhow::anyhow!("unknown MCP tool {unknown}")),

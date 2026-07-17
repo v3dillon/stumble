@@ -55,6 +55,7 @@ pub enum AgentToolsError {
 }
 
 const MAX_DISCOVERY_TASK_ATTEMPTS: usize = 3;
+const DEFAULT_PENDING_PROPOSAL_SECONDS: u64 = 3_600;
 
 #[derive(Clone)]
 pub struct AgentTools {
@@ -570,11 +571,31 @@ impl AgentTools {
         }
         let capabilities = normalize_capabilities(request.capabilities);
         if request.kind == AgentHarnessKind::Unattended
-            && capabilities.contains(&HarnessCapability::Administration)
+            && capabilities.iter().any(|capability| {
+                matches!(
+                    capability,
+                    HarnessCapability::Administration | HarnessCapability::Approval
+                )
+            })
         {
             return Err(AgentToolsError::Forbidden {
-                reason: "unattended harnesses cannot receive administration".to_string(),
+                reason: "unattended harnesses cannot receive administration or approval"
+                    .to_string(),
             });
+        }
+        if ctx.harness_id.is_none()
+            && capabilities.len() > 1
+            && capabilities.iter().any(|capability| {
+                matches!(
+                    capability,
+                    HarnessCapability::Administration | HarnessCapability::Approval
+                )
+            })
+        {
+            return Err(StoreError::Validation(
+                "bootstrap administration and approval grants must be isolated".to_string(),
+            )
+            .into());
         }
         if let Some(caller) = harness_for_context(&store, ctx)? {
             if request.kind == AgentHarnessKind::Interactive
@@ -709,6 +730,461 @@ impl AgentTools {
             .read()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         authorize_harness(&store, ctx, capability, None)
+    }
+
+    /// Creates an expiring proposal without applying its sensitive change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the caller is not an authenticated harness, lacks
+    /// authority for the affected resource, supplies an invalid expiry, or
+    /// persistence fails.
+    pub fn create_pending_proposal(
+        &self,
+        ctx: &AuthContext,
+        requested_change: SensitiveChange,
+        now: chrono::DateTime<Utc>,
+        expires_at: chrono::DateTime<Utc>,
+    ) -> Result<PendingProposal, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let proposer = ctx.harness_id.ok_or_else(|| AgentToolsError::Forbidden {
+            reason: "Pending Proposals require an authenticated Agent Harness".to_string(),
+        })?;
+        let proposer_harness =
+            harness_for_context(&store, ctx)?.ok_or_else(|| AgentToolsError::Forbidden {
+                reason: "Pending Proposals require an authenticated Agent Harness".to_string(),
+            })?;
+        let proposer_user_id = proposer_harness.user_id;
+        let proposer_tenant_id = proposer_harness.tenant_id;
+        if expires_at <= now || expires_at > now + Duration::days(7) {
+            return Err(StoreError::Validation(
+                "Pending Proposal expiry must be within seven days".to_string(),
+            )
+            .into());
+        }
+        let (affected_resources, expected_consequences, structured_diff) = match &requested_change {
+            SensitiveChange::CreatePublicPod { request } => {
+                authorize_harness_for_new_pod(&store, ctx, HarnessCapability::PodCuration)?;
+                if request.visibility != Visibility::Public {
+                    return Err(StoreError::Validation(
+                        "CreatePublicPod requires public visibility".to_string(),
+                    )
+                    .into());
+                }
+                if store
+                    .pods
+                    .values()
+                    .any(|pod| pod.slug == request.slug && pod.tenant_id == ctx.tenant_id)
+                {
+                    return Err(StoreError::Duplicate(format!("pod {}", request.slug)).into());
+                }
+                let resource = ProposalResource::PodSlug(request.slug.clone());
+                (
+                    vec![resource.clone()],
+                    vec!["A new Pod and its signed Package become immediately available through federation and Explore surfaces.".to_string()],
+                    vec![ProposalResourceDiff {
+                        resource,
+                        before: serde_json::Value::Null,
+                        after: json!(request),
+                    }],
+                )
+            }
+            SensitiveChange::PublishPod { pod_id } => {
+                authorize_harness(&store, ctx, HarnessCapability::PodCuration, Some(*pod_id))?;
+                let pod = store
+                    .pods
+                    .get(pod_id)
+                    .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+                store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+                if pod.visibility == Visibility::Public {
+                    return Err(StoreError::Validation("Pod is already public".to_string()).into());
+                }
+                let resource = ProposalResource::Pod(*pod_id);
+                (
+                    vec![resource.clone()],
+                    vec!["The Pod and its signed public events become available through federation and Explore surfaces.".to_string()],
+                    vec![ProposalResourceDiff {
+                        resource,
+                        before: json!({"visibility": pod.visibility}),
+                        after: json!({"visibility": Visibility::Public}),
+                    }],
+                )
+            }
+            SensitiveChange::ExpandHarnessGrant {
+                harness_id,
+                capabilities,
+                pod_ids,
+            } => {
+                authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+                let target = store
+                    .agent_harnesses
+                    .get(harness_id)
+                    .ok_or_else(|| StoreError::NotFound(format!("Agent Harness {harness_id}")))?;
+                store.assert_tenant(target.tenant_id, ctx.tenant_id)?;
+                for pod_id in pod_ids.iter().flatten() {
+                    let pod = store
+                        .pods
+                        .get(pod_id)
+                        .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+                    store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+                }
+                let normalized_capabilities = normalize_capabilities(capabilities.clone());
+                if target
+                    .grant
+                    .capabilities
+                    .iter()
+                    .any(|capability| !normalized_capabilities.contains(capability))
+                    || !grant_scope_expands(&target.grant.pod_ids, pod_ids)
+                {
+                    return Err(StoreError::Validation(
+                        "sensitive grant change must only expand authority".to_string(),
+                    )
+                    .into());
+                }
+                if target.kind == AgentHarnessKind::Unattended
+                    && normalized_capabilities.iter().any(|capability| {
+                        matches!(
+                            capability,
+                            HarnessCapability::Administration | HarnessCapability::Approval
+                        )
+                    })
+                {
+                    return Err(AgentToolsError::Forbidden {
+                        reason: "unattended harnesses cannot receive administration or approval"
+                            .to_string(),
+                    });
+                }
+                let resource = ProposalResource::AgentHarness(*harness_id);
+                (
+                    vec![resource.clone()],
+                    vec![
+                        "The Harness Grant gains additional authority for future requests."
+                            .to_string(),
+                    ],
+                    vec![ProposalResourceDiff {
+                        resource,
+                        before: json!(target.grant),
+                        after: json!(HarnessGrant {
+                            capabilities: normalized_capabilities,
+                            pod_ids: pod_ids.clone().map(normalize_pod_ids),
+                        }),
+                    }],
+                )
+            }
+            SensitiveChange::AddTrustedPeer {
+                display_name,
+                base_url,
+                public_key,
+            } => {
+                authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+                if display_name.trim().is_empty()
+                    || public_key.trim().is_empty()
+                    || Url::parse(base_url).is_err()
+                {
+                    return Err(StoreError::Validation(
+                        "trusted peer name, URL, and public key must be valid".to_string(),
+                    )
+                    .into());
+                }
+                if store
+                    .trusted_peers
+                    .values()
+                    .any(|peer| peer.tenant_id == ctx.tenant_id && peer.base_url == *base_url)
+                {
+                    return Err(StoreError::Duplicate(format!("trusted peer {base_url}")).into());
+                }
+                let resource = ProposalResource::TrustedPeerUrl(base_url.clone());
+                (
+                    vec![resource.clone()],
+                    vec!["The Home Node will trust signed public data from this peer.".to_string()],
+                    vec![ProposalResourceDiff {
+                        resource,
+                        before: serde_json::Value::Null,
+                        after: json!({
+                            "display_name": display_name,
+                            "base_url": base_url,
+                            "public_key": public_key,
+                            "trust_level": TrustLevel::ReadOnly,
+                            "enabled": true,
+                        }),
+                    }],
+                )
+            }
+            SensitiveChange::RevisePublicPodPackage {
+                pod_id,
+                base_version,
+                patch,
+            } => {
+                authorize_harness(
+                    &store,
+                    ctx,
+                    HarnessCapability::PackageManagement,
+                    Some(*pod_id),
+                )?;
+                let pod = store
+                    .pods
+                    .get(pod_id)
+                    .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+                store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+                if pod.visibility != Visibility::Public {
+                    return Err(StoreError::Validation(
+                        "this proposal type requires a public Pod".to_string(),
+                    )
+                    .into());
+                }
+                ensure_direct_package_revision_allowed_for_origin(&store, ctx, pod)?;
+                let existing = store
+                    .pod_skill_packs
+                    .get(pod_id)
+                    .ok_or_else(|| StoreError::NotFound("skill pack".to_string()))?;
+                if PackageVersion::new(existing.version)
+                    .map_err(|error| StoreError::Validation(error.to_string()))?
+                    != *base_version
+                {
+                    return Err(StoreError::Validation(
+                        "public Package Revision base version is stale".to_string(),
+                    )
+                    .into());
+                }
+                let prospective = patch_skill_pack(existing, patch.clone());
+                let validation = validate_skill_pack(&prospective);
+                if !validation.valid {
+                    return Err(StoreError::Validation(validation.errors.join(", ")).into());
+                }
+                let pod_resource = ProposalResource::Pod(*pod_id);
+                let package_resource = ProposalResource::PodPackage(*pod_id);
+                (
+                    vec![pod_resource, package_resource.clone()],
+                    vec![
+                        "The signed public Pod Package changes for current and future subscribers."
+                            .to_string(),
+                    ],
+                    vec![ProposalResourceDiff {
+                        resource: package_resource,
+                        before: json!(existing),
+                        after: json!(prospective),
+                    }],
+                )
+            }
+            SensitiveChange::RemovePublicSubmissionFromPod {
+                pod_id,
+                submission_id,
+            } => {
+                authorize_harness(&store, ctx, HarnessCapability::PodCuration, Some(*pod_id))?;
+                let pod = store
+                    .pods
+                    .get(pod_id)
+                    .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+                store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+                if pod.visibility != Visibility::Public {
+                    return Err(StoreError::Validation(
+                        "this proposal type requires a public Pod".to_string(),
+                    )
+                    .into());
+                }
+                if !store.submission_pods.iter().any(|placement| {
+                    placement.pod_id == *pod_id && placement.submission_id == *submission_id
+                }) {
+                    return Err(StoreError::NotFound(format!(
+                        "submission {submission_id} in pod {}",
+                        pod.slug
+                    ))
+                    .into());
+                }
+                let resource = ProposalResource::SubmissionPlacement {
+                    pod_id: *pod_id,
+                    submission_id: *submission_id,
+                };
+                (
+                    vec![resource.clone()],
+                    vec!["The public Pod Placement is withdrawn from future federation and discovery.".to_string()],
+                    vec![ProposalResourceDiff {
+                        resource,
+                        before: json!({"accepted": true}),
+                        after: json!({"accepted": false}),
+                    }],
+                )
+            }
+        };
+        let proposal = PendingProposal {
+            id: PendingProposalId::from(Uuid::now_v7()),
+            requested_change,
+            affected_resources,
+            expected_consequences,
+            structured_diff,
+            proposer,
+            user_id: proposer_user_id,
+            tenant_id: proposer_tenant_id,
+            created_at: now,
+            expires_at,
+            status: ProposalStatus::Pending,
+            decided_by: None,
+            decided_at: None,
+            rejection_reason: None,
+        };
+        store
+            .pending_proposals
+            .insert(proposal.id, proposal.clone());
+        self.persist_locked(&mut store)?;
+        Ok(proposal)
+    }
+
+    /// Creates a proposal from the transport-neutral relative-expiry request.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::create_pending_proposal`] and rejects
+    /// durations that cannot be represented safely.
+    pub fn create_pending_proposal_from_request(
+        &self,
+        ctx: &AuthContext,
+        request: CreatePendingProposalRequest,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PendingProposal, AgentToolsError> {
+        let seconds = i64::try_from(request.expires_in_seconds).map_err(|_| {
+            StoreError::Validation("Pending Proposal expiry is too large".to_string())
+        })?;
+        self.create_pending_proposal(
+            ctx,
+            request.requested_change,
+            now,
+            now + Duration::seconds(seconds),
+        )
+    }
+
+    /// Returns one proposal and records expiry when it is first observed late.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the proposal is missing, the caller is neither a
+    /// local owner nor an authorized participant, or persistence fails.
+    pub fn pending_proposal(
+        &self,
+        ctx: &AuthContext,
+        proposal_id: PendingProposalId,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PendingProposal, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_proposal_reader(&store, ctx, proposal_id)?;
+        expire_proposal(&mut store, proposal_id, now)?;
+        let proposal = store
+            .pending_proposals
+            .get(&proposal_id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(format!("Pending Proposal {proposal_id}")))?;
+        self.persist_locked(&mut store)?;
+        Ok(proposal)
+    }
+
+    /// Independently approves and atomically applies a live proposal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when approval authority or independence is missing,
+    /// the proposal is expired or terminal, the change is no longer valid, or
+    /// persistence fails.
+    pub fn approve_pending_proposal(
+        &self,
+        ctx: &AuthContext,
+        proposal_id: PendingProposalId,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PendingProposal, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let approver = authorize_independent_approver(&store, ctx, proposal_id)?;
+        expire_proposal(&mut store, proposal_id, now)?;
+        let proposal_status = store
+            .pending_proposals
+            .get(&proposal_id)
+            .ok_or_else(|| StoreError::NotFound(format!("Pending Proposal {proposal_id}")))?
+            .status;
+        if proposal_status != ProposalStatus::Pending {
+            self.persist_locked(&mut store)?;
+            return Err(StoreError::Validation("Pending Proposal is terminal".to_string()).into());
+        }
+        let proposal_snapshot = store
+            .pending_proposals
+            .get(&proposal_id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(format!("Pending Proposal {proposal_id}")))?;
+        validate_structured_diff(&store, &proposal_snapshot)?;
+        let requested_change = proposal_snapshot.requested_change;
+        let proposer = proposal_snapshot.proposer;
+        let before_approval = store.clone();
+        if let Err(error) = apply_sensitive_change(&mut store, ctx, proposer, &requested_change) {
+            *store = before_approval;
+            return Err(error);
+        }
+        let proposal = store
+            .pending_proposals
+            .get_mut(&proposal_id)
+            .ok_or_else(|| StoreError::NotFound(format!("Pending Proposal {proposal_id}")))?;
+        proposal.status = ProposalStatus::Accepted;
+        proposal.decided_by = Some(approver);
+        proposal.decided_at = Some(now);
+        let proposal = proposal.clone();
+        if let Err(error) = self.persist_locked(&mut store) {
+            if matches!(self.persistence, Some(Persistence::Json(_))) {
+                *store = before_approval;
+            }
+            return Err(error);
+        }
+        Ok(proposal)
+    }
+
+    /// Independently rejects a live proposal without applying its change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when approval authority or independence is missing,
+    /// the reason is empty, the proposal is expired or terminal, or
+    /// persistence fails.
+    pub fn reject_pending_proposal(
+        &self,
+        ctx: &AuthContext,
+        proposal_id: PendingProposalId,
+        now: chrono::DateTime<Utc>,
+        reason: String,
+    ) -> Result<PendingProposal, AgentToolsError> {
+        if reason.trim().is_empty() {
+            return Err(
+                StoreError::Validation("rejection reason must not be empty".to_string()).into(),
+            );
+        }
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let approver = authorize_independent_approver(&store, ctx, proposal_id)?;
+        expire_proposal(&mut store, proposal_id, now)?;
+        let proposal_status = store
+            .pending_proposals
+            .get(&proposal_id)
+            .ok_or_else(|| StoreError::NotFound(format!("Pending Proposal {proposal_id}")))?
+            .status;
+        if proposal_status != ProposalStatus::Pending {
+            self.persist_locked(&mut store)?;
+            return Err(StoreError::Validation("Pending Proposal is terminal".to_string()).into());
+        }
+        let proposal = store
+            .pending_proposals
+            .get_mut(&proposal_id)
+            .ok_or_else(|| StoreError::NotFound(format!("Pending Proposal {proposal_id}")))?;
+        proposal.status = ProposalStatus::Rejected;
+        proposal.decided_by = Some(approver);
+        proposal.decided_at = Some(now);
+        proposal.rejection_reason = Some(reason);
+        let proposal = proposal.clone();
+        self.persist_locked(&mut store)?;
+        Ok(proposal)
     }
 
     /// Creates one idempotent task for every scheduled Source Rule due in the current period.
@@ -1116,7 +1592,57 @@ impl AgentTools {
         Ok(result)
     }
 
+    /// Routes Pod creation through the sensitive-change policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when private creation or public proposal authorization,
+    /// validation, signing, or persistence fails.
+    pub fn request_create_pod(
+        &self,
+        ctx: &AuthContext,
+        request: CreatePodRequest,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<CreatePodOutcome, AgentToolsError> {
+        if request.visibility == Visibility::Public {
+            return self
+                .create_pending_proposal_from_request(
+                    ctx,
+                    CreatePendingProposalRequest {
+                        requested_change: SensitiveChange::CreatePublicPod { request },
+                        expires_in_seconds: DEFAULT_PENDING_PROPOSAL_SECONDS,
+                    },
+                    now,
+                )
+                .map(|proposal| CreatePodOutcome::PendingApproval(Box::new(proposal)));
+        }
+        self.create_pod(ctx, request).map(CreatePodOutcome::Created)
+    }
+
     pub fn create_pod(
+        &self,
+        ctx: &AuthContext,
+        request: CreatePodRequest,
+    ) -> Result<Pod, AgentToolsError> {
+        if request.visibility == Visibility::Public {
+            return Err(StoreError::Validation(
+                "public exposure requires a Pending Proposal".to_string(),
+            )
+            .into());
+        }
+        self.create_pod_immediately(ctx, request)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn create_pod_for_test(
+        &self,
+        ctx: &AuthContext,
+        request: CreatePodRequest,
+    ) -> Result<Pod, AgentToolsError> {
+        self.create_pod_immediately(ctx, request)
+    }
+
+    fn create_pod_immediately(
         &self,
         ctx: &AuthContext,
         request: CreatePodRequest,
@@ -1563,6 +2089,40 @@ impl AgentTools {
         pod_slug: &str,
         submission_id: SubmissionId,
     ) -> Result<bool, AgentToolsError> {
+        let store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+        authorize_harness(&store, ctx, HarnessCapability::PodCuration, Some(pod.id))?;
+        if pod.visibility == Visibility::Public {
+            return Err(StoreError::Validation(
+                "public-content removal requires a Pending Proposal".to_string(),
+            )
+            .into());
+        }
+
+        drop(store);
+        self.remove_submission_from_pod_immediately(ctx, pod_slug, submission_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remove_submission_from_pod_for_test(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+        submission_id: SubmissionId,
+    ) -> Result<bool, AgentToolsError> {
+        self.remove_submission_from_pod_immediately(ctx, pod_slug, submission_id)
+    }
+
+    fn remove_submission_from_pod_immediately(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+        submission_id: SubmissionId,
+    ) -> Result<bool, AgentToolsError> {
         let mut store = self
             .store
             .write()
@@ -1618,6 +2178,39 @@ impl AgentTools {
         );
         self.persist_locked(&mut store)?;
         Ok(purged)
+    }
+
+    /// Routes Pod Placement removal through the sensitive-change policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Pod or placement is missing, authorization is
+    /// denied, proposal validation fails, or persistence fails.
+    pub fn request_remove_submission_from_pod(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+        submission_id: SubmissionId,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<RemoveSubmissionOutcome, AgentToolsError> {
+        let pod = self.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        if pod.visibility == Visibility::Public {
+            return self
+                .create_pending_proposal_from_request(
+                    ctx,
+                    CreatePendingProposalRequest {
+                        requested_change: SensitiveChange::RemovePublicSubmissionFromPod {
+                            pod_id: pod.id,
+                            submission_id,
+                        },
+                        expires_in_seconds: DEFAULT_PENDING_PROPOSAL_SECONDS,
+                    },
+                    now,
+                )
+                .map(|proposal| RemoveSubmissionOutcome::PendingApproval(Box::new(proposal)));
+        }
+        self.remove_submission_from_pod(ctx, pod_slug, submission_id)
+            .map(|submission_purged| RemoveSubmissionOutcome::Removed { submission_purged })
     }
 
     pub fn add_submission_asset(
@@ -2461,38 +3054,31 @@ impl AgentTools {
         })
     }
 
-    /// Adds a trusted peer under node administration authority.
+    /// Requests a Trust Policy addition without applying it immediately.
     ///
     /// # Errors
     ///
-    /// Returns an error when administration is denied, the store lock is
-    /// poisoned, or persistence fails.
-    pub fn add_trusted_peer(
+    /// Returns an error when proposal authorization, validation, or persistence fails.
+    pub fn request_add_trusted_peer(
         &self,
         ctx: &AuthContext,
         display_name: String,
         base_url: String,
         public_key: String,
-    ) -> Result<TrustedPeer, AgentToolsError> {
-        let mut store = self
-            .store
-            .write()
-            .map_err(|_| AgentToolsError::LockPoisoned)?;
-        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
-        let peer = TrustedPeer {
-            id: Uuid::now_v7(),
-            tenant_id: ctx.tenant_id,
-            display_name,
-            base_url,
-            public_key,
-            trust_level: TrustLevel::ReadOnly,
-            enabled: true,
-            created_at: Utc::now(),
-        };
-        store.trusted_peers.insert(peer.id, peer.clone());
-        record_harness_write(&mut store, ctx, HarnessWriteOperation::AddTrustedPeer, None);
-        self.persist_locked(&mut store)?;
-        Ok(peer)
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PendingProposal, AgentToolsError> {
+        self.create_pending_proposal_from_request(
+            ctx,
+            CreatePendingProposalRequest {
+                requested_change: SensitiveChange::AddTrustedPeer {
+                    display_name,
+                    base_url,
+                    public_key,
+                },
+                expires_in_seconds: DEFAULT_PENDING_PROPOSAL_SECONDS,
+            },
+            now,
+        )
     }
 
     pub fn well_known_node(
@@ -3895,6 +4481,21 @@ fn ensure_direct_package_revision_allowed(
     ctx: &AuthContext,
     pod: &Pod,
 ) -> Result<(), AgentToolsError> {
+    ensure_direct_package_revision_allowed_for_origin(store, ctx, pod)?;
+    if pod.visibility == Visibility::Public {
+        return Err(StoreError::Validation(
+            "public Package Revisions require Pending Proposal approval".to_string(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn ensure_direct_package_revision_allowed_for_origin(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    pod: &Pod,
+) -> Result<(), AgentToolsError> {
     let local_node = store.node_for_tenant(ctx.tenant_id)?;
     if pod
         .origin_node_id
@@ -3902,12 +4503,6 @@ fn ensure_direct_package_revision_allowed(
     {
         return Err(StoreError::Validation(
             "remote Pod Packages may change only through verified synchronization".to_string(),
-        )
-        .into());
-    }
-    if pod.visibility == Visibility::Public {
-        return Err(StoreError::Validation(
-            "public Package Revisions require Pending Proposal approval".to_string(),
         )
         .into());
     }
@@ -3927,6 +4522,386 @@ fn normalize_capabilities(mut capabilities: Vec<HarnessCapability>) -> Vec<Harne
     capabilities.sort();
     capabilities.dedup();
     capabilities
+}
+
+fn authorize_proposal_reader(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    proposal_id: PendingProposalId,
+) -> Result<(), AgentToolsError> {
+    let proposal = store
+        .pending_proposals
+        .get(&proposal_id)
+        .ok_or_else(|| StoreError::NotFound(format!("Pending Proposal {proposal_id}")))?;
+    let Some(harness) = harness_for_context(store, ctx)? else {
+        if ctx.tenant_id == proposal.tenant_id {
+            return Ok(());
+        }
+        return Err(AgentToolsError::Forbidden {
+            reason: "Pending Proposal belongs to another tenant".to_string(),
+        });
+    };
+    if harness.tenant_id == proposal.tenant_id
+        && harness.user_id == proposal.user_id
+        && (harness.id == proposal.proposer
+            || (harness
+                .grant
+                .capabilities
+                .contains(&HarnessCapability::Approval)
+                && approval_scope_allows(harness, proposal)))
+    {
+        return Ok(());
+    }
+    Err(AgentToolsError::Forbidden {
+        reason: "harness cannot inspect this Pending Proposal".to_string(),
+    })
+}
+
+fn authorize_independent_approver(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    proposal_id: PendingProposalId,
+) -> Result<AgentHarnessId, AgentToolsError> {
+    authorize_harness(store, ctx, HarnessCapability::Approval, None)?;
+    let harness = harness_for_context(store, ctx)?.ok_or_else(|| AgentToolsError::Forbidden {
+        reason: "approval requires an authenticated Agent Harness".to_string(),
+    })?;
+    if harness.kind != AgentHarnessKind::Interactive {
+        return Err(AgentToolsError::Forbidden {
+            reason: "approval requires an interactive Agent Harness".to_string(),
+        });
+    }
+    let proposal = store
+        .pending_proposals
+        .get(&proposal_id)
+        .ok_or_else(|| StoreError::NotFound(format!("Pending Proposal {proposal_id}")))?;
+    if harness.tenant_id != proposal.tenant_id || harness.user_id != proposal.user_id {
+        return Err(AgentToolsError::Forbidden {
+            reason: "approval must belong to the proposal User and tenant".to_string(),
+        });
+    }
+    if !approval_scope_allows(harness, proposal) {
+        return Err(AgentToolsError::Forbidden {
+            reason: "approval Harness Grant does not cover the affected resources".to_string(),
+        });
+    }
+    if proposal.proposer == harness.id {
+        return Err(AgentToolsError::Forbidden {
+            reason: "a harness cannot approve its own Pending Proposal".to_string(),
+        });
+    }
+    Ok(harness.id)
+}
+
+fn approval_scope_allows(harness: &AgentHarness, proposal: &PendingProposal) -> bool {
+    proposal
+        .affected_resources
+        .iter()
+        .all(|resource| match resource {
+            ProposalResource::Pod(pod_id)
+            | ProposalResource::PodPackage(pod_id)
+            | ProposalResource::SubmissionPlacement { pod_id, .. } => harness
+                .grant
+                .pod_ids
+                .as_ref()
+                .is_none_or(|pod_ids| pod_ids.contains(pod_id)),
+            ProposalResource::PodSlug(_)
+            | ProposalResource::AgentHarness(_)
+            | ProposalResource::TrustedPeerUrl(_) => harness.grant.pod_ids.is_none(),
+        })
+}
+
+fn expire_proposal(
+    store: &mut InMemoryStore,
+    proposal_id: PendingProposalId,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), AgentToolsError> {
+    let proposal = store
+        .pending_proposals
+        .get_mut(&proposal_id)
+        .ok_or_else(|| StoreError::NotFound(format!("Pending Proposal {proposal_id}")))?;
+    if proposal.status == ProposalStatus::Pending && now >= proposal.expires_at {
+        proposal.status = ProposalStatus::Expired;
+        proposal.decided_at = Some(now);
+    }
+    Ok(())
+}
+
+fn validate_structured_diff(
+    store: &InMemoryStore,
+    proposal: &PendingProposal,
+) -> Result<(), AgentToolsError> {
+    for difference in &proposal.structured_diff {
+        let current = match &difference.resource {
+            ProposalResource::Pod(pod_id) => store.pods.get(pod_id).map_or(
+                serde_json::Value::Null,
+                |pod| json!({"visibility": pod.visibility}),
+            ),
+            ProposalResource::PodSlug(slug) => store
+                .pods
+                .values()
+                .find(|pod| pod.tenant_id == proposal.tenant_id && pod.slug == *slug)
+                .map_or(serde_json::Value::Null, |pod| json!(pod)),
+            ProposalResource::AgentHarness(harness_id) => store
+                .agent_harnesses
+                .get(harness_id)
+                .map_or(serde_json::Value::Null, |harness| json!(harness.grant)),
+            ProposalResource::TrustedPeerUrl(base_url) => store
+                .trusted_peers
+                .values()
+                .find(|peer| peer.tenant_id == proposal.tenant_id && peer.base_url == *base_url)
+                .map_or(serde_json::Value::Null, |peer| json!(peer)),
+            ProposalResource::PodPackage(pod_id) => store
+                .pod_skill_packs
+                .get(pod_id)
+                .map_or(serde_json::Value::Null, |package| json!(package)),
+            ProposalResource::SubmissionPlacement {
+                pod_id,
+                submission_id,
+            } => json!({
+                "accepted": store.submission_pods.iter().any(|placement| {
+                    placement.pod_id == *pod_id && placement.submission_id == *submission_id
+                })
+            }),
+        };
+        if current != difference.before {
+            return Err(StoreError::Validation(
+                "proposal structured diff is stale; create a new Pending Proposal".to_string(),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn apply_sensitive_change(
+    store: &mut InMemoryStore,
+    ctx: &AuthContext,
+    proposer: AgentHarnessId,
+    requested_change: &SensitiveChange,
+) -> Result<(), AgentToolsError> {
+    match requested_change {
+        SensitiveChange::CreatePublicPod { request } => {
+            if store
+                .pods
+                .values()
+                .any(|pod| pod.slug == request.slug && pod.tenant_id == ctx.tenant_id)
+            {
+                return Err(StoreError::Duplicate(format!("pod {}", request.slug)).into());
+            }
+            let node = store.node_for_tenant(ctx.tenant_id)?;
+            let created_by = store
+                .agent_harnesses
+                .get(&proposer)
+                .map(|harness| harness.user_id);
+            let pod = Pod {
+                id: Uuid::now_v7(),
+                tenant_id: ctx.tenant_id,
+                name: request.name.clone(),
+                slug: request.slug.clone(),
+                description: request.description.clone(),
+                visibility: Visibility::Public,
+                created_by,
+                created_at: Utc::now(),
+                origin_node_id: Some(node.id),
+            };
+            store.pods.insert(pod.id, pod.clone());
+            store.pod_rules.insert(
+                pod.id,
+                PodRules {
+                    pod_id: pod.id,
+                    blocked_topics: vec![],
+                    blocked_domains: vec![],
+                    auto_promote_crawler_candidates: false,
+                    federate_sources: true,
+                },
+            );
+            let mut package = default_skill_pack(&pod);
+            package.proposer_harness_id = Some(proposer);
+            store.insert_pod_package_version(package.clone())?;
+            store.pod_skill_packs.insert(pod.id, package.clone());
+            if let Some(user_id) = created_by {
+                store.pod_memberships.push(PodMembership {
+                    user_id,
+                    pod_id: pod.id,
+                    role: PodRole::Owner,
+                    created_at: Utc::now(),
+                });
+            }
+            let event = sign_public_event(
+                &node,
+                "pod_created",
+                &pod.slug,
+                json!({"pod": pod, "package": package}),
+                store.latest_event_hash(&pod.slug),
+            )?;
+            store.event_log.push(event);
+        }
+        SensitiveChange::PublishPod { pod_id } => {
+            let tenant_id = store
+                .pods
+                .get(pod_id)
+                .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?
+                .tenant_id;
+            store.assert_tenant(tenant_id, ctx.tenant_id)?;
+            let pod = store
+                .pods
+                .get_mut(pod_id)
+                .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+            if pod.visibility == Visibility::Public {
+                return Err(StoreError::Validation("Pod is already public".to_string()).into());
+            }
+            pod.visibility = Visibility::Public;
+            let pod = pod.clone();
+            if let Some(rules) = store.pod_rules.get_mut(pod_id) {
+                rules.federate_sources = true;
+            }
+            let node = store.node_for_tenant(ctx.tenant_id)?;
+            let event = sign_public_event(
+                &node,
+                "pod_published",
+                &pod.slug,
+                json!({"pod": pod}),
+                store.latest_event_hash(&pod.slug),
+            )?;
+            store.event_log.push(event);
+        }
+        SensitiveChange::ExpandHarnessGrant {
+            harness_id,
+            capabilities,
+            pod_ids,
+        } => {
+            let target = store
+                .agent_harnesses
+                .get_mut(harness_id)
+                .ok_or_else(|| StoreError::NotFound(format!("Agent Harness {harness_id}")))?;
+            if target.tenant_id != ctx.tenant_id {
+                return Err(StoreError::TenantBoundary.into());
+            }
+            let requested_capabilities = normalize_capabilities(capabilities.clone());
+            if target
+                .grant
+                .capabilities
+                .iter()
+                .any(|capability| !requested_capabilities.contains(capability))
+                || !grant_scope_expands(&target.grant.pod_ids, pod_ids)
+            {
+                return Err(StoreError::Validation(
+                    "Harness Grant changed after proposal creation".to_string(),
+                )
+                .into());
+            }
+            target.grant.capabilities = requested_capabilities;
+            target.grant.pod_ids = pod_ids.clone().map(normalize_pod_ids);
+        }
+        SensitiveChange::AddTrustedPeer {
+            display_name,
+            base_url,
+            public_key,
+        } => {
+            if store
+                .trusted_peers
+                .values()
+                .any(|peer| peer.tenant_id == ctx.tenant_id && peer.base_url == *base_url)
+            {
+                return Err(StoreError::Duplicate(format!("trusted peer {base_url}")).into());
+            }
+            let peer = TrustedPeer {
+                id: Uuid::now_v7(),
+                tenant_id: ctx.tenant_id,
+                display_name: display_name.clone(),
+                base_url: base_url.clone(),
+                public_key: public_key.clone(),
+                trust_level: TrustLevel::ReadOnly,
+                enabled: true,
+                created_at: Utc::now(),
+            };
+            store.trusted_peers.insert(peer.id, peer);
+        }
+        SensitiveChange::RevisePublicPodPackage {
+            pod_id,
+            base_version,
+            patch,
+        } => {
+            let pod = store
+                .pods
+                .get(pod_id)
+                .cloned()
+                .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+            let existing = store
+                .pod_skill_packs
+                .get(pod_id)
+                .ok_or_else(|| StoreError::NotFound("skill pack".to_string()))?;
+            if PackageVersion::new(existing.version)
+                .map_err(|error| StoreError::Validation(error.to_string()))?
+                != *base_version
+            {
+                return Err(StoreError::Validation(
+                    "public Package Revision base version is stale".to_string(),
+                )
+                .into());
+            }
+            let mut package = patch_skill_pack(existing, patch.clone());
+            let validation = validate_skill_pack(&package);
+            if !validation.valid {
+                return Err(StoreError::Validation(validation.errors.join(", ")).into());
+            }
+            let now = Utc::now();
+            package.created_at = now;
+            package.updated_at = now;
+            package.proposer_harness_id = Some(proposer);
+            let node = store.node_for_tenant(ctx.tenant_id)?;
+            let event = sign_public_event(
+                &node,
+                "pod_skill_pack_updated",
+                &pod.slug,
+                json!({"package": package}),
+                store.latest_event_hash(&pod.slug),
+            )?;
+            store.insert_pod_package_version(package.clone())?;
+            store.pod_skill_packs.insert(*pod_id, package);
+            store.event_log.push(event);
+        }
+        SensitiveChange::RemovePublicSubmissionFromPod {
+            pod_id,
+            submission_id,
+        } => {
+            let pod = store
+                .pods
+                .get(pod_id)
+                .cloned()
+                .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+            store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+            let before = store.submission_pods.len();
+            store.submission_pods.retain(|placement| {
+                !(placement.pod_id == *pod_id && placement.submission_id == *submission_id)
+            });
+            if store.submission_pods.len() == before {
+                return Err(StoreError::Validation(
+                    "public Pod Placement changed after proposal creation".to_string(),
+                )
+                .into());
+            }
+            let node = store.node_for_tenant(ctx.tenant_id)?;
+            let event = sign_public_event(
+                &node,
+                "link_removed",
+                &pod.slug,
+                json!({"submission_id": submission_id, "submission_purged": false}),
+                store.latest_event_hash(&pod.slug),
+            )?;
+            store.event_log.push(event);
+        }
+    }
+    Ok(())
+}
+
+fn grant_scope_expands(current: &Option<Vec<PodId>>, requested: &Option<Vec<PodId>>) -> bool {
+    match (current, requested) {
+        (None, None) | (Some(_), None) => true,
+        (Some(current), Some(requested)) => current.iter().all(|pod_id| requested.contains(pod_id)),
+        (None, Some(_)) => false,
+    }
 }
 
 fn ensure_child_pod_scope(

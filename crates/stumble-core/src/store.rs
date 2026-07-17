@@ -51,6 +51,7 @@ pub struct InMemoryStore {
     pub tenant_users: Vec<TenantUser>,
     pub api_tokens: HashMap<Uuid, ApiToken>,
     pub agent_harnesses: HashMap<AgentHarnessId, AgentHarness>,
+    pub pending_proposals: HashMap<PendingProposalId, PendingProposal>,
     pub harness_write_audit: Vec<HarnessWriteAudit>,
     pub discovery_tasks: HashMap<DiscoveryTaskId, DiscoveryTask>,
     pub candidates: HashMap<CandidateId, Candidate>,
@@ -88,6 +89,8 @@ struct PersistedStore {
     api_tokens: Vec<ApiToken>,
     #[serde(default)]
     agent_harnesses: Vec<AgentHarness>,
+    #[serde(default)]
+    pending_proposals: Vec<PendingProposal>,
     #[serde(default)]
     harness_write_audit: Vec<HarnessWriteAudit>,
     #[serde(default)]
@@ -142,6 +145,7 @@ impl From<&InMemoryStore> for PersistedStore {
             tenant_users: store.tenant_users.clone(),
             api_tokens: store.api_tokens.values().cloned().collect(),
             agent_harnesses: store.agent_harnesses.values().cloned().collect(),
+            pending_proposals: store.pending_proposals.values().cloned().collect(),
             harness_write_audit: store.harness_write_audit.clone(),
             discovery_tasks: store.discovery_tasks.values().cloned().collect(),
             candidates: store.candidates.values().cloned().collect(),
@@ -232,6 +236,11 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .agent_harnesses
                 .into_iter()
                 .map(|harness| (harness.id, harness))
+                .collect(),
+            pending_proposals: snapshot
+                .pending_proposals
+                .into_iter()
+                .map(|proposal| (proposal.id, proposal))
                 .collect(),
             harness_write_audit: snapshot.harness_write_audit,
             discovery_tasks: snapshot
@@ -378,6 +387,7 @@ const STORE_COLLECTIONS: &[&str] = &[
     "tenant_users",
     "api_tokens",
     "agent_harnesses",
+    "pending_proposals",
     "harness_write_audit",
     "discovery_tasks",
     "candidates",
