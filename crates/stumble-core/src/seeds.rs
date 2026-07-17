@@ -62,6 +62,7 @@ pub fn seed_store() -> InMemoryStore {
                 blocked_sources: vec![],
                 preferred_brief_length: 7,
                 preferred_discovery_mode: DiscoveryMode::DeepMatch,
+                recurrence_penalty_days: RecurrencePenaltyDays::default(),
             },
         );
         store.users.insert(user.id, user);

@@ -99,8 +99,8 @@ enum Command {
     Feed {
         #[arg(long, default_value = "7")]
         size: usize,
-        #[arg(long, default_value = "30")]
-        recurrence_penalty_days: RecurrencePenaltyDays,
+        #[arg(long)]
+        recurrence_penalty_days: Option<RecurrencePenaltyDays>,
     },
     CompleteFeed {
         id: uuid::Uuid,
@@ -113,6 +113,23 @@ enum Command {
         topic: Option<String>,
         #[arg(long)]
         reason: Option<String>,
+    },
+    TasteProfile,
+    UpdateTasteProfile {
+        #[arg(long, value_delimiter = ',')]
+        interests: Option<Vec<String>>,
+        #[arg(long, value_delimiter = ',')]
+        blocked_topics: Option<Vec<String>>,
+        #[arg(long, value_delimiter = ',')]
+        blocked_sources: Option<Vec<String>>,
+        #[arg(long)]
+        recurrence_penalty_days: Option<RecurrencePenaltyDays>,
+    },
+    ResetLearnedTaste {
+        #[arg(long, conflicts_with = "source")]
+        topic: Option<String>,
+        #[arg(long, conflicts_with = "topic")]
+        source: Option<String>,
     },
     BlockSource {
         source: String,
@@ -478,6 +495,30 @@ async fn main() -> anyhow::Result<()> {
                 reason,
                 chrono::Utc::now(),
             )?)?;
+        }
+        Command::TasteProfile => print_json(&tools.taste_profile(&ctx)?)?,
+        Command::UpdateTasteProfile {
+            interests,
+            blocked_topics,
+            blocked_sources,
+            recurrence_penalty_days,
+        } => {
+            let mut request = UpdateTasteProfileRequest::default();
+            request.interests = interests;
+            request.blocked_topics = blocked_topics;
+            request.blocked_sources = blocked_sources;
+            request.recurrence_penalty_days = recurrence_penalty_days;
+            print_json(&tools.update_taste_profile(&ctx, request)?)?;
+        }
+        Command::ResetLearnedTaste { topic, source } => {
+            let signal = topic
+                .map(LearnedTasteSignal::Topic)
+                .or_else(|| source.map(LearnedTasteSignal::Source));
+            let request = signal.map_or_else(
+                ResetLearnedTasteRequest::all,
+                ResetLearnedTasteRequest::for_signal,
+            );
+            print_json(&tools.reset_learned_taste(&ctx, request)?)?;
         }
         Command::BlockSource { source } => {
             tools.block_source(&ctx, source)?;

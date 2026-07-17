@@ -138,6 +138,11 @@ pub fn router_with_options(
         .route("/feed", get(get_feed_batch))
         .route("/feed/:id/complete", post(complete_feed_batch))
         .route("/feed/items/:id/feedback", post(record_feed_feedback))
+        .route(
+            "/taste-profile",
+            get(get_taste_profile).patch(update_taste_profile),
+        )
+        .route("/taste-profile/learned/reset", post(reset_learned_taste))
         .route("/links/:id/assets", get(link_assets))
         .route("/links/:id/save", post(save_link))
         .route("/links/:id/rate", post(rate_link))
@@ -237,6 +242,21 @@ fn route_docs() -> Vec<ApiRouteDoc> {
             method: "POST",
             path: "/feed/items/:id/feedback",
             description: "record a private explicit Feedback Signal for a Feed item",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/taste-profile",
+            description: "inspect the authenticated User's private Taste Profile",
+        },
+        ApiRouteDoc {
+            method: "PATCH",
+            path: "/taste-profile",
+            description: "edit explicit private Taste Profile preferences",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/taste-profile/learned/reset",
+            description: "reset one or all private learned Taste Profile weights",
         },
         ApiRouteDoc {
             method: "POST",
@@ -836,7 +856,7 @@ async fn get_feed_batch(
     let mut request = FeedBatchRequest::new(query.size.unwrap_or(7))
         .map_err(|error| AgentToolsError::Store(StoreError::Validation(error.to_string())))?;
     if let Some(days) = query.recurrence_penalty_days {
-        request.recurrence_penalty_days = days;
+        request.recurrence_penalty_days = Some(days);
     }
     Ok(Json(state.tools.get_feed_batch(
         &ctx,
@@ -880,6 +900,32 @@ async fn record_feed_feedback(
         body.reason,
         chrono::Utc::now(),
     )?))
+}
+
+async fn get_taste_profile(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<TasteProfile>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.taste_profile(&ctx)?))
+}
+
+async fn update_taste_profile(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateTasteProfileRequest>,
+) -> Result<Json<TasteProfile>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.update_taste_profile(&ctx, request)?))
+}
+
+async fn reset_learned_taste(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<ResetLearnedTasteRequest>,
+) -> Result<Json<TasteProfile>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.reset_learned_taste(&ctx, request)?))
 }
 
 async fn save_link(

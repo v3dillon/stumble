@@ -15,7 +15,7 @@ use crate::store::{
 use chrono::{Duration, Utc};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -111,8 +111,13 @@ impl AgentTools {
             return project_feed_batch_for_context(&store, ctx, batch);
         }
 
-        let recurrence_cutoff =
-            now - Duration::days(i64::from(request.recurrence_penalty_days.get()));
+        let preferences = store.user_preferences.get(&(user_id, ctx.tenant_id));
+        let recurrence_penalty_days = request.recurrence_penalty_days.unwrap_or_else(|| {
+            preferences.map_or_else(RecurrencePenaltyDays::default, |preferences| {
+                preferences.recurrence_penalty_days
+            })
+        });
+        let recurrence_cutoff = now - Duration::days(i64::from(recurrence_penalty_days.get()));
         let recently_delivered: HashSet<SubmissionId> = store
             .feed_batches
             .values()
@@ -128,7 +133,6 @@ impl AgentTools {
                     .map(|item| SubmissionId::from(item.content_reference.content_item_id))
             })
             .collect();
-        let preferences = store.user_preferences.get(&(user_id, ctx.tenant_id));
         let rejected: HashSet<SubmissionId> = store
             .feedback_events
             .iter()
@@ -222,7 +226,7 @@ impl AgentTools {
             harness_id: ctx.harness_id,
             tenant_id: ctx.tenant_id,
             requested_size: request.size,
-            recurrence_penalty_days: request.recurrence_penalty_days.get(),
+            recurrence_penalty_days: recurrence_penalty_days.get(),
             state,
             items,
             created_at: now,
@@ -313,6 +317,7 @@ impl AgentTools {
         let item = store
             .submissions
             .get(&submission_id)
+            .cloned()
             .ok_or_else(|| StoreError::NotFound("Content Item".into()))?;
         store.assert_tenant(item.tenant_id, ctx.tenant_id)?;
         authorize_feed_item_scope(&store, ctx, content_item_id)?;
@@ -358,6 +363,7 @@ impl AgentTools {
                         blocked_sources: vec![],
                         preferred_brief_length: 7,
                         preferred_discovery_mode: DiscoveryMode::DeepMatch,
+                        recurrence_penalty_days: RecurrencePenaltyDays::default(),
                     });
                 if kind == FeedbackKind::BlockSource
                     && !preferences.blocked_sources.contains(&source)
@@ -372,12 +378,13 @@ impl AgentTools {
             }
             FeedbackKind::Interesting | FeedbackKind::NotForMe | FeedbackKind::Dismissed => {}
         }
-        if !store.feedback_events.iter().any(|event| {
+        let is_new_feedback = !store.feedback_events.iter().any(|event| {
             event.user_id == user_id
                 && event.tenant_id == ctx.tenant_id
                 && event.submission_id == submission_id
                 && event.event_type == kind
-        }) {
+        });
+        if is_new_feedback {
             store.feedback_events.push(FeedbackEvent {
                 user_id,
                 tenant_id: ctx.tenant_id,
@@ -387,6 +394,17 @@ impl AgentTools {
                 created_at: now,
                 local_only: true,
             });
+            if let Some((evidence_kind, direction)) = taste_evidence_for_feedback(kind) {
+                record_taste_learning_evidence(
+                    &mut store,
+                    user_id,
+                    ctx.tenant_id,
+                    &item,
+                    evidence_kind,
+                    direction,
+                    now,
+                );
+            }
         }
         let state = feed_feedback_state(&store, user_id, submission_id);
         record_harness_write_at(
@@ -2810,6 +2828,7 @@ impl AgentTools {
             });
             let placement = placement.clone();
             accept_candidate_placement(&mut store, ctx, &candidate, &placement)?;
+            record_add_to_pod_learning(&mut store, ctx, &item, now);
             record_harness_write_at(
                 &mut store,
                 ctx,
@@ -2862,6 +2881,7 @@ impl AgentTools {
             updated_at: now,
         };
         accept_candidate_placement(&mut store, ctx, &candidate, &placement)?;
+        record_add_to_pod_learning(&mut store, ctx, &item, now);
         store
             .pod_placements
             .insert((candidate_id, request.pod_id), placement.clone());
@@ -3880,6 +3900,7 @@ impl AgentTools {
                 blocked_sources: vec![],
                 preferred_brief_length: 7,
                 preferred_discovery_mode: DiscoveryMode::DeepMatch,
+                recurrence_penalty_days: RecurrencePenaltyDays::default(),
             });
         if !prefs.blocked_sources.contains(&source) {
             prefs.blocked_sources.push(source);
@@ -3909,6 +3930,7 @@ impl AgentTools {
                 blocked_sources: vec![],
                 preferred_brief_length: 7,
                 preferred_discovery_mode: DiscoveryMode::DeepMatch,
+                recurrence_penalty_days: RecurrencePenaltyDays::default(),
             });
         if !prefs.blocked_topics.contains(&topic) {
             prefs.blocked_topics.push(topic);
@@ -3945,6 +3967,7 @@ impl AgentTools {
                 blocked_sources: vec![],
                 preferred_brief_length: 7,
                 preferred_discovery_mode: DiscoveryMode::DeepMatch,
+                recurrence_penalty_days: RecurrencePenaltyDays::default(),
             });
         if let Some(interests) = request.interests {
             prefs.interests = normalize_unique(interests);
@@ -3970,6 +3993,142 @@ impl AgentTools {
         );
         self.persist_locked(&mut store)?;
         Ok(prefs)
+    }
+
+    /// Returns the User's private explicit and learned Taste Profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Harness Grant lacks feedback access, no User is
+    /// authenticated, or local state cannot be read.
+    pub fn taste_profile(&self, ctx: &AuthContext) -> Result<TasteProfile, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_taste_profile(&store, ctx)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Taste Profile requires an authenticated User".into())
+        })?;
+        let preferences = store.user_preferences.get(&(user_id, ctx.tenant_id));
+        Ok(TasteProfile {
+            user_id,
+            tenant_id: ctx.tenant_id,
+            explicit: ExplicitTastePreferences {
+                interests: preferences
+                    .map(|preferences| preferences.interests.clone())
+                    .unwrap_or_default(),
+                blocked_topics: preferences
+                    .map(|preferences| preferences.blocked_topics.clone())
+                    .unwrap_or_default(),
+                blocked_sources: preferences
+                    .map(|preferences| preferences.blocked_sources.clone())
+                    .unwrap_or_default(),
+                recurrence_penalty_days: preferences
+                    .map_or_else(RecurrencePenaltyDays::default, |preferences| {
+                        preferences.recurrence_penalty_days
+                    })
+                    .get(),
+            },
+            learned: learned_taste_weights(&store, user_id, ctx.tenant_id),
+        })
+    }
+
+    /// Replaces any supplied explicit Taste Profile settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Harness Grant lacks feedback access, no User is
+    /// authenticated, or persistence fails.
+    pub fn update_taste_profile(
+        &self,
+        ctx: &AuthContext,
+        request: UpdateTasteProfileRequest,
+    ) -> Result<TasteProfile, AgentToolsError> {
+        let Some(user_id) = ctx.user_id else {
+            return Err(StoreError::Validation(
+                "Taste Profile requires an authenticated User".into(),
+            )
+            .into());
+        };
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_taste_profile(&store, ctx)?;
+        let preferences = store
+            .user_preferences
+            .entry((user_id, ctx.tenant_id))
+            .or_insert(UserPreferences {
+                user_id,
+                tenant_id: ctx.tenant_id,
+                interests: Vec::new(),
+                blocked_topics: Vec::new(),
+                blocked_sources: Vec::new(),
+                preferred_brief_length: 7,
+                preferred_discovery_mode: DiscoveryMode::DeepMatch,
+                recurrence_penalty_days: RecurrencePenaltyDays::default(),
+            });
+        if let Some(interests) = request.interests {
+            preferences.interests = normalize_unique_case_insensitive(interests);
+        }
+        if let Some(blocked_topics) = request.blocked_topics {
+            preferences.blocked_topics = normalize_unique_case_insensitive(blocked_topics);
+        }
+        if let Some(blocked_sources) = request.blocked_sources {
+            preferences.blocked_sources = normalize_unique_case_insensitive(blocked_sources);
+        }
+        if let Some(recurrence_penalty_days) = request.recurrence_penalty_days {
+            preferences.recurrence_penalty_days = recurrence_penalty_days;
+        }
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::UpdatePreferences,
+            None,
+        );
+        self.persist_locked(&mut store)?;
+        drop(store);
+        self.taste_profile(ctx)
+    }
+
+    /// Resets one learned preference, or the entire learned layer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Harness Grant lacks feedback access, no User is
+    /// authenticated, or persistence fails.
+    pub fn reset_learned_taste(
+        &self,
+        ctx: &AuthContext,
+        request: ResetLearnedTasteRequest,
+    ) -> Result<TasteProfile, AgentToolsError> {
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Taste Profile requires an authenticated User".into())
+        })?;
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_taste_profile(&store, ctx)?;
+        store.taste_learning_evidence.retain(|evidence| {
+            if evidence.user_id != user_id || evidence.tenant_id != ctx.tenant_id {
+                return true;
+            }
+            request
+                .signal
+                .as_ref()
+                .is_some_and(|signal| signal != &evidence.signal)
+        });
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::ResetLearnedTaste,
+            None,
+        );
+        self.persist_locked(&mut store)?;
+        drop(store);
+        self.taste_profile(ctx)
     }
 
     pub fn node_info(&self, ctx: &AuthContext) -> Result<NodeInfo, AgentToolsError> {
@@ -4842,6 +5001,16 @@ fn normalize_unique(values: Vec<String>) -> Vec<String> {
     output
 }
 
+fn normalize_unique_case_insensitive(values: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .filter(|value| seen.insert(value.to_lowercase()))
+        .collect()
+}
+
 fn route_text(request: &RouteLinkRequest) -> String {
     format!(
         "{} {} {} {}",
@@ -5117,6 +5286,19 @@ fn authorize_harness(
                 reason: format!("harness grant does not include Pod {pod_id}"),
             });
         }
+    }
+    Ok(())
+}
+
+fn authorize_taste_profile(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+) -> Result<(), AgentToolsError> {
+    authorize_harness(store, ctx, HarnessCapability::Feedback, None)?;
+    if harness_for_context(store, ctx)?.is_some_and(|harness| harness.grant.pod_ids.is_some()) {
+        return Err(AgentToolsError::Forbidden {
+            reason: "Taste Profile access requires an unscoped feedback grant".into(),
+        });
     }
     Ok(())
 }
@@ -5933,7 +6115,10 @@ fn feed_attention_value(
         })
         .count();
     let preferences = store.user_preferences.get(&(user_id, item.tenant_id));
-    let relevance_matches = preferences
+    let matched_explicit_interests = scoped_pod_ids
+        .is_none()
+        .then_some(preferences)
+        .flatten()
         .map(|preferences| {
             preferences
                 .interests
@@ -5944,21 +6129,75 @@ fn feed_attention_value(
                         .any(|tag| tag.eq_ignore_ascii_case(interest))
                         || item.title.to_lowercase().contains(&interest.to_lowercase())
                 })
-                .count()
+                .cloned()
+                .collect::<Vec<_>>()
         })
-        .unwrap_or(0);
+        .unwrap_or_default();
+    let relevance_matches = matched_explicit_interests.len();
     let relevance = u16::try_from(relevance_matches).map_or(f32::from(u16::MAX), f32::from);
     let age_days = (now - item.created_at).num_days().max(0);
     let timeliness = if age_days <= 30 { 0.5 } else { 0.0 };
     let feedback =
         if state.saved { 2.0 } else { 0.0 } + if state.more_like_this { 1.0 } else { 0.0 };
     let quality = u16::try_from(placement_count).map_or(f32::from(u16::MAX), f32::from) * 0.25;
-    let score = 1.0 + relevance + quality + timeliness + feedback;
+    let learned = scoped_pod_ids
+        .is_none()
+        .then(|| learned_taste_weights(store, user_id, item.tenant_id))
+        .unwrap_or_default();
+    let mut learned_value = 0.0;
+    let mut learned_reasons = Vec::new();
+    for weight in learned.iter().filter(|weight| weight.weight != 0.0) {
+        let matches = match &weight.signal {
+            LearnedTasteSignal::Topic(topic) => {
+                item.tags.iter().any(|tag| tag.eq_ignore_ascii_case(topic))
+            }
+            LearnedTasteSignal::Source(source) => item.domain.eq_ignore_ascii_case(source),
+        };
+        if !matches {
+            continue;
+        }
+        let explicit_interest_matches = match &weight.signal {
+            LearnedTasteSignal::Topic(topic) => preferences.is_some_and(|preferences| {
+                preferences
+                    .interests
+                    .iter()
+                    .any(|interest| interest.eq_ignore_ascii_case(topic))
+            }),
+            LearnedTasteSignal::Source(_) => false,
+        };
+        let applied_weight = if explicit_interest_matches {
+            weight.weight.max(0.0)
+        } else {
+            weight.weight
+        };
+        learned_value += applied_weight;
+        let (signal_kind, signal_value) = taste_signal_key(&weight.signal);
+        if explicit_interest_matches && weight.weight < 0.0 {
+            learned_reasons.push(format!(
+                "Explicit interest '{signal_value}' overrode learned {signal_kind} '{signal_value}' aversion from {} opposing signals",
+                weight.opposing_signals
+            ));
+        } else if applied_weight != 0.0 {
+            let (direction, evidence_count) = if applied_weight > 0.0 {
+                ("affinity increased value", weight.supporting_signals)
+            } else {
+                ("aversion reduced value", weight.opposing_signals)
+            };
+            learned_reasons.push(format!(
+                "Learned {signal_kind} '{signal_value}' {direction} from {evidence_count} relevant signals ({} supporting, {} opposing)",
+                weight.supporting_signals, weight.opposing_signals
+            ));
+        }
+    }
+    let score = 1.0 + relevance + quality + timeliness + feedback + learned_value;
     let mut reasons = vec![format!(
         "{placement_count} Accepted Placement(s) support quality and Pod context"
     )];
     if relevance > 0.0 {
-        reasons.push("Explicit interests matched the Content Reference".into());
+        reasons.push(format!(
+            "Explicit interests matched the Content Reference: {}",
+            matched_explicit_interests.join(", ")
+        ));
     }
     if timeliness > 0.0 {
         reasons.push("Recent publication increased timeliness".into());
@@ -5966,10 +6205,147 @@ fn feed_attention_value(
     if feedback > 0.0 {
         reasons.push("Explicit Save or More like this feedback increased value".into());
     }
+    reasons.extend(learned_reasons);
     if placement_count > 1 {
         reasons.push("Independent Pod Placements increased diversity evidence".into());
     }
     (score, reasons)
+}
+
+fn taste_evidence_for_feedback(
+    kind: FeedbackKind,
+) -> Option<(LearnedTasteEvidenceKind, TasteEvidenceDirection)> {
+    match kind {
+        FeedbackKind::Saved => Some((
+            LearnedTasteEvidenceKind::Save,
+            TasteEvidenceDirection::Supporting,
+        )),
+        FeedbackKind::Interesting => Some((
+            LearnedTasteEvidenceKind::MoreLikeThis,
+            TasteEvidenceDirection::Supporting,
+        )),
+        FeedbackKind::NotForMe => Some((
+            LearnedTasteEvidenceKind::LessLikeThis,
+            TasteEvidenceDirection::Opposing,
+        )),
+        FeedbackKind::Dismissed => Some((
+            LearnedTasteEvidenceKind::Dismiss,
+            TasteEvidenceDirection::Opposing,
+        )),
+        FeedbackKind::BlockSource | FeedbackKind::BlockTopic => None,
+    }
+}
+
+fn record_taste_learning_evidence(
+    store: &mut InMemoryStore,
+    user_id: UserId,
+    tenant_id: Option<TenantId>,
+    item: &Submission,
+    kind: LearnedTasteEvidenceKind,
+    direction: TasteEvidenceDirection,
+    now: chrono::DateTime<Utc>,
+) {
+    let mut signals = HashSet::new();
+    signals.insert(LearnedTasteSignal::Source(item.domain.to_lowercase()));
+    signals.extend(
+        item.tags
+            .iter()
+            .map(|tag| LearnedTasteSignal::Topic(tag.to_lowercase())),
+    );
+    store
+        .taste_learning_evidence
+        .extend(signals.into_iter().map(|signal| TasteLearningEvidence {
+            id: Uuid::now_v7(),
+            user_id,
+            tenant_id,
+            signal,
+            kind,
+            direction,
+            created_at: now,
+        }));
+}
+
+fn record_add_to_pod_learning(
+    store: &mut InMemoryStore,
+    ctx: &AuthContext,
+    item: &Submission,
+    now: chrono::DateTime<Utc>,
+) {
+    if let Some(user_id) = ctx.user_id {
+        record_taste_learning_evidence(
+            store,
+            user_id,
+            ctx.tenant_id,
+            item,
+            LearnedTasteEvidenceKind::AddToPod,
+            TasteEvidenceDirection::Supporting,
+            now,
+        );
+    }
+}
+
+fn learned_taste_weights(
+    store: &InMemoryStore,
+    user_id: UserId,
+    tenant_id: Option<TenantId>,
+) -> Vec<LearnedTasteWeight> {
+    let mut grouped: HashMap<LearnedTasteSignal, Vec<&TasteLearningEvidence>> = HashMap::new();
+    for evidence in store
+        .taste_learning_evidence
+        .iter()
+        .filter(|evidence| evidence.user_id == user_id && evidence.tenant_id == tenant_id)
+    {
+        grouped
+            .entry(evidence.signal.clone())
+            .or_default()
+            .push(evidence);
+    }
+    let mut weights = grouped
+        .into_iter()
+        .map(|(signal, evidence)| {
+            let supporting_signals = evidence
+                .iter()
+                .filter(|evidence| evidence.direction == TasteEvidenceDirection::Supporting)
+                .count();
+            let opposing_signals = evidence.len().saturating_sub(supporting_signals);
+            let net = i64::try_from(supporting_signals).unwrap_or(i64::MAX)
+                - i64::try_from(opposing_signals).unwrap_or(i64::MAX);
+            let weight = if evidence.len() < 2 {
+                0.0
+            } else {
+                let bounded_net = i16::try_from(net.clamp(-6, 6)).unwrap_or_default();
+                f32::from(bounded_net) * 0.5
+            };
+            let mut evidence_counts = HashMap::new();
+            for item in evidence {
+                let count = evidence_counts.entry(item.kind).or_insert(0_u32);
+                *count = count.saturating_add(1);
+            }
+            let mut evidence_summary = evidence_counts
+                .into_iter()
+                .map(|(kind, count)| LearnedTasteEvidenceSummary { kind, count })
+                .collect::<Vec<_>>();
+            evidence_summary.sort_by_key(|summary| summary.kind);
+            LearnedTasteWeight {
+                signal,
+                weight,
+                supporting_signals: u32::try_from(supporting_signals).unwrap_or(u32::MAX),
+                opposing_signals: u32::try_from(opposing_signals).unwrap_or(u32::MAX),
+                evidence_summary,
+            }
+        })
+        .collect::<Vec<_>>();
+    weights.sort_by(|left, right| {
+        taste_signal_key(&left.signal).cmp(&taste_signal_key(&right.signal))
+    });
+    weights
+}
+
+fn taste_signal_key(signal: &LearnedTasteSignal) -> (&str, &str) {
+    match signal {
+        LearnedTasteSignal::Topic(value) => ("topic", value),
+        LearnedTasteSignal::Source(value) => ("source", value),
+    }
 }
 
 fn feed_allowed_actions(

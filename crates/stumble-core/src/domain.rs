@@ -336,7 +336,7 @@ pub enum CrawlCandidateStatus {
     Rejected,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackKind {
     #[serde(alias = "more_like_this")]
@@ -424,13 +424,15 @@ pub struct FeedFeedbackState {
 /// Configurable request for a finite Feed Batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct FeedBatchRequest {
     /// Maximum number of Content Items in the finite batch.
     #[serde(default = "default_feed_batch_size")]
     pub size: usize,
-    /// Number of days during which delivery suppresses ordinary recurrence.
-    #[serde(default = "default_recurrence_penalty_days")]
-    pub recurrence_penalty_days: RecurrencePenaltyDays,
+    /// Optional per-request recurrence override. Omission uses the User's
+    /// explicit Taste Profile preference, which defaults to thirty days.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recurrence_penalty_days: Option<RecurrencePenaltyDays>,
 }
 
 const fn default_feed_batch_size() -> usize {
@@ -442,7 +444,8 @@ const fn default_recurrence_penalty_days() -> RecurrencePenaltyDays {
 }
 
 impl FeedBatchRequest {
-    /// Creates a request using the default thirty-day recurrence penalty.
+    /// Creates a request using the User's Taste Profile recurrence preference,
+    /// which defaults to thirty days.
     ///
     /// # Errors
     ///
@@ -453,8 +456,15 @@ impl FeedBatchRequest {
         }
         Ok(Self {
             size,
-            recurrence_penalty_days: default_recurrence_penalty_days(),
+            recurrence_penalty_days: None,
         })
+    }
+
+    /// Sets an exact per-request recurrence override.
+    #[must_use]
+    pub const fn with_recurrence_penalty_days(mut self, days: RecurrencePenaltyDays) -> Self {
+        self.recurrence_penalty_days = Some(days);
+        self
     }
 }
 
@@ -943,6 +953,7 @@ pub enum HarnessWriteOperation {
     BlockSource,
     BlockTopic,
     UpdatePreferences,
+    ResetLearnedTaste,
     CreateDiscoveryTask,
     ClaimDiscoveryTask,
     RenewDiscoveryTaskLease,
@@ -1868,6 +1879,7 @@ pub struct CrawlCandidate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct UserPreferences {
     pub user_id: UserId,
     pub tenant_id: Option<TenantId>,
@@ -1876,6 +1888,147 @@ pub struct UserPreferences {
     pub blocked_sources: Vec<String>,
     pub preferred_brief_length: usize,
     pub preferred_discovery_mode: DiscoveryMode,
+    #[serde(default = "default_recurrence_penalty_days")]
+    pub recurrence_penalty_days: RecurrencePenaltyDays,
+}
+
+/// User-controlled settings within a private Taste Profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ExplicitTastePreferences {
+    /// Topics the User explicitly wants to prioritize.
+    pub interests: Vec<String>,
+    /// Topics the User explicitly excludes.
+    pub blocked_topics: Vec<String>,
+    /// Sources the User explicitly excludes.
+    pub blocked_sources: Vec<String>,
+    /// Default recurrence suppression window for Feed Batches.
+    pub recurrence_penalty_days: u32,
+}
+
+/// Inspectable private personalization state for one User.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct TasteProfile {
+    /// User who owns this private profile.
+    pub user_id: UserId,
+    /// Optional hosted tenant boundary.
+    pub tenant_id: Option<TenantId>,
+    /// User-authored preferences that override inference.
+    pub explicit: ExplicitTastePreferences,
+    /// Inspectable locally learned weights.
+    pub learned: Vec<LearnedTasteWeight>,
+}
+
+/// One explainable learned preference. Evidence is aggregated to avoid exposing raw history.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct LearnedTasteWeight {
+    /// Topic or source represented by this weight.
+    pub signal: LearnedTasteSignal,
+    /// Bounded ranking adjustment; zero until weak evidence is corroborated.
+    pub weight: f32,
+    /// Number of aggregate positive actions.
+    pub supporting_signals: u32,
+    /// Number of aggregate negative actions.
+    pub opposing_signals: u32,
+    /// Evidence categories and counts without raw history identifiers.
+    pub evidence_summary: Vec<LearnedTasteEvidenceSummary>,
+}
+
+/// Subject of a learned preference.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LearnedTasteSignal {
+    /// Normalized subject tag.
+    Topic(String),
+    /// Normalized source domain.
+    Source(String),
+}
+
+/// Aggregate evidence kind and count, without Content Item or history identifiers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct LearnedTasteEvidenceSummary {
+    /// Category of explicit User action.
+    pub kind: LearnedTasteEvidenceKind,
+    /// Number of actions in this category.
+    pub count: u32,
+}
+
+/// Private action category contributing to a learned weight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LearnedTasteEvidenceKind {
+    /// Save action.
+    Save,
+    /// More like this action.
+    MoreLikeThis,
+    /// Less like this action.
+    LessLikeThis,
+    /// Dismiss action.
+    Dismiss,
+    /// Add to Pod action.
+    AddToPod,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct TasteLearningEvidence {
+    pub id: Uuid,
+    pub user_id: UserId,
+    pub tenant_id: Option<TenantId>,
+    pub signal: LearnedTasteSignal,
+    pub kind: LearnedTasteEvidenceKind,
+    pub direction: TasteEvidenceDirection,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum TasteEvidenceDirection {
+    Supporting,
+    Opposing,
+}
+
+/// Edits the explicit layer of a Taste Profile.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct UpdateTasteProfileRequest {
+    /// Replacement explicit interests when supplied.
+    pub interests: Option<Vec<String>>,
+    /// Replacement explicit topic blocks when supplied.
+    pub blocked_topics: Option<Vec<String>>,
+    /// Replacement explicit source blocks when supplied.
+    pub blocked_sources: Option<Vec<String>>,
+    /// Replacement default Feed recurrence window when supplied.
+    pub recurrence_penalty_days: Option<RecurrencePenaltyDays>,
+}
+
+/// Selects one learned preference to reset, or all preferences when omitted.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ResetLearnedTasteRequest {
+    /// Learned signal to reset, or `None` to reset the complete learned layer.
+    pub signal: Option<LearnedTasteSignal>,
+}
+
+impl ResetLearnedTasteRequest {
+    /// Selects the complete learned layer for reset.
+    #[must_use]
+    pub const fn all() -> Self {
+        Self { signal: None }
+    }
+
+    /// Selects one topic or source weight for reset.
+    #[must_use]
+    pub const fn for_signal(signal: LearnedTasteSignal) -> Self {
+        Self {
+            signal: Some(signal),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

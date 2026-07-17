@@ -77,6 +77,7 @@ pub struct InMemoryStore {
     pub crawl_candidates: HashMap<Uuid, CrawlCandidate>,
     pub user_preferences: HashMap<(UserId, Option<TenantId>), UserPreferences>,
     pub feedback_events: Vec<FeedbackEvent>,
+    pub(crate) taste_learning_evidence: Vec<TasteLearningEvidence>,
     pub feed_batches: HashMap<Uuid, FeedBatch>,
     pub briefs: HashMap<Uuid, Brief>,
     pub saves: HashSet<(UserId, SubmissionId)>,
@@ -129,6 +130,8 @@ struct PersistedStore {
     crawl_candidates: Vec<CrawlCandidate>,
     user_preferences: Vec<UserPreferences>,
     feedback_events: Vec<FeedbackEvent>,
+    #[serde(default)]
+    taste_learning_evidence: Vec<TasteLearningEvidence>,
     #[serde(default)]
     feed_batches: Vec<FeedBatch>,
     briefs: Vec<Brief>,
@@ -243,6 +246,7 @@ impl From<&InMemoryStore> for PersistedStore {
             crawl_candidates: store.crawl_candidates.values().cloned().collect(),
             user_preferences: store.user_preferences.values().cloned().collect(),
             feedback_events: store.feedback_events.clone(),
+            taste_learning_evidence: store.taste_learning_evidence.clone(),
             feed_batches: store.feed_batches.values().cloned().collect(),
             briefs: store.briefs.values().cloned().collect(),
             saves: store
@@ -416,6 +420,7 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .map(|prefs| ((prefs.user_id, prefs.tenant_id), prefs))
                 .collect(),
             feedback_events: snapshot.feedback_events,
+            taste_learning_evidence: snapshot.taste_learning_evidence,
             feed_batches: snapshot
                 .feed_batches
                 .into_iter()
@@ -524,6 +529,7 @@ const STORE_COLLECTIONS: &[&str] = &[
     "crawl_candidates",
     "user_preferences",
     "feedback_events",
+    "taste_learning_evidence",
     "feed_batches",
     "briefs",
     "saves",

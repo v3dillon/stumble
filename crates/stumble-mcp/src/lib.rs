@@ -39,6 +39,9 @@ impl McpToolRouter {
             "get_feed_batch",
             "complete_feed_batch",
             "record_feed_feedback",
+            "get_taste_profile",
+            "update_taste_profile",
+            "reset_learned_taste",
             "register_agent_harness",
             "revoke_agent_harness",
             "create_pending_proposal",
@@ -119,6 +122,17 @@ impl McpToolRouter {
                     opt_string(&call.arguments, "reason"),
                     chrono::Utc::now(),
                 )?))
+            }
+            "get_taste_profile" => Ok(json!(self.tools.taste_profile(&self.ctx)?)),
+            "update_taste_profile" => {
+                let request = serde_json::from_value(call.arguments)?;
+                Ok(json!(self
+                    .tools
+                    .update_taste_profile(&self.ctx, request)?))
+            }
+            "reset_learned_taste" => {
+                let request = serde_json::from_value(call.arguments)?;
+                Ok(json!(self.tools.reset_learned_taste(&self.ctx, request)?))
             }
             "register_agent_harness" => {
                 let request = serde_json::from_value(call.arguments)?;

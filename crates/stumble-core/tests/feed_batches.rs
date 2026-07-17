@@ -206,10 +206,9 @@ fn source_and_topic_blocks_exclude_matching_items_from_later_batches() {
     let later = tools
         .get_feed_batch(
             &user,
-            FeedBatchRequest {
-                size: 2,
-                recurrence_penalty_days: RecurrencePenaltyDays::new(0).unwrap(),
-            },
+            FeedBatchRequest::new(2)
+                .unwrap()
+                .with_recurrence_penalty_days(RecurrencePenaltyDays::new(0).unwrap()),
             now + chrono::Duration::seconds(1),
         )
         .unwrap();
@@ -267,10 +266,9 @@ fn pod_scoped_feed_filters_items_and_cross_pod_evidence() {
     let batch = tools
         .get_feed_batch(
             &scoped,
-            FeedBatchRequest {
-                size: 5,
-                recurrence_penalty_days: RecurrencePenaltyDays::new(0).unwrap(),
-            },
+            FeedBatchRequest::new(5)
+                .unwrap()
+                .with_recurrence_penalty_days(RecurrencePenaltyDays::new(0).unwrap()),
             now + chrono::Duration::seconds(1),
         )
         .unwrap();
@@ -297,10 +295,9 @@ fn pod_scoped_feed_filters_items_and_cross_pod_evidence() {
     let limited_batch = tools
         .get_feed_batch(
             &limited,
-            FeedBatchRequest {
-                size: 5,
-                recurrence_penalty_days: RecurrencePenaltyDays::new(0).unwrap(),
-            },
+            FeedBatchRequest::new(5)
+                .unwrap()
+                .with_recurrence_penalty_days(RecurrencePenaltyDays::new(0).unwrap()),
             now + chrono::Duration::seconds(2),
         )
         .unwrap();
@@ -424,10 +421,9 @@ fn feedback_and_recurrence_change_subsequent_feed_behavior() {
     let resurfaced = tools
         .get_feed_batch(
             &user,
-            FeedBatchRequest {
-                size: 3,
-                recurrence_penalty_days: RecurrencePenaltyDays::new(0).unwrap(),
-            },
+            FeedBatchRequest::new(3)
+                .unwrap()
+                .with_recurrence_penalty_days(RecurrencePenaltyDays::new(0).unwrap()),
             now + chrono::Duration::seconds(1),
         )
         .unwrap();
