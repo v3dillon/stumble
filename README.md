@@ -131,6 +131,10 @@ or tombstone event shapes as its pre-release event contract.
 
 See [synchronization](docs/synchronization.md) for direct-address behavior.
 
+For a complete operator and Agent Harness setup, scheduling, recovery, and
+reproducible two-node release proof, see the
+[first-release runbook](docs/first-release.md).
+
 ## Validation
 
 ```bash

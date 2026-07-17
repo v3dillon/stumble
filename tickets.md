@@ -21,7 +21,7 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 ## Authorize Agent Harnesses with scoped grants
 
-**Status:** ready-for-agent
+**Status:** complete
 
 **What to build:** Let a User register multiple Agent Harnesses with revocable Harness Grants, capability scopes, and optional Pod scopes. Make every harness write attributable and expose the same authorization behavior through HTTP, MCP, and CLI.
 
@@ -37,7 +37,7 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 ## Create and exchange portable Pod Packages
 
-**Status:** ready-for-agent
+**Status:** complete
 
 **What to build:** Let an authorized Agent Harness create a private Pod with a validated, versioned Pod Package containing Pod Context, Pod Skill, Source Rules, filters, and calibration examples. Make packages inspectable and portable without exposing local grants.
 
@@ -53,7 +53,7 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 ## Claim scheduled Discovery Tasks
 
-**Status:** ready-for-agent
+**Status:** complete
 
 **What to build:** Turn due Pod Source Rules into leaseable Discovery Tasks that any authorized Agent Harness can claim, complete, fail, or retry. Support harness-native scheduling and a local scheduler fallback without giving Stumble browser ownership.
 
@@ -69,7 +69,7 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 ## Submit provenance-bearing Candidates
 
-**Status:** ready-for-agent
+**Status:** complete
 
 **What to build:** Let a task-owning or interactive Agent Harness submit structured external discoveries that Stumble authenticates, canonicalizes, deduplicates, and records as private Candidates with proposed multi-Pod placements.
 
@@ -136,7 +136,7 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 ## Learn a private Taste Profile
 
-**Status:** ready-for-agent
+**Status:** complete
 
 **What to build:** Improve subsequent Feed Batches using a private Taste Profile that combines explicit preferences with explainable learned weights while keeping the User in control.
 
@@ -236,20 +236,20 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 ## Prove the complete first release
 
-**Status:** ready-for-agent
+**Status:** complete
 
 **What to build:** Verify and document the complete headless decentralized Feed as one reproducible two-node scenario that an Agent Harness can operate without hidden manual database work.
 
 **Blocked by:** Require approval for sensitive changes; Apply tombstones without erasing local curation; Complete the constrained Feed Mix; Retire legacy crawler and submission contracts.
 
-- [ ] A scoped Agent Harness creates a private Pod and valid Pod Package.
-- [ ] The harness claims a due Discovery Task and submits a structured Candidate using its own external capabilities.
-- [ ] Curation produces accepted multi-Pod content under the configured policy.
-- [ ] A second node publishes a public Pod that the Home Node subscribes to and synchronizes.
-- [ ] A finite Feed Batch blends local, remote, exploratory, priority, and Old Gem content as available.
-- [ ] Feedback changes later ranking without appearing in federation artifacts.
-- [ ] Add to Pod and a later remote Placement Tombstone preserve correct provenance and local ownership.
-- [ ] A local Scheduler Adapter can wake or invoke discovery work when the harness lacks scheduling.
-- [ ] HTTP, MCP, and CLI pass the shared adapter contract suite.
-- [ ] JSON migration, SQLite restart, signed-event verification, privacy exports, and the complete workspace test suite pass.
-- [ ] Operator and Agent Harness documentation describe setup, grants, tools, scheduling, two-node federation, and recovery.
+- [x] A scoped Agent Harness creates a private Pod and valid Pod Package.
+- [x] The harness claims a due Discovery Task and submits a structured Candidate using its own external capabilities.
+- [x] Curation produces accepted multi-Pod content under the configured policy.
+- [x] A second node publishes a public Pod that the Home Node subscribes to and synchronizes.
+- [x] A finite Feed Batch blends local, remote, exploratory, priority, and Old Gem content as available.
+- [x] Feedback changes later ranking without appearing in federation artifacts.
+- [x] Add to Pod and a later remote Placement Tombstone preserve correct provenance and local ownership.
+- [x] A local Scheduler Adapter can wake or invoke discovery work when the harness lacks scheduling.
+- [x] HTTP, MCP, and CLI pass the shared adapter contract suite.
+- [x] JSON migration, SQLite restart, signed-event verification, privacy exports, and the complete workspace test suite pass.
+- [x] Operator and Agent Harness documentation describe setup, grants, tools, scheduling, two-node federation, and recovery.
