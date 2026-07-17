@@ -7,13 +7,16 @@ use crate::skill_pack::{
     default_skill_pack, export_skill_pack, fork_skill_pack, import_skill_pack, patch_skill_pack,
     skill_pack_payload, validate_skill_pack,
 };
-use crate::store::{save_store_snapshot, InMemoryStore, StoreError, StorePersistenceError};
+use crate::store::{
+    load_or_initialize_sqlite_store, load_sqlite_store, persist_sqlite_store_changes,
+    save_store_snapshot, InMemoryStore, StoreError, StorePersistenceError,
+};
 use chrono::{Duration, Utc};
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use url::Url;
 use uuid::Uuid;
 
@@ -34,22 +37,51 @@ pub enum AgentToolsError {
 #[derive(Clone)]
 pub struct AgentTools {
     store: Arc<RwLock<InMemoryStore>>,
-    persistence_path: Option<Arc<PathBuf>>,
+    persistence: Option<Persistence>,
+}
+
+#[derive(Clone)]
+enum Persistence {
+    Json(Arc<PathBuf>),
+    Sqlite {
+        path: Arc<PathBuf>,
+        baseline: Arc<Mutex<InMemoryStore>>,
+    },
 }
 
 impl AgentTools {
     pub fn new(store: InMemoryStore) -> Self {
         Self {
             store: Arc::new(RwLock::new(store)),
-            persistence_path: None,
+            persistence: None,
         }
     }
 
     pub fn new_persistent(store: InMemoryStore, path: impl Into<PathBuf>) -> Self {
         Self {
             store: Arc::new(RwLock::new(store)),
-            persistence_path: Some(Arc::new(path.into())),
+            persistence: Some(Persistence::Json(Arc::new(path.into()))),
         }
+    }
+
+    pub fn new_sqlite_persistent(store: InMemoryStore, path: impl Into<PathBuf>) -> Self {
+        Self {
+            store: Arc::new(RwLock::new(store.clone())),
+            persistence: Some(Persistence::Sqlite {
+                path: Arc::new(path.into()),
+                baseline: Arc::new(Mutex::new(store)),
+            }),
+        }
+    }
+
+    pub fn open_home_node(
+        data_dir: impl AsRef<Path>,
+        seed: impl FnOnce() -> InMemoryStore,
+    ) -> Result<Self, AgentToolsError> {
+        let database_path = data_dir.as_ref().join("stumble.sqlite3");
+        let legacy_path = data_dir.as_ref().join("store.json");
+        let store = load_or_initialize_sqlite_store(&database_path, &legacy_path, seed)?;
+        Ok(Self::new_sqlite_persistent(store, database_path))
     }
 
     pub fn store(&self) -> Arc<RwLock<InMemoryStore>> {
@@ -57,7 +89,11 @@ impl AgentTools {
     }
 
     pub fn persistence_path(&self) -> Option<&Path> {
-        self.persistence_path.as_deref().map(PathBuf::as_path)
+        match &self.persistence {
+            Some(Persistence::Json(path)) => Some(path.as_path()),
+            Some(Persistence::Sqlite { path, .. }) => Some(path.as_path()),
+            None => None,
+        }
     }
 
     pub fn default_auth_context(&self) -> Result<AuthContext, AgentToolsError> {
@@ -73,9 +109,21 @@ impl AgentTools {
         })
     }
 
-    fn persist_locked(&self, store: &InMemoryStore) -> Result<(), AgentToolsError> {
-        if let Some(path) = &self.persistence_path {
-            save_store_snapshot(store, path)?;
+    fn persist_locked(&self, store: &mut InMemoryStore) -> Result<(), AgentToolsError> {
+        match &self.persistence {
+            Some(Persistence::Json(path)) => save_store_snapshot(store, path)?,
+            Some(Persistence::Sqlite { path, baseline }) => {
+                let mut baseline = baseline.lock().map_err(|_| AgentToolsError::LockPoisoned)?;
+                if let Err(error) = persist_sqlite_store_changes(path, &baseline, store) {
+                    let authoritative =
+                        load_sqlite_store(path).unwrap_or_else(|_| baseline.clone());
+                    *baseline = authoritative.clone();
+                    *store = authoritative;
+                    return Err(error.into());
+                }
+                *baseline = store.clone();
+            }
+            None => {}
         }
         Ok(())
     }
@@ -267,7 +315,7 @@ impl AgentTools {
             Some(tenant.id),
         );
         store.node_identities.insert(node.id, node);
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(tenant)
     }
 
@@ -317,7 +365,7 @@ impl AgentTools {
             revoked_at: None,
         };
         store.api_tokens.insert(api_token.id, api_token);
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(DevTokenResponse {
             token,
             token_hash,
@@ -346,7 +394,7 @@ impl AgentTools {
             .get_mut(&token_id)
             .ok_or_else(|| StoreError::NotFound("api token".to_string()))?;
         api_token.last_used_at = Some(Utc::now());
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(Some(AuthContext {
             user_id: Some(user_id),
             tenant_id,
@@ -412,7 +460,7 @@ impl AgentTools {
             store.latest_event_hash(&pod.slug),
         )?;
         store.event_log.push(event);
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(pod)
     }
 
@@ -437,7 +485,7 @@ impl AgentTools {
                 role: PodRole::Member,
                 created_at: Utc::now(),
             });
-            self.persist_locked(&store)?;
+            self.persist_locked(&mut store)?;
         }
         Ok(())
     }
@@ -509,7 +557,7 @@ impl AgentTools {
             store.latest_event_hash(&pod.slug),
         )?;
         store.event_log.push(event);
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(submission)
     }
 
@@ -570,7 +618,7 @@ impl AgentTools {
             store.latest_event_hash(&pod.slug),
         )?;
         store.event_log.push(event);
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(purged)
     }
 
@@ -617,7 +665,7 @@ impl AgentTools {
             created_at: Utc::now(),
         };
         store.submission_assets.insert(asset.id, asset.clone());
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(asset)
     }
 
@@ -745,7 +793,7 @@ impl AgentTools {
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         store.briefs.insert(brief.id, brief.clone());
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(brief)
     }
 
@@ -865,7 +913,7 @@ impl AgentTools {
         )?;
         store.pod_skill_packs.insert(pod.id, pack.clone());
         store.event_log.push(event);
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(pack)
     }
 
@@ -915,7 +963,7 @@ impl AgentTools {
             return Err(StoreError::Validation(report.errors.join(", ")).into());
         }
         store.pod_skill_packs.insert(pod.id, pack.clone());
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(pack)
     }
 
@@ -933,7 +981,7 @@ impl AgentTools {
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         store.pod_skill_packs.insert(target_pod.id, forked.clone());
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(forked)
     }
 
@@ -970,7 +1018,7 @@ impl AgentTools {
             origin_event_id: None,
         };
         store.crawler_sources.insert(source.id, source.clone());
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(source)
     }
 
@@ -1013,7 +1061,7 @@ impl AgentTools {
         store
             .crawl_candidates
             .insert(candidate.id, candidate.clone());
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(candidate)
     }
 
@@ -1033,7 +1081,7 @@ impl AgentTools {
                 .ok_or_else(|| StoreError::NotFound("crawl candidate".to_string()))?;
             candidate.status = CrawlCandidateStatus::Promoted;
             let candidate = candidate.clone();
-            self.persist_locked(&store)?;
+            self.persist_locked(&mut store)?;
             let pod = store
                 .pods
                 .get(&candidate.pod_id)
@@ -1076,7 +1124,7 @@ impl AgentTools {
             created_at: Utc::now(),
             local_only: true,
         });
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(())
     }
 
@@ -1103,7 +1151,7 @@ impl AgentTools {
         if !prefs.blocked_sources.contains(&source) {
             prefs.blocked_sources.push(source);
         }
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(())
     }
 
@@ -1130,7 +1178,7 @@ impl AgentTools {
         if !prefs.blocked_topics.contains(&topic) {
             prefs.blocked_topics.push(topic);
         }
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(())
     }
 
@@ -1177,7 +1225,7 @@ impl AgentTools {
             prefs.preferred_discovery_mode = mode;
         }
         let prefs = prefs.clone();
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(prefs)
     }
 
@@ -1279,7 +1327,7 @@ impl AgentTools {
         store
             .hub_nodes
             .insert(registered.node_id, registered.clone());
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(registered)
     }
 
@@ -1338,7 +1386,7 @@ impl AgentTools {
             updated_at: now,
         };
         store.hub_pods.insert(key, pod.clone());
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(pod)
     }
 
@@ -1431,7 +1479,7 @@ impl AgentTools {
             store.hub_pods.insert(key, registered_pod.clone());
             indexed.push(registered_pod);
         }
-        self.persist_locked(&store)?;
+        self.persist_locked(&mut store)?;
         Ok(indexed)
     }
 
@@ -1603,7 +1651,7 @@ impl AgentTools {
             imported += 1;
         }
         if imported > 0 {
-            self.persist_locked(&store)?;
+            self.persist_locked(&mut store)?;
         }
         Ok(imported)
     }
@@ -1645,7 +1693,7 @@ impl AgentTools {
             imported += 1;
         }
         if imported > 0 {
-            self.persist_locked(&store)?;
+            self.persist_locked(&mut store)?;
         }
         Ok(imported)
     }

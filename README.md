@@ -28,7 +28,7 @@ mkdir -p ~/.stumble/nodes/default
 cargo run -p stumble-api -- --mode local --bind 127.0.0.1:8787 --data-dir ~/.stumble/nodes/default
 ```
 
-Local nodes persist to `<data-dir>/store.json`. If the file does not exist, the node seeds the default local store once and writes the snapshot. Database migrations are included for PostgreSQL and SQLite; `sqlx` is included and the schemas are ready for deeper relational persistence wiring.
+Home Nodes use `<data-dir>/stumble.sqlite3` as their authoritative store (`.stumble` when `--data-dir` is omitted). On first boot, an existing `<data-dir>/store.json` is imported only when SQLite is empty and retained alongside `store.json.migrated.bak` for recovery; populated SQLite state is never replaced by the legacy snapshot.
 
 Use `--port <number>` to choose a port without changing the bind host; use `--port 0` to let the operating system assign an available port. Dev-token minting endpoints are enabled on loopback binds and disabled on public binds unless `--allow-public-dev-tokens` is explicitly passed.
 

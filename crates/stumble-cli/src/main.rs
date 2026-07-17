@@ -165,13 +165,8 @@ async fn main() -> anyhow::Result<()> {
     if cli.api.is_some() {
         eprintln!("Remote HTTP mode is documented in README; this MVP CLI executes against the local AgentTools store.");
     }
-    let persistence_path = cli.data_dir.as_ref().map(|dir| dir.join("store.json"));
-    let tools = if let Some(path) = persistence_path {
-        let store = load_or_seed_store_snapshot(&path, seed_store)?;
-        AgentTools::new_persistent(store, path)
-    } else {
-        seed_agent_tools()
-    };
+    let data_dir = cli.data_dir.unwrap_or_else(|| PathBuf::from(".stumble"));
+    let tools = AgentTools::open_home_node(data_dir, seed_store)?;
     let store = tools.store();
     let default_ctx = {
         let store = store.read().unwrap();

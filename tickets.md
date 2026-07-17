@@ -12,12 +12,12 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 **Blocked by:** None — can start immediately.
 
-- [ ] A new local node initializes a SQLite database and preserves state across restart.
-- [ ] Existing Pods, packages, submissions, preferences, feedback, events, peers, and briefs round-trip through the database.
-- [ ] Legacy JSON state imports exactly once into an empty database and remains recoverable.
-- [ ] Malformed legacy state rolls back without leaving a partially populated database.
-- [ ] Concurrent writes use transactions rather than whole-store snapshot replacement.
-- [ ] Existing public domain behavior remains compatible while later tickets add new concepts.
+- [x] A new local node initializes a SQLite database and preserves state across restart.
+- [x] Existing Pods, packages, submissions, preferences, feedback, events, peers, and briefs round-trip through the database.
+- [x] Legacy JSON state imports exactly once into an empty database and remains recoverable.
+- [x] Malformed legacy state rolls back without leaving a partially populated database.
+- [x] Concurrent writes use transactions rather than whole-store snapshot replacement.
+- [x] Existing public domain behavior remains compatible while later tickets add new concepts.
 
 ## Authorize Agent Harnesses with scoped grants
 
