@@ -135,6 +135,9 @@ pub fn router_with_options(
         .route("/pods/:slug/stumble", post(stumble))
         .route("/briefs", get(list_briefs))
         .route("/briefs/generate", post(generate_brief))
+        .route("/feed", get(get_feed_batch))
+        .route("/feed/:id/complete", post(complete_feed_batch))
+        .route("/feed/items/:id/feedback", post(record_feed_feedback))
         .route("/links/:id/assets", get(link_assets))
         .route("/links/:id/save", post(save_link))
         .route("/links/:id/rate", post(rate_link))
@@ -219,6 +222,21 @@ fn route_docs() -> Vec<ApiRouteDoc> {
             method: "GET",
             path: "/pods",
             description: "list local or hosted pods visible to the auth context",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/feed",
+            description: "retrieve the current stable finite Feed Batch",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/feed/:id/complete",
+            description: "complete a Feed Batch before deliberately requesting another",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/feed/items/:id/feedback",
+            description: "record a private explicit Feedback Signal for a Feed item",
         },
         ApiRouteDoc {
             method: "POST",
@@ -801,6 +819,67 @@ async fn generate_brief(
 ) -> Result<Json<Brief>, ApiError> {
     let ctx = auth_or_default(&state, &headers)?;
     Ok(Json(state.tools.generate_brief(&ctx, request)?))
+}
+
+#[derive(Debug, Deserialize)]
+struct FeedQuery {
+    size: Option<usize>,
+    recurrence_penalty_days: Option<RecurrencePenaltyDays>,
+}
+
+async fn get_feed_batch(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<FeedQuery>,
+) -> Result<Json<FeedBatch>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    let mut request = FeedBatchRequest::new(query.size.unwrap_or(7))
+        .map_err(|error| AgentToolsError::Store(StoreError::Validation(error.to_string())))?;
+    if let Some(days) = query.recurrence_penalty_days {
+        request.recurrence_penalty_days = days;
+    }
+    Ok(Json(state.tools.get_feed_batch(
+        &ctx,
+        request,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn complete_feed_batch(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<FeedBatch>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.complete_feed_batch(
+        &ctx,
+        id,
+        chrono::Utc::now(),
+    )?))
+}
+
+#[derive(Debug, Deserialize)]
+struct FeedFeedbackBody {
+    kind: FeedbackKind,
+    topic: Option<String>,
+    reason: Option<String>,
+}
+
+async fn record_feed_feedback(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<ContentItemId>,
+    Json(body): Json<FeedFeedbackBody>,
+) -> Result<Json<FeedFeedbackState>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.record_feed_feedback(
+        &ctx,
+        id,
+        body.kind,
+        body.topic,
+        body.reason,
+        chrono::Utc::now(),
+    )?))
 }
 
 async fn save_link(

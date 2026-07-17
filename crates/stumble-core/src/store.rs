@@ -77,6 +77,7 @@ pub struct InMemoryStore {
     pub crawl_candidates: HashMap<Uuid, CrawlCandidate>,
     pub user_preferences: HashMap<(UserId, Option<TenantId>), UserPreferences>,
     pub feedback_events: Vec<FeedbackEvent>,
+    pub feed_batches: HashMap<Uuid, FeedBatch>,
     pub briefs: HashMap<Uuid, Brief>,
     pub saves: HashSet<(UserId, SubmissionId)>,
     pub private_notes: BTreeMap<(UserId, SubmissionId), String>,
@@ -128,6 +129,8 @@ struct PersistedStore {
     crawl_candidates: Vec<CrawlCandidate>,
     user_preferences: Vec<UserPreferences>,
     feedback_events: Vec<FeedbackEvent>,
+    #[serde(default)]
+    feed_batches: Vec<FeedBatch>,
     briefs: Vec<Brief>,
     saves: Vec<PersistedUserSubmission>,
     private_notes: Vec<PersistedPrivateNote>,
@@ -240,6 +243,7 @@ impl From<&InMemoryStore> for PersistedStore {
             crawl_candidates: store.crawl_candidates.values().cloned().collect(),
             user_preferences: store.user_preferences.values().cloned().collect(),
             feedback_events: store.feedback_events.clone(),
+            feed_batches: store.feed_batches.values().cloned().collect(),
             briefs: store.briefs.values().cloned().collect(),
             saves: store
                 .saves
@@ -412,6 +416,11 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .map(|prefs| ((prefs.user_id, prefs.tenant_id), prefs))
                 .collect(),
             feedback_events: snapshot.feedback_events,
+            feed_batches: snapshot
+                .feed_batches
+                .into_iter()
+                .map(|batch| (batch.id, batch))
+                .collect(),
             briefs: snapshot
                 .briefs
                 .into_iter()
@@ -515,6 +524,7 @@ const STORE_COLLECTIONS: &[&str] = &[
     "crawl_candidates",
     "user_preferences",
     "feedback_events",
+    "feed_batches",
     "briefs",
     "saves",
     "private_notes",

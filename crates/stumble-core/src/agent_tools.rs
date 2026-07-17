@@ -75,6 +75,330 @@ enum Persistence {
 }
 
 impl AgentTools {
+    /// Returns the current stable Feed Batch or creates and delivers a new one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Feed reads are denied, no User is authenticated,
+    /// the request is invalid, or persistence fails.
+    pub fn get_feed_batch(
+        &self,
+        ctx: &AuthContext,
+        request: FeedBatchRequest,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<FeedBatch, AgentToolsError> {
+        if !(1..=100).contains(&request.size) {
+            return Err(
+                StoreError::Validation("Feed Batch size must be between 1 and 100".into()).into(),
+            );
+        }
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::FeedRead, None)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Feed Batch requires an authenticated User".into())
+        })?;
+        let scoped_pod_ids =
+            harness_for_context(&store, ctx)?.and_then(|harness| harness.grant.pod_ids.clone());
+        if let Some(batch) = store.feed_batches.values().find(|batch| {
+            batch.user_id == user_id
+                && batch.tenant_id == ctx.tenant_id
+                && batch.harness_id == ctx.harness_id
+                && batch.completed_at.is_none()
+        }) {
+            return project_feed_batch_for_context(&store, ctx, batch);
+        }
+
+        let recurrence_cutoff =
+            now - Duration::days(i64::from(request.recurrence_penalty_days.get()));
+        let recently_delivered: HashSet<SubmissionId> = store
+            .feed_batches
+            .values()
+            .filter(|batch| {
+                batch.user_id == user_id
+                    && batch.tenant_id == ctx.tenant_id
+                    && batch.created_at >= recurrence_cutoff
+            })
+            .flat_map(|batch| {
+                batch
+                    .items
+                    .iter()
+                    .map(|item| SubmissionId::from(item.content_reference.content_item_id))
+            })
+            .collect();
+        let preferences = store.user_preferences.get(&(user_id, ctx.tenant_id));
+        let rejected: HashSet<SubmissionId> = store
+            .feedback_events
+            .iter()
+            .filter(|event| event.user_id == user_id && event.tenant_id == ctx.tenant_id)
+            .filter(|event| {
+                matches!(
+                    event.event_type,
+                    FeedbackKind::Dismissed | FeedbackKind::NotForMe
+                )
+            })
+            .map(|event| event.submission_id)
+            .collect();
+        let mut eligible = store
+            .submissions
+            .values()
+            .filter(|item| item.tenant_id == ctx.tenant_id)
+            .filter(|item| {
+                store
+                    .accepted_placement_projections
+                    .keys()
+                    .any(|(content_item_id, pod_id)| {
+                        *content_item_id == item.id.into()
+                            && scoped_pod_ids
+                                .as_ref()
+                                .is_none_or(|pod_ids| pod_ids.contains(pod_id))
+                    })
+            })
+            .filter(|item| !rejected.contains(&item.id))
+            .filter(|item| {
+                preferences.is_none_or(|preferences| {
+                    !preferences
+                        .blocked_sources
+                        .iter()
+                        .any(|source| source.eq_ignore_ascii_case(&item.domain))
+                        && !preferences.blocked_topics.iter().any(|topic| {
+                            item.tags.iter().any(|tag| tag.eq_ignore_ascii_case(topic))
+                                || item.title.to_lowercase().contains(&topic.to_lowercase())
+                        })
+                })
+            })
+            .map(|item| {
+                let recurrence_penalty_applied = recently_delivered.contains(&item.id);
+                let (mut score, mut reasons) =
+                    feed_attention_value(&store, user_id, item, scoped_pod_ids.as_deref(), now);
+                if recurrence_penalty_applied {
+                    score -= 2.5;
+                    reasons.push("Recent delivery applied a recurrence penalty".into());
+                } else {
+                    reasons.push("Item is outside the recurrence penalty window".into());
+                }
+                (item, recurrence_penalty_applied, score, reasons)
+            })
+            .filter(|(_, _, score, _)| *score > 0.0)
+            .collect::<Vec<_>>();
+        eligible.sort_by(|left, right| {
+            right
+                .2
+                .total_cmp(&left.2)
+                .then_with(|| right.0.created_at.cmp(&left.0.created_at))
+                .then_with(|| left.0.canonical_url.cmp(&right.0.canonical_url))
+        });
+
+        let allowed_actions = feed_allowed_actions(&store, ctx)?;
+
+        let items = eligible
+            .into_iter()
+            .take(request.size)
+            .map(|(item, recurrence_penalty_applied, score, reasons)| {
+                feed_batch_item(
+                    &store,
+                    user_id,
+                    item,
+                    &allowed_actions,
+                    scoped_pod_ids.as_deref(),
+                    FeedItemSelection {
+                        recurrence_penalty_applied,
+                        attention_value: score,
+                        reasons,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let state = if items.is_empty() {
+            FeedBatchState::CaughtUp
+        } else {
+            FeedBatchState::Ready
+        };
+        let batch = FeedBatch {
+            id: Uuid::now_v7(),
+            user_id,
+            harness_id: ctx.harness_id,
+            tenant_id: ctx.tenant_id,
+            requested_size: request.size,
+            recurrence_penalty_days: request.recurrence_penalty_days.get(),
+            state,
+            items,
+            created_at: now,
+            completed_at: None,
+        };
+        store.feed_batches.insert(batch.id, batch.clone());
+        record_harness_write_at(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::CreateFeedBatch,
+            None,
+            now,
+        );
+        self.persist_locked(&mut store)?;
+        Ok(batch)
+    }
+
+    /// Marks the current finite Feed Batch consumed so the User may deliberately request another.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Feed reads are denied, the batch is missing or belongs
+    /// to another User, or persistence fails.
+    pub fn complete_feed_batch(
+        &self,
+        ctx: &AuthContext,
+        batch_id: Uuid,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<FeedBatch, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::FeedRead, None)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Feed Batch requires an authenticated User".into())
+        })?;
+        let batch = store
+            .feed_batches
+            .get_mut(&batch_id)
+            .filter(|batch| {
+                batch.user_id == user_id
+                    && batch.tenant_id == ctx.tenant_id
+                    && batch.harness_id == ctx.harness_id
+            })
+            .ok_or_else(|| StoreError::NotFound("Feed Batch".into()))?;
+        let newly_completed = batch.completed_at.is_none();
+        batch.completed_at.get_or_insert(now);
+        batch.state = FeedBatchState::CaughtUp;
+        let batch = batch.clone();
+        if newly_completed {
+            record_harness_write_at(
+                &mut store,
+                ctx,
+                HarnessWriteOperation::CompleteFeedBatch,
+                None,
+                now,
+            );
+        }
+        self.persist_locked(&mut store)?;
+        Ok(batch)
+    }
+
+    /// Records one explicit private Feedback Signal for a delivered Content Item.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when feedback is denied, the item is missing or outside
+    /// the Harness Grant's Pod scope, no User is authenticated, or persistence fails.
+    pub fn record_feed_feedback(
+        &self,
+        ctx: &AuthContext,
+        content_item_id: ContentItemId,
+        kind: FeedbackKind,
+        topic: Option<String>,
+        reason: Option<String>,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<FeedFeedbackState, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Feedback, None)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Feedback Signal requires an authenticated User".into())
+        })?;
+        let submission_id = SubmissionId::from(content_item_id);
+        let item = store
+            .submissions
+            .get(&submission_id)
+            .ok_or_else(|| StoreError::NotFound("Content Item".into()))?;
+        store.assert_tenant(item.tenant_id, ctx.tenant_id)?;
+        authorize_feed_item_scope(&store, ctx, content_item_id)?;
+        let was_delivered = store.feed_batches.values().any(|batch| {
+            batch.user_id == user_id
+                && batch.tenant_id == ctx.tenant_id
+                && batch.items.iter().any(|batch_item| {
+                    batch_item.content_reference.content_item_id == content_item_id
+                })
+        });
+        if !was_delivered {
+            return Err(
+                StoreError::Validation("Feedback Signal requires a Delivered Item".into()).into(),
+            );
+        }
+        let blocked_topic = if kind == FeedbackKind::BlockTopic {
+            Some(
+                topic
+                    .filter(|topic| !topic.trim().is_empty())
+                    .ok_or_else(|| {
+                        StoreError::Validation(
+                            "topic block requires a non-empty target topic".into(),
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
+        match kind {
+            FeedbackKind::Saved => {
+                store.saves.insert((user_id, submission_id));
+            }
+            FeedbackKind::BlockSource | FeedbackKind::BlockTopic => {
+                let source = item.domain.clone();
+                let preferences = store
+                    .user_preferences
+                    .entry((user_id, ctx.tenant_id))
+                    .or_insert(UserPreferences {
+                        user_id,
+                        tenant_id: ctx.tenant_id,
+                        interests: vec![],
+                        blocked_topics: vec![],
+                        blocked_sources: vec![],
+                        preferred_brief_length: 7,
+                        preferred_discovery_mode: DiscoveryMode::DeepMatch,
+                    });
+                if kind == FeedbackKind::BlockSource
+                    && !preferences.blocked_sources.contains(&source)
+                {
+                    preferences.blocked_sources.push(source);
+                }
+                if let Some(topic) = blocked_topic {
+                    if !preferences.blocked_topics.contains(&topic) {
+                        preferences.blocked_topics.push(topic);
+                    }
+                }
+            }
+            FeedbackKind::Interesting | FeedbackKind::NotForMe | FeedbackKind::Dismissed => {}
+        }
+        if !store.feedback_events.iter().any(|event| {
+            event.user_id == user_id
+                && event.tenant_id == ctx.tenant_id
+                && event.submission_id == submission_id
+                && event.event_type == kind
+        }) {
+            store.feedback_events.push(FeedbackEvent {
+                user_id,
+                tenant_id: ctx.tenant_id,
+                submission_id,
+                event_type: kind,
+                reason,
+                created_at: now,
+                local_only: true,
+            });
+        }
+        let state = feed_feedback_state(&store, user_id, submission_id);
+        record_harness_write_at(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::RecordFeedFeedback,
+            None,
+            now,
+        );
+        self.persist_locked(&mut store)?;
+        Ok(state)
+    }
     pub fn new(store: InMemoryStore) -> Self {
         Self {
             store: Arc::new(RwLock::new(store)),
@@ -4797,6 +5121,29 @@ fn authorize_harness(
     Ok(())
 }
 
+fn authorize_feed_item_scope(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    content_item_id: ContentItemId,
+) -> Result<(), AgentToolsError> {
+    let Some(harness) = harness_for_context(store, ctx)? else {
+        return Ok(());
+    };
+    let Some(pod_ids) = &harness.grant.pod_ids else {
+        return Ok(());
+    };
+    if store
+        .accepted_placement_projections
+        .keys()
+        .any(|(item_id, pod_id)| *item_id == content_item_id && pod_ids.contains(pod_id))
+    {
+        return Ok(());
+    }
+    Err(AgentToolsError::Forbidden {
+        reason: "Harness Grant cannot access this Content Item through an allowed Pod".into(),
+    })
+}
+
 fn validate_candidate_submission(
     store: &InMemoryStore,
     ctx: &AuthContext,
@@ -5446,6 +5793,267 @@ fn normalize_capabilities(mut capabilities: Vec<HarnessCapability>) -> Vec<Harne
     capabilities.sort();
     capabilities.dedup();
     capabilities
+}
+
+struct FeedItemSelection {
+    recurrence_penalty_applied: bool,
+    attention_value: f32,
+    reasons: Vec<String>,
+}
+
+fn feed_batch_item(
+    store: &InMemoryStore,
+    user_id: UserId,
+    item: &Submission,
+    allowed_actions: &[FeedAllowedAction],
+    scoped_pod_ids: Option<&[PodId]>,
+    selection: FeedItemSelection,
+) -> FeedBatchItem {
+    let FeedItemSelection {
+        recurrence_penalty_applied,
+        attention_value,
+        mut reasons,
+    } = selection;
+    let content_item_id = ContentItemId::from(item.id);
+    let placements = store
+        .accepted_placement_projections
+        .values()
+        .filter(|placement| {
+            placement.content_item_id == content_item_id
+                && scoped_pod_ids.is_none_or(|pod_ids| pod_ids.contains(&placement.pod_id))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let provenance = store
+        .pod_placements
+        .values()
+        .filter(|placement| {
+            placement.content_item_id == Some(content_item_id)
+                && scoped_pod_ids.is_none_or(|pod_ids| pod_ids.contains(&placement.pod_id))
+        })
+        .flat_map(|placement| placement.source_submission_ids.iter())
+        .filter_map(|submission_id| store.candidate_submissions.get(submission_id))
+        .map(|submission| submission.evidence.provenance.clone())
+        .collect::<Vec<_>>();
+    let is_exploration = !placements.is_empty()
+        && placements.iter().all(|placement| {
+            store
+                .pods
+                .get(&placement.pod_id)
+                .is_some_and(|pod| pod.visibility == Visibility::Public)
+                && !store.pod_memberships.iter().any(|membership| {
+                    membership.user_id == user_id && membership.pod_id == placement.pod_id
+                })
+        });
+    if is_exploration {
+        reasons.push("Clearly labeled exploration from an unsubscribed public Pod".into());
+    }
+    FeedBatchItem {
+        content_reference: FeedContentReference {
+            content_item_id,
+            source_url: item.url.clone(),
+            canonical_url: item.canonical_url.clone(),
+            title: item.title.clone(),
+            permitted_description: item.description.clone(),
+            summary: item.summary.clone(),
+            source: item.domain.clone(),
+            tags: item.tags.clone(),
+        },
+        placements,
+        provenance,
+        ranking_evidence: FeedRankingEvidence {
+            attention_value,
+            reasons,
+            recurrence_penalty_applied,
+        },
+        is_exploration,
+        feedback_state: feed_feedback_state(store, user_id, item.id),
+        allowed_actions: allowed_actions.to_vec(),
+    }
+}
+
+fn project_feed_batch_for_context(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    batch: &FeedBatch,
+) -> Result<FeedBatch, AgentToolsError> {
+    let scoped_pod_ids =
+        harness_for_context(store, ctx)?.and_then(|harness| harness.grant.pod_ids.as_deref());
+    let allowed_actions = feed_allowed_actions(store, ctx)?;
+    let mut projected = batch.clone();
+    projected.items = batch
+        .items
+        .iter()
+        .filter_map(|existing| {
+            let submission_id = SubmissionId::from(existing.content_reference.content_item_id);
+            let item = store.submissions.get(&submission_id)?;
+            let has_visible_placement =
+                store
+                    .accepted_placement_projections
+                    .keys()
+                    .any(|(content_item_id, pod_id)| {
+                        *content_item_id == existing.content_reference.content_item_id
+                            && scoped_pod_ids.is_none_or(|pod_ids| pod_ids.contains(pod_id))
+                    });
+            has_visible_placement.then(|| {
+                feed_batch_item(
+                    store,
+                    batch.user_id,
+                    item,
+                    &allowed_actions,
+                    scoped_pod_ids,
+                    FeedItemSelection {
+                        recurrence_penalty_applied: existing
+                            .ranking_evidence
+                            .recurrence_penalty_applied,
+                        attention_value: existing.ranking_evidence.attention_value,
+                        reasons: existing.ranking_evidence.reasons.clone(),
+                    },
+                )
+            })
+        })
+        .collect();
+    Ok(projected)
+}
+
+fn feed_attention_value(
+    store: &InMemoryStore,
+    user_id: UserId,
+    item: &Submission,
+    scoped_pod_ids: Option<&[PodId]>,
+    now: chrono::DateTime<Utc>,
+) -> (f32, Vec<String>) {
+    let state = feed_feedback_state(store, user_id, item.id);
+    let placement_count = store
+        .accepted_placement_projections
+        .values()
+        .filter(|placement| {
+            placement.content_item_id == item.id.into()
+                && scoped_pod_ids.is_none_or(|pod_ids| pod_ids.contains(&placement.pod_id))
+        })
+        .count();
+    let preferences = store.user_preferences.get(&(user_id, item.tenant_id));
+    let relevance_matches = preferences
+        .map(|preferences| {
+            preferences
+                .interests
+                .iter()
+                .filter(|interest| {
+                    item.tags
+                        .iter()
+                        .any(|tag| tag.eq_ignore_ascii_case(interest))
+                        || item.title.to_lowercase().contains(&interest.to_lowercase())
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let relevance = u16::try_from(relevance_matches).map_or(f32::from(u16::MAX), f32::from);
+    let age_days = (now - item.created_at).num_days().max(0);
+    let timeliness = if age_days <= 30 { 0.5 } else { 0.0 };
+    let feedback =
+        if state.saved { 2.0 } else { 0.0 } + if state.more_like_this { 1.0 } else { 0.0 };
+    let quality = u16::try_from(placement_count).map_or(f32::from(u16::MAX), f32::from) * 0.25;
+    let score = 1.0 + relevance + quality + timeliness + feedback;
+    let mut reasons = vec![format!(
+        "{placement_count} Accepted Placement(s) support quality and Pod context"
+    )];
+    if relevance > 0.0 {
+        reasons.push("Explicit interests matched the Content Reference".into());
+    }
+    if timeliness > 0.0 {
+        reasons.push("Recent publication increased timeliness".into());
+    }
+    if feedback > 0.0 {
+        reasons.push("Explicit Save or More like this feedback increased value".into());
+    }
+    if placement_count > 1 {
+        reasons.push("Independent Pod Placements increased diversity evidence".into());
+    }
+    (score, reasons)
+}
+
+fn feed_allowed_actions(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+) -> Result<Vec<FeedAllowedAction>, AgentToolsError> {
+    let Some(harness) = harness_for_context(store, ctx)? else {
+        return Ok(vec![
+            FeedAllowedAction::Save,
+            FeedAllowedAction::MoreLikeThis,
+            FeedAllowedAction::LessLikeThis,
+            FeedAllowedAction::Dismiss,
+            FeedAllowedAction::BlockSource,
+            FeedAllowedAction::BlockTopic,
+            FeedAllowedAction::AddToPod,
+        ]);
+    };
+    let mut actions = Vec::new();
+    if harness
+        .grant
+        .capabilities
+        .contains(&HarnessCapability::Feedback)
+    {
+        actions.extend([
+            FeedAllowedAction::Save,
+            FeedAllowedAction::MoreLikeThis,
+            FeedAllowedAction::LessLikeThis,
+            FeedAllowedAction::Dismiss,
+            FeedAllowedAction::BlockSource,
+            FeedAllowedAction::BlockTopic,
+        ]);
+    }
+    if harness
+        .grant
+        .capabilities
+        .contains(&HarnessCapability::PodCuration)
+        && harness
+            .grant
+            .pod_ids
+            .as_ref()
+            .is_none_or(|pod_ids| !pod_ids.is_empty())
+    {
+        actions.push(FeedAllowedAction::AddToPod);
+    }
+    Ok(actions)
+}
+
+fn feed_feedback_state(
+    store: &InMemoryStore,
+    user_id: UserId,
+    submission_id: SubmissionId,
+) -> FeedFeedbackState {
+    let item = store.submissions.get(&submission_id);
+    let preferences = item.and_then(|item| {
+        store
+            .user_preferences
+            .get(&(user_id, item.tenant_id))
+            .map(|preferences| (item, preferences))
+    });
+    let has_feedback = |kind| {
+        store.feedback_events.iter().any(|event| {
+            event.user_id == user_id
+                && event.submission_id == submission_id
+                && event.event_type == kind
+        })
+    };
+    FeedFeedbackState {
+        saved: has_feedback(FeedbackKind::Saved),
+        more_like_this: has_feedback(FeedbackKind::Interesting),
+        less_like_this: has_feedback(FeedbackKind::NotForMe),
+        dismissed: has_feedback(FeedbackKind::Dismissed),
+        source_blocked: preferences.is_some_and(|(item, preferences)| {
+            preferences
+                .blocked_sources
+                .iter()
+                .any(|source| source.eq_ignore_ascii_case(&item.domain))
+        }),
+        topic_blocked: preferences.is_some_and(|(item, preferences)| {
+            preferences
+                .blocked_topics
+                .iter()
+                .any(|topic| item.tags.iter().any(|tag| tag.eq_ignore_ascii_case(topic)))
+        }),
+    }
 }
 
 fn authorize_proposal_reader(

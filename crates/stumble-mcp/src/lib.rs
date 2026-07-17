@@ -36,6 +36,9 @@ impl McpToolRouter {
     pub fn tool_names() -> &'static [&'static str] {
         &[
             "list_pods",
+            "get_feed_batch",
+            "complete_feed_batch",
+            "record_feed_feedback",
             "register_agent_harness",
             "revoke_agent_harness",
             "create_pending_proposal",
@@ -87,6 +90,36 @@ impl McpToolRouter {
 
     pub fn call(&self, call: McpToolCall) -> anyhow::Result<Value> {
         match call.tool.as_str() {
+            "get_feed_batch" => {
+                let request = serde_json::from_value(call.arguments)?;
+                Ok(json!(self.tools.get_feed_batch(
+                    &self.ctx,
+                    request,
+                    chrono::Utc::now(),
+                )?))
+            }
+            "complete_feed_batch" => {
+                let id = arg_string(&call.arguments, "batch_id")?.parse()?;
+                Ok(json!(self.tools.complete_feed_batch(
+                    &self.ctx,
+                    id,
+                    chrono::Utc::now(),
+                )?))
+            }
+            "record_feed_feedback" => {
+                let id = arg_string(&call.arguments, "content_item_id")?.parse()?;
+                let kind = arg_string(&call.arguments, "kind")?
+                    .parse()
+                    .map_err(anyhow::Error::msg)?;
+                Ok(json!(self.tools.record_feed_feedback(
+                    &self.ctx,
+                    id,
+                    kind,
+                    opt_string(&call.arguments, "topic"),
+                    opt_string(&call.arguments, "reason"),
+                    chrono::Utc::now(),
+                )?))
+            }
             "register_agent_harness" => {
                 let request = serde_json::from_value(call.arguments)?;
                 Ok(json!(self

@@ -96,6 +96,24 @@ enum Command {
         #[arg(long)]
         query: Option<String>,
     },
+    Feed {
+        #[arg(long, default_value = "7")]
+        size: usize,
+        #[arg(long, default_value = "30")]
+        recurrence_penalty_days: RecurrencePenaltyDays,
+    },
+    CompleteFeed {
+        id: uuid::Uuid,
+    },
+    FeedFeedback {
+        content_item_id: ContentItemId,
+        #[arg(long)]
+        kind: FeedbackKind,
+        #[arg(long)]
+        topic: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
     BlockSource {
         source: String,
     },
@@ -433,6 +451,32 @@ async fn main() -> anyhow::Result<()> {
                     query,
                     user_id: ctx.user_id,
                 },
+            )?)?;
+        }
+        Command::Feed {
+            size,
+            recurrence_penalty_days,
+        } => {
+            let mut request = FeedBatchRequest::new(size).map_err(anyhow::Error::msg)?;
+            request.recurrence_penalty_days = recurrence_penalty_days;
+            print_json(&tools.get_feed_batch(&ctx, request, chrono::Utc::now())?)?;
+        }
+        Command::CompleteFeed { id } => {
+            print_json(&tools.complete_feed_batch(&ctx, id, chrono::Utc::now())?)?;
+        }
+        Command::FeedFeedback {
+            content_item_id,
+            kind,
+            topic,
+            reason,
+        } => {
+            print_json(&tools.record_feed_feedback(
+                &ctx,
+                content_item_id,
+                kind,
+                topic,
+                reason,
+                chrono::Utc::now(),
             )?)?;
         }
         Command::BlockSource { source } => {

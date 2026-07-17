@@ -339,12 +339,275 @@ pub enum CrawlCandidateStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackKind {
+    #[serde(alias = "more_like_this")]
     Interesting,
+    #[serde(alias = "less_like_this")]
     NotForMe,
+    #[serde(alias = "dismiss")]
     Dismissed,
+    #[serde(alias = "save")]
     Saved,
     BlockSource,
     BlockTopic,
+}
+
+impl std::str::FromStr for FeedbackKind {
+    type Err = FeedbackKindParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.replace('-', "_").as_str() {
+            "interesting" | "more_like_this" => Ok(Self::Interesting),
+            "not_for_me" | "less_like_this" => Ok(Self::NotForMe),
+            "dismissed" | "dismiss" => Ok(Self::Dismissed),
+            "saved" | "save" => Ok(Self::Saved),
+            "block_source" => Ok(Self::BlockSource),
+            "block_topic" => Ok(Self::BlockTopic),
+            _ => Err(FeedbackKindParseError(value.to_string())),
+        }
+    }
+}
+
+/// Error returned for an unknown Feedback Signal name.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown Feedback Signal: {0}")]
+pub struct FeedbackKindParseError(String);
+
+/// Lifecycle of a finite Feed Batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FeedBatchState {
+    /// One or more items are ready for this consumption session.
+    Ready,
+    /// No eligible item remains for the requested recurrence window.
+    CaughtUp,
+}
+
+/// Permission-derived action an Agent Harness may offer for a Feed item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FeedAllowedAction {
+    /// Preserve the item in the User's local saved set.
+    Save,
+    /// Record positive explicit feedback.
+    MoreLikeThis,
+    /// Record negative explicit feedback and suppress automatic resurfacing.
+    LessLikeThis,
+    /// Remove this item from automatic future delivery.
+    Dismiss,
+    /// Exclude this source from future delivery.
+    BlockSource,
+    /// Exclude this item's topics from future delivery.
+    BlockTopic,
+    /// Create an Accepted Placement in an authorized local Pod.
+    AddToPod,
+}
+
+/// Private feedback already recorded for one Feed item.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedFeedbackState {
+    /// Whether the User saved this item.
+    pub saved: bool,
+    /// Whether the User requested more like this item.
+    pub more_like_this: bool,
+    /// Whether the User requested less like this item.
+    pub less_like_this: bool,
+    /// Whether the User dismissed this item.
+    pub dismissed: bool,
+    /// Whether the User blocked this item's source.
+    pub source_blocked: bool,
+    /// Whether the User blocked one or more of this item's topics.
+    pub topic_blocked: bool,
+}
+
+/// Configurable request for a finite Feed Batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeedBatchRequest {
+    /// Maximum number of Content Items in the finite batch.
+    #[serde(default = "default_feed_batch_size")]
+    pub size: usize,
+    /// Number of days during which delivery suppresses ordinary recurrence.
+    #[serde(default = "default_recurrence_penalty_days")]
+    pub recurrence_penalty_days: RecurrencePenaltyDays,
+}
+
+const fn default_feed_batch_size() -> usize {
+    7
+}
+
+const fn default_recurrence_penalty_days() -> RecurrencePenaltyDays {
+    RecurrencePenaltyDays(30)
+}
+
+impl FeedBatchRequest {
+    /// Creates a request using the default thirty-day recurrence penalty.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `size` is zero or greater than 100.
+    pub fn new(size: usize) -> Result<Self, FeedBatchRequestError> {
+        if !(1..=100).contains(&size) {
+            return Err(FeedBatchRequestError);
+        }
+        Ok(Self {
+            size,
+            recurrence_penalty_days: default_recurrence_penalty_days(),
+        })
+    }
+}
+
+/// Validated recurrence suppression window in days.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct RecurrencePenaltyDays(u32);
+
+impl RecurrencePenaltyDays {
+    /// Longest supported recurrence window (100 years).
+    pub const MAX: u32 = 36_500;
+
+    /// Parses a bounded recurrence window.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for values greater than [`Self::MAX`].
+    pub const fn new(days: u32) -> Result<Self, RecurrencePenaltyDaysError> {
+        if days > Self::MAX {
+            return Err(RecurrencePenaltyDaysError(days));
+        }
+        Ok(Self(days))
+    }
+
+    /// Returns the validated number of days.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for RecurrencePenaltyDays {
+    fn default() -> Self {
+        default_recurrence_penalty_days()
+    }
+}
+
+impl std::str::FromStr for RecurrencePenaltyDays {
+    type Err = RecurrencePenaltyDaysParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let days = value
+            .parse()
+            .map_err(RecurrencePenaltyDaysParseError::InvalidInteger)?;
+        Self::new(days).map_err(RecurrencePenaltyDaysParseError::OutOfRange)
+    }
+}
+
+impl<'de> Deserialize<'de> for RecurrencePenaltyDays {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::new(u32::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Error returned for an out-of-range recurrence window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("recurrence penalty days {0} exceeds the maximum of 36500")]
+pub struct RecurrencePenaltyDaysError(u32);
+
+/// Error returned while parsing recurrence days from a transport string.
+#[derive(Debug, thiserror::Error)]
+pub enum RecurrencePenaltyDaysParseError {
+    /// Input was not an unsigned integer.
+    #[error("recurrence penalty days must be an unsigned integer")]
+    InvalidInteger(#[source] std::num::ParseIntError),
+    /// Parsed input exceeded the supported range.
+    #[error(transparent)]
+    OutOfRange(#[from] RecurrencePenaltyDaysError),
+}
+
+/// Error returned for a Feed Batch size outside the supported range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("Feed Batch size must be between 1 and 100")]
+pub struct FeedBatchRequestError;
+
+/// Source reference returned without mirroring third-party content.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FeedContentReference {
+    /// Stable canonical Content Item identity.
+    pub content_item_id: ContentItemId,
+    /// Original durable source location.
+    pub source_url: String,
+    /// Normalized identity used for deduplication.
+    pub canonical_url: String,
+    /// Permitted source title.
+    pub title: String,
+    /// Optional permitted source description or excerpt.
+    pub permitted_description: Option<String>,
+    /// Generated local understanding of the reference.
+    pub summary: Option<String>,
+    /// Source domain used by source-block feedback.
+    pub source: String,
+    /// Subject tags used by topic-block feedback.
+    pub tags: Vec<String>,
+}
+
+/// Evidence explaining the local Attention Value used for initial Feed ordering.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FeedRankingEvidence {
+    /// Initial local Attention Value used for ordering.
+    pub attention_value: f32,
+    /// Human-inspectable reasons supporting selection.
+    pub reasons: Vec<String>,
+    /// Whether recurrence reduced this item's score in this batch.
+    pub recurrence_penalty_applied: bool,
+}
+
+/// One canonical Content Item delivered once with all accepted placement evidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FeedBatchItem {
+    /// Reference-first representation of the selected item.
+    pub content_reference: FeedContentReference,
+    /// All Accepted Placements contributing eligibility and context.
+    pub placements: Vec<AcceptedPlacementProjection>,
+    /// Discovery provenance retained from Candidate Submissions.
+    pub provenance: Vec<CandidateProvenance>,
+    /// Inspectable evidence for initial Feed ordering.
+    pub ranking_evidence: FeedRankingEvidence,
+    /// Explicit label for unsubscribed public-Pod exploration.
+    pub is_exploration: bool,
+    /// Current private explicit feedback for this item.
+    pub feedback_state: FeedFeedbackState,
+    /// Operations allowed by the current Harness Grant.
+    pub allowed_actions: Vec<FeedAllowedAction>,
+}
+
+/// Stable, finite set of locally ranked Content Items for one consumption session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FeedBatch {
+    /// Stable identity returned by repeated retrieval.
+    pub id: Uuid,
+    /// User whose private projection owns the batch.
+    pub user_id: UserId,
+    /// Harness Grant scope under which this stable batch was created.
+    #[serde(default)]
+    pub harness_id: Option<AgentHarnessId>,
+    /// Optional hosted tenant boundary.
+    pub tenant_id: Option<TenantId>,
+    /// Configured maximum number of items.
+    pub requested_size: usize,
+    /// Recurrence suppression window used during selection.
+    pub recurrence_penalty_days: u32,
+    /// Ready or explicit Caught Up state.
+    pub state: FeedBatchState,
+    /// Stable finite item sequence.
+    pub items: Vec<FeedBatchItem>,
+    /// Time at which inclusion marked items Delivered.
+    pub created_at: DateTime<Utc>,
+    /// Time at which the User deliberately finished this batch.
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -667,6 +930,8 @@ pub enum HarnessWriteOperation {
     RemoveSubmissionFromPod,
     AddSubmissionAsset,
     GenerateBrief,
+    CreateFeedBatch,
+    CompleteFeedBatch,
     PatchSkillPack,
     ImportSkillPack,
     ForkSkillPack,
@@ -674,6 +939,7 @@ pub enum HarnessWriteOperation {
     CreateCrawlCandidate,
     PromoteCrawlCandidate,
     SaveLink,
+    RecordFeedFeedback,
     BlockSource,
     BlockTopic,
     UpdatePreferences,

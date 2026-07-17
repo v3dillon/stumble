@@ -6,7 +6,7 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 ## Boot the Home Node from SQLite
 
-**Status:** ready-for-agent
+**Status:** complete
 
 **What to build:** Make a local Stumble node boot, persist existing behavior, and restart safely using SQLite as its authoritative store. When legacy JSON state exists and the database is empty, import it once while preserving a recoverable backup; never overwrite populated SQLite state.
 
@@ -119,20 +119,20 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 ## Deliver a finite local Feed
 
-**Status:** ready-for-agent
+**Status:** complete
 
 **What to build:** Let an Agent Harness request a stable finite Feed Batch from accepted content on the Home Node, receive structured explanations and allowed actions, and record the complete initial Feedback Signal vocabulary.
 
 **Blocked by:** Boot the Home Node from SQLite; Authorize Agent Harnesses with scoped grants; Curate and route Content Items across Pods.
 
-- [ ] `get_feed_batch` returns a stable structured batch with configurable size and a real Caught Up state.
-- [ ] Batch retrieval marks included items Delivered without requiring per-item presentation acknowledgement.
-- [ ] Repeated retrieval of the current batch does not create a different batch or duplicate delivery history.
-- [ ] Recently Delivered Items receive a configurable recurrence penalty instead of permanent exclusion.
-- [ ] Items include Content References, placements, provenance, ranking evidence, exploration state, feedback state, and allowed next actions.
-- [ ] Save, More like this, Less like this, Dismiss, source block, topic block, and Add to Pod affect observable subsequent behavior.
-- [ ] Dwell time and session duration are not recorded as ranking objectives.
-- [ ] HTTP, MCP, and CLI return equivalent structured Feed and feedback behavior.
+- [x] `get_feed_batch` returns a stable structured batch with configurable size and a real Caught Up state.
+- [x] Batch retrieval marks included items Delivered without requiring per-item presentation acknowledgement.
+- [x] Repeated retrieval of the current batch does not create a different batch or duplicate delivery history.
+- [x] Recently Delivered Items receive a configurable recurrence penalty instead of permanent exclusion.
+- [x] Items include Content References, placements, provenance, ranking evidence, exploration state, feedback state, and allowed next actions.
+- [x] Save, More like this, Less like this, Dismiss, source block, topic block, and Add to Pod affect observable subsequent behavior.
+- [x] Dwell time and session duration are not recorded as ranking objectives.
+- [x] HTTP, MCP, and CLI return equivalent structured Feed and feedback behavior.
 
 ## Learn a private Taste Profile
 
