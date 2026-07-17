@@ -139,6 +139,10 @@ pub fn router_with_options(
         .route("/feed/:id/complete", post(complete_feed_batch))
         .route("/feed/items/:id/feedback", post(record_feed_feedback))
         .route(
+            "/subscriptions/:pod_id/priority",
+            post(set_priority_subscription),
+        )
+        .route(
             "/taste-profile",
             get(get_taste_profile).patch(update_taste_profile),
         )
@@ -845,6 +849,10 @@ async fn generate_brief(
 struct FeedQuery {
     size: Option<usize>,
     recurrence_penalty_days: Option<RecurrencePenaltyDays>,
+    #[serde(flatten)]
+    feed_mix: FeedMixOverrides,
+    focus: Option<String>,
+    avoid: Option<String>,
 }
 
 async fn get_feed_batch(
@@ -858,11 +866,52 @@ async fn get_feed_batch(
     if let Some(days) = query.recurrence_penalty_days {
         request.recurrence_penalty_days = Some(days);
     }
+    request.feed_mix = query
+        .feed_mix
+        .resolve(FeedMix::default())
+        .map_err(|error| AgentToolsError::Store(StoreError::Validation(error.to_string())))?;
+    request.batch_intent = BatchIntent::new(
+        query
+            .focus
+            .map(|topics| split_query_topics(&topics))
+            .unwrap_or_default(),
+        query
+            .avoid
+            .map(|topics| split_query_topics(&topics))
+            .unwrap_or_default(),
+    );
     Ok(Json(state.tools.get_feed_batch(
         &ctx,
         request,
         chrono::Utc::now(),
     )?))
+}
+
+fn split_query_topics(topics: &str) -> Vec<String> {
+    topics
+        .split(',')
+        .map(str::trim)
+        .filter(|topic| !topic.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+#[derive(Debug, Deserialize)]
+struct PrioritySubscriptionUpdate {
+    is_priority: bool,
+}
+
+async fn set_priority_subscription(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(pod_id): Path<PodId>,
+    Json(update): Json<PrioritySubscriptionUpdate>,
+) -> Result<StatusCode, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    state
+        .tools
+        .set_priority_subscription(&ctx, pod_id, update.is_priority)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn complete_feed_batch(

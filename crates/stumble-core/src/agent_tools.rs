@@ -1,4 +1,8 @@
 use crate::domain::*;
+use crate::feed_mix::{
+    compare_feed_candidates, compose_feed_candidates, content_matches_any_topic,
+    normalized_intent_topics, DeliveryRecord, RankedFeedCandidate,
+};
 use crate::ranking::{rank_discovery, RankingInput};
 use crate::signing::{
     hash_api_token, new_plaintext_api_token, sign_pod_announcement, sign_pod_endorsement,
@@ -123,21 +127,32 @@ impl AgentTools {
             })
         });
         let recurrence_cutoff = now - Duration::days(i64::from(recurrence_penalty_days.get()));
-        let recently_delivered: HashSet<SubmissionId> = store
+        let mut last_delivered = HashMap::<SubmissionId, DeliveryRecord>::new();
+        for batch in store
             .feed_batches
             .values()
-            .filter(|batch| {
-                batch.user_id == user_id
-                    && batch.tenant_id == ctx.tenant_id
-                    && batch.created_at >= recurrence_cutoff
-            })
-            .flat_map(|batch| {
-                batch
-                    .items
-                    .iter()
-                    .map(|item| SubmissionId::from(item.content_reference.content_item_id))
-            })
-            .collect();
+            .filter(|batch| batch.user_id == user_id && batch.tenant_id == ctx.tenant_id)
+        {
+            for item in &batch.items {
+                let submission_id = SubmissionId::from(item.content_reference.content_item_id);
+                let record = DeliveryRecord {
+                    delivered_at: batch.created_at,
+                    pod_ids: item
+                        .placements
+                        .iter()
+                        .map(|placement| placement.pod_id)
+                        .collect(),
+                };
+                last_delivered
+                    .entry(submission_id)
+                    .and_modify(|existing| {
+                        if record.delivered_at > existing.delivered_at {
+                            *existing = record.clone();
+                        }
+                    })
+                    .or_insert(record);
+            }
+        }
         let rejected: HashSet<SubmissionId> = store
             .feedback_events
             .iter()
@@ -150,6 +165,8 @@ impl AgentTools {
             })
             .map(|event| event.submission_id)
             .collect();
+        let focus_topics = normalized_intent_topics(&request.batch_intent.focus_topics);
+        let avoid_topics = normalized_intent_topics(&request.batch_intent.avoid_topics);
         let mut eligible = store
             .submissions
             .values()
@@ -166,6 +183,7 @@ impl AgentTools {
                     })
             })
             .filter(|item| !rejected.contains(&item.id))
+            .filter(|item| !content_matches_any_topic(item, &avoid_topics))
             .filter(|item| {
                 preferences.is_none_or(|preferences| {
                     !preferences
@@ -178,8 +196,78 @@ impl AgentTools {
                         })
                 })
             })
-            .map(|item| {
-                let recurrence_penalty_applied = recently_delivered.contains(&item.id);
+            .filter_map(|item| {
+                let mut placement_pod_ids = store
+                    .accepted_placement_projections
+                    .values()
+                    .filter(|placement| {
+                        placement.content_item_id == item.id.into()
+                            && scoped_pod_ids
+                                .as_ref()
+                                .is_none_or(|pod_ids| pod_ids.contains(&placement.pod_id))
+                    })
+                    .map(|placement| placement.pod_id)
+                    .collect::<Vec<_>>();
+                placement_pod_ids.sort_unstable();
+                placement_pod_ids.dedup();
+                let subscribed_pod_ids = placement_pod_ids
+                    .iter()
+                    .copied()
+                    .filter(|pod_id| {
+                        store.pod_memberships.iter().any(|membership| {
+                            membership.user_id == user_id && membership.pod_id == *pod_id
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let priority_pod_ids = subscribed_pod_ids
+                    .iter()
+                    .copied()
+                    .filter(|pod_id| {
+                        store.pod_memberships.iter().any(|membership| {
+                            membership.user_id == user_id
+                                && membership.pod_id == *pod_id
+                                && membership.is_priority
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let is_exploration = subscribed_pod_ids.is_empty()
+                    && placement_pod_ids.iter().any(|pod_id| {
+                        store
+                            .pods
+                            .get(pod_id)
+                            .is_some_and(|pod| pod.visibility == Visibility::Public)
+                    });
+                if subscribed_pod_ids.is_empty() && !is_exploration {
+                    return None;
+                }
+                let delivery = last_delivered.get(&item.id);
+                let has_new_placement = delivery.is_some_and(|delivery| {
+                    store
+                        .accepted_placement_projections
+                        .values()
+                        .any(|placement| {
+                            placement.content_item_id == item.id.into()
+                                && !delivery.pod_ids.contains(&placement.pod_id)
+                        })
+                });
+                let feedback_state = feed_feedback_state(&store, user_id, item.id);
+                let has_strong_feedback = feedback_state.saved && feedback_state.more_like_this;
+                let has_matching_intent = content_matches_any_topic(item, &focus_topics);
+                let recurrence_penalty_applied = recurrence_penalty_days.get() > 0
+                    && delivery.is_some_and(|delivery| delivery.delivered_at >= recurrence_cutoff);
+                let kind = match delivery {
+                    Some(_)
+                        if has_matching_intent
+                            || !recurrence_penalty_applied
+                            || has_new_placement
+                            || has_strong_feedback =>
+                    {
+                        FeedItemKind::OldGem
+                    }
+                    Some(_) => return None,
+                    None if is_exploration => FeedItemKind::Exploration,
+                    None => FeedItemKind::Subscribed,
+                };
                 let (mut score, mut reasons) =
                     feed_attention_value(&store, user_id, item, scoped_pod_ids.as_deref(), now);
                 if recurrence_penalty_applied {
@@ -188,34 +276,55 @@ impl AgentTools {
                 } else {
                     reasons.push("Item is outside the recurrence penalty window".into());
                 }
-                (item, recurrence_penalty_applied, score, reasons)
+                if has_matching_intent {
+                    score += 1.0;
+                    reasons.push(format!(
+                        "Batch Intent focus matched: {}",
+                        request.batch_intent.focus_topics.join(", ")
+                    ));
+                }
+                if !request.batch_intent.avoid_topics.is_empty() {
+                    reasons.push(format!(
+                        "Batch Intent avoided: {}",
+                        request.batch_intent.avoid_topics.join(", ")
+                    ));
+                }
+                let cap_pod_ids = if subscribed_pod_ids.is_empty() {
+                    placement_pod_ids
+                } else {
+                    subscribed_pod_ids
+                };
+                Some(RankedFeedCandidate {
+                    item,
+                    recurrence_penalty_applied,
+                    score,
+                    reasons,
+                    kind,
+                    pod_ids: cap_pod_ids,
+                    priority_pod_ids,
+                })
             })
-            .filter(|(_, _, score, _)| *score > 0.0)
+            .filter(|candidate| candidate.score > 0.0)
             .collect::<Vec<_>>();
-        eligible.sort_by(|left, right| {
-            right
-                .2
-                .total_cmp(&left.2)
-                .then_with(|| right.0.created_at.cmp(&left.0.created_at))
-                .then_with(|| left.0.canonical_url.cmp(&right.0.canonical_url))
-        });
+        eligible.sort_by(compare_feed_candidates);
 
         let allowed_actions = feed_allowed_actions(&store, ctx)?;
 
-        let items = eligible
+        let selected = compose_feed_candidates(eligible, request.size, request.feed_mix);
+        let items = selected
             .into_iter()
-            .take(request.size)
-            .map(|(item, recurrence_penalty_applied, score, reasons)| {
+            .map(|candidate| {
                 feed_batch_item(
                     &store,
                     user_id,
-                    item,
+                    candidate.item,
                     &allowed_actions,
                     scoped_pod_ids.as_deref(),
                     FeedItemSelection {
-                        recurrence_penalty_applied,
-                        attention_value: score,
-                        reasons,
+                        recurrence_penalty_applied: candidate.recurrence_penalty_applied,
+                        attention_value: candidate.score,
+                        reasons: candidate.reasons,
+                        kind: candidate.kind,
                     },
                 )
             })
@@ -232,6 +341,8 @@ impl AgentTools {
             tenant_id: ctx.tenant_id,
             requested_size: request.size,
             recurrence_penalty_days: recurrence_penalty_days.get(),
+            feed_mix: request.feed_mix,
+            batch_intent: request.batch_intent,
             state,
             items,
             created_at: now,
@@ -729,6 +840,7 @@ impl AgentTools {
                 user_id,
                 pod_id: local_pod.id,
                 role: PodRole::Member,
+                is_priority: false,
                 created_at: now,
             });
         }
@@ -2338,6 +2450,7 @@ impl AgentTools {
                 user_id,
                 pod_id: pod.id,
                 role: PodRole::Owner,
+                is_priority: false,
                 created_at: Utc::now(),
             });
         }
@@ -2437,6 +2550,7 @@ impl AgentTools {
             user_id: owner_id,
             pod_id: pod.id,
             role: PodRole::Owner,
+            is_priority: false,
             created_at: now,
         });
         store.insert_pod_package_version(package.clone())?;
@@ -2484,6 +2598,7 @@ impl AgentTools {
                 user_id,
                 pod_id: pod.id,
                 role: PodRole::Member,
+                is_priority: false,
                 created_at: Utc::now(),
             });
             record_harness_write(
@@ -2494,6 +2609,47 @@ impl AgentTools {
             );
             self.persist_locked(&mut store)?;
         }
+        Ok(())
+    }
+
+    /// Configures bounded Priority Subscription representation in future Feed Batches.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Subscription management is denied, the User is not
+    /// subscribed to the Pod, or persistence fails.
+    pub fn set_priority_subscription(
+        &self,
+        ctx: &AuthContext,
+        pod_id: PodId,
+        is_priority: bool,
+    ) -> Result<(), AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(
+            &store,
+            ctx,
+            HarnessCapability::SubscriptionManagement,
+            Some(pod_id),
+        )?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Priority Subscription requires an authenticated User".into())
+        })?;
+        let membership = store
+            .pod_memberships
+            .iter_mut()
+            .find(|membership| membership.user_id == user_id && membership.pod_id == pod_id)
+            .ok_or_else(|| StoreError::NotFound("Subscription".into()))?;
+        membership.is_priority = is_priority;
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::SetPrioritySubscription,
+            Some(pod_id),
+        );
+        self.persist_locked(&mut store)?;
         Ok(())
     }
 
@@ -7693,6 +7849,7 @@ struct FeedItemSelection {
     recurrence_penalty_applied: bool,
     attention_value: f32,
     reasons: Vec<String>,
+    kind: FeedItemKind,
 }
 
 fn feed_content_reference(item: &Submission) -> FeedContentReference {
@@ -7852,6 +8009,7 @@ fn feed_batch_item(
         recurrence_penalty_applied,
         attention_value,
         mut reasons,
+        kind,
     } = selection;
     let content_item_id = ContentItemId::from(item.id);
     let placements = store
@@ -7874,7 +8032,8 @@ fn feed_batch_item(
         .filter_map(|submission_id| store.candidate_submissions.get(submission_id))
         .map(|submission| submission.evidence.provenance.clone())
         .collect::<Vec<_>>();
-    let is_exploration = !placements.is_empty()
+    let is_exploration = kind == FeedItemKind::Exploration;
+    let inferred_exploration = !placements.is_empty()
         && placements.iter().all(|placement| {
             store
                 .pods
@@ -7884,8 +8043,11 @@ fn feed_batch_item(
                     membership.user_id == user_id && membership.pod_id == placement.pod_id
                 })
         });
-    if is_exploration {
-        reasons.push("Clearly labeled exploration from an unsubscribed public Pod".into());
+    const EXPLORATION_REASON: &str = "Clearly labeled exploration from an unsubscribed public Pod";
+    if (is_exploration || inferred_exploration)
+        && !reasons.iter().any(|reason| reason == EXPLORATION_REASON)
+    {
+        reasons.push(EXPLORATION_REASON.into());
     }
     FeedBatchItem {
         content_reference: feed_content_reference(item),
@@ -7896,7 +8058,8 @@ fn feed_batch_item(
             reasons,
             recurrence_penalty_applied,
         },
-        is_exploration,
+        is_exploration: is_exploration || inferred_exploration,
+        kind,
         feedback_state: feed_feedback_state(store, user_id, item.id),
         allowed_actions: allowed_actions.to_vec(),
     }
@@ -7938,6 +8101,7 @@ fn project_feed_batch_for_context(
                             .recurrence_penalty_applied,
                         attention_value: existing.ranking_evidence.attention_value,
                         reasons: existing.ranking_evidence.reasons.clone(),
+                        kind: existing.kind,
                     },
                 )
             })
@@ -8495,6 +8659,7 @@ fn apply_sensitive_change(
                     user_id,
                     pod_id: pod.id,
                     role: PodRole::Owner,
+                    is_priority: false,
                     created_at: Utc::now(),
                 });
             }

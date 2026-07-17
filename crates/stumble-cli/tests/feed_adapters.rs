@@ -23,7 +23,7 @@ impl Drop for TestDataDir {
     }
 }
 
-fn accepted_item(tools: &AgentTools, ctx: &AuthContext) -> ContentItemId {
+fn accepted_item(tools: &AgentTools, ctx: &AuthContext) -> (PodId, ContentItemId) {
     let pod = tools
         .create_pod(
             ctx,
@@ -73,7 +73,7 @@ fn accepted_item(tools: &AgentTools, ctx: &AuthContext) -> ContentItemId {
     tools
         .curate_candidate(ctx, submitted.candidate.id, chrono::Utc::now())
         .unwrap();
-    tools
+    let content_item_id = tools
         .review_candidate_placement(
             ctx,
             submitted.candidate.id,
@@ -84,7 +84,8 @@ fn accepted_item(tools: &AgentTools, ctx: &AuthContext) -> ContentItemId {
         )
         .unwrap()
         .content_item_id
-        .unwrap()
+        .unwrap();
+    (pod.id, content_item_id)
 }
 
 #[tokio::test]
@@ -102,6 +103,7 @@ async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
                     HarnessCapability::Feedback,
                     HarnessCapability::CandidateSubmission,
                     HarnessCapability::PodCuration,
+                    HarnessCapability::SubscriptionManagement,
                 ],
                 pod_ids: None,
             },
@@ -109,7 +111,7 @@ async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
         .unwrap();
     let token = issued.token.expose().to_string();
     let ctx = tools.authenticate_token(&token).unwrap().unwrap();
-    let content_item_id = accepted_item(&tools, &ctx);
+    let (pod_id, content_item_id) = accepted_item(&tools, &ctx);
     drop(tools);
 
     let cli = Command::new(env!("CARGO_BIN_EXE_podctl"))
@@ -119,6 +121,20 @@ async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
             "--token",
             &token,
             "feed",
+            "--high-value-percent",
+            "70",
+            "--exploration-percent",
+            "20",
+            "--old-gem-percent",
+            "10",
+            "--per-pod-cap",
+            "4",
+            "--per-source-cap",
+            "3",
+            "--focus",
+            "adapters",
+            "--avoid",
+            "politics",
         ])
         .output()
         .unwrap();
@@ -134,28 +150,90 @@ async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
     let mcp_batch = mcp
         .call(McpToolCall {
             tool: "get_feed_batch".into(),
-            arguments: json!({}),
+            arguments: json!({
+                "feed_mix": {
+                    "high_value_percent": 70,
+                    "exploration_percent": 20,
+                    "old_gem_percent": 10,
+                    "per_pod_cap": 4,
+                    "per_source_cap": 3
+                },
+                "batch_intent": {
+                    "focus_topics": ["adapters"],
+                    "avoid_topics": ["politics"]
+                }
+            }),
         })
         .unwrap();
     assert_eq!(mcp_batch, cli_batch);
 
     let response = router(tools)
         .oneshot(
-            Request::get("/feed")
+            Request::get("/feed?high_value_percent=70&exploration_percent=20&old_gem_percent=10&per_pod_cap=4&per_source_cap=3&focus=adapters&avoid=politics")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
-    let http_batch: Value = serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let status = response.status();
+    let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        axum::http::StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&response_body)
+    );
+    let http_batch: Value = serde_json::from_slice(&response_body).unwrap();
     assert_eq!(http_batch, cli_batch);
+    assert_eq!(cli_batch["feed_mix"]["high_value_percent"], 70);
+    assert_eq!(
+        cli_batch["batch_intent"]["focus_topics"],
+        json!(["adapters"])
+    );
+
+    let pod_id_string = pod_id.to_string();
+    let cli_priority = Command::new(env!("CARGO_BIN_EXE_podctl"))
+        .args([
+            "--data-dir",
+            data_dir.0.to_str().unwrap(),
+            "--token",
+            &token,
+            "priority-subscription",
+            &pod_id_string,
+            "true",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        cli_priority.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli_priority.stderr)
+    );
+
+    let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
+    let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
+    assert_eq!(
+        mcp.call(McpToolCall {
+            tool: "set_priority_subscription".into(),
+            arguments: json!({"pod_id": pod_id, "is_priority": false}),
+        })
+        .unwrap(),
+        json!({"status": "updated"})
+    );
+    let response = router(tools)
+        .oneshot(
+            Request::post(format!("/subscriptions/{pod_id}/priority"))
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"is_priority":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
 
     let content_item_id = content_item_id.to_string();
     let cli_feedback = Command::new(env!("CARGO_BIN_EXE_podctl"))

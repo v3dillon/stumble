@@ -12,6 +12,31 @@ repetition rather than permanently excluding an item.
 Dismissed and Less-like-this items, blocked sources, and blocked topics are excluded
 from automatic delivery.
 
+## Constrained Feed Mix
+
+Each batch records the exact `FeedMix` used to compose it. Defaults target 80%
+highest-value subscribed content, up to 10% clearly labeled Exploration Items, and
+up to 10% Old Gems. Per-Pod and per-source caps apply across the blend; unused
+category capacity backfills from the next highest Attention Value candidates without
+relaxing those diversity caps.
+
+Priority Subscriptions are configured with `set_priority_subscription`. One eligible
+item per Priority Subscription is selected ahead of ordinary subscribed content,
+bounded within the subscribed-content target so priority does not become the whole Feed.
+Canonical Content Items remain deduplicated and retain all contributing Accepted
+Placement evidence.
+
+`BatchIntent` supplies temporary focus and avoidance topics. It is recorded on the
+stable batch and in ranking explanations, but is never written into the User's Taste
+Profile. Previously Delivered Items become Old Gems after the recurrence window
+decays, after a new independent Pod Placement appears, or after the User both saves
+the item and requests More like this.
+
+HTTP Feed queries, MCP `FeedBatchRequest` arguments, and CLI `feed` flags expose the
+same Feed Mix and Batch Intent fields. Priority Subscription updates are available at
+`POST /subscriptions/:pod_id/priority`, MCP `set_priority_subscription`, and CLI
+`priority-subscription`.
+
 Each item carries its Content Reference, all contributing Accepted Placement
 evidence, discovery provenance, Attention Value evidence, exploration label, current
 feedback state, and permission-derived next actions. Feedback supports Save, More

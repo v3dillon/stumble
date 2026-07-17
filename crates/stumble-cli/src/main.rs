@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf};
 use stumble_core::*;
 
@@ -13,6 +13,32 @@ struct Cli {
     data_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Debug, Args)]
+struct FeedMixArgs {
+    #[arg(long)]
+    high_value_percent: Option<FeedPercentage>,
+    #[arg(long)]
+    exploration_percent: Option<FeedPercentage>,
+    #[arg(long)]
+    old_gem_percent: Option<FeedPercentage>,
+    #[arg(long)]
+    per_pod_cap: Option<FeedCap>,
+    #[arg(long)]
+    per_source_cap: Option<FeedCap>,
+}
+
+impl From<FeedMixArgs> for FeedMixOverrides {
+    fn from(args: FeedMixArgs) -> Self {
+        Self::new(
+            args.high_value_percent,
+            args.exploration_percent,
+            args.old_gem_percent,
+            args.per_pod_cap,
+            args.per_source_cap,
+        )
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -49,6 +75,11 @@ enum Command {
     ListPods,
     JoinPod {
         pod: String,
+    },
+    PrioritySubscription {
+        pod_id: PodId,
+        #[arg(action = clap::ArgAction::Set)]
+        is_priority: bool,
     },
     Submit {
         #[arg(long)]
@@ -101,6 +132,12 @@ enum Command {
         size: usize,
         #[arg(long)]
         recurrence_penalty_days: Option<RecurrencePenaltyDays>,
+        #[command(flatten)]
+        feed_mix: FeedMixArgs,
+        #[arg(long = "focus")]
+        focus_topics: Vec<String>,
+        #[arg(long = "avoid")]
+        avoid_topics: Vec<String>,
     },
     CompleteFeed {
         id: uuid::Uuid,
@@ -391,6 +428,13 @@ async fn main() -> anyhow::Result<()> {
             tools.join_pod(&ctx, &pod)?;
             println!("joined {pod}");
         }
+        Command::PrioritySubscription {
+            pod_id,
+            is_priority,
+        } => {
+            tools.set_priority_subscription(&ctx, pod_id, is_priority)?;
+            print_json(&SetPrioritySubscriptionRequest::new(pod_id, is_priority))?;
+        }
         Command::Submit {
             pod,
             url,
@@ -473,9 +517,14 @@ async fn main() -> anyhow::Result<()> {
         Command::Feed {
             size,
             recurrence_penalty_days,
+            feed_mix,
+            focus_topics,
+            avoid_topics,
         } => {
             let mut request = FeedBatchRequest::new(size).map_err(anyhow::Error::msg)?;
             request.recurrence_penalty_days = recurrence_penalty_days;
+            request.feed_mix = FeedMixOverrides::from(feed_mix).resolve(FeedMix::default())?;
+            request.batch_intent = BatchIntent::new(focus_topics, avoid_topics);
             print_json(&tools.get_feed_batch(&ctx, request, chrono::Utc::now())?)?;
         }
         Command::CompleteFeed { id } => {

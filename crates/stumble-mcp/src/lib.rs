@@ -39,6 +39,7 @@ impl McpToolRouter {
             "get_feed_batch",
             "complete_feed_batch",
             "record_feed_feedback",
+            "set_priority_subscription",
             "get_taste_profile",
             "update_taste_profile",
             "reset_learned_taste",
@@ -122,6 +123,16 @@ impl McpToolRouter {
                     opt_string(&call.arguments, "reason"),
                     chrono::Utc::now(),
                 )?))
+            }
+            "set_priority_subscription" => {
+                let request: SetPrioritySubscriptionRequest =
+                    serde_json::from_value(call.arguments)?;
+                self.tools.set_priority_subscription(
+                    &self.ctx,
+                    request.pod_id,
+                    request.is_priority,
+                )?;
+                Ok(json!({"status": "updated"}))
             }
             "get_taste_profile" => Ok(json!(self.tools.taste_profile(&self.ctx)?)),
             "update_taste_profile" => {

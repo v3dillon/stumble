@@ -558,7 +558,7 @@ pub struct FeedFeedbackState {
 }
 
 /// Configurable request for a finite Feed Batch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct FeedBatchRequest {
@@ -569,6 +569,12 @@ pub struct FeedBatchRequest {
     /// explicit Taste Profile preference, which defaults to thirty days.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recurrence_penalty_days: Option<RecurrencePenaltyDays>,
+    /// Composition constraints for this Feed Batch.
+    #[serde(default)]
+    pub feed_mix: FeedMix,
+    /// Temporary focus and avoidance instructions for this Feed Batch only.
+    #[serde(default)]
+    pub batch_intent: BatchIntent,
 }
 
 const fn default_feed_batch_size() -> usize {
@@ -593,6 +599,8 @@ impl FeedBatchRequest {
         Ok(Self {
             size,
             recurrence_penalty_days: None,
+            feed_mix: FeedMix::default(),
+            batch_intent: BatchIntent::default(),
         })
     }
 
@@ -602,6 +610,436 @@ impl FeedBatchRequest {
         self.recurrence_penalty_days = Some(days);
         self
     }
+
+    /// Replaces the composition constraints for this request.
+    #[must_use]
+    pub fn with_feed_mix(mut self, feed_mix: FeedMix) -> Self {
+        self.feed_mix = feed_mix;
+        self
+    }
+
+    /// Adds temporary focus and avoidance instructions to this request.
+    #[must_use]
+    pub fn with_batch_intent(mut self, batch_intent: BatchIntent) -> Self {
+        self.batch_intent = batch_intent;
+        self
+    }
+}
+
+/// Percentage from zero through one hundred used by Feed Mix targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct FeedPercentage(u8);
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawFeedPercentage {
+    Number(u8),
+    String(String),
+}
+
+impl<'de> Deserialize<'de> for FeedPercentage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match RawFeedPercentage::deserialize(deserializer)? {
+            RawFeedPercentage::Number(value) => Self::new(value),
+            RawFeedPercentage::String(value) => value.parse(),
+        }
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+impl FeedPercentage {
+    /// Parses a percentage from zero through one hundred.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FeedMixError::Percentage`] when `value` exceeds one hundred.
+    pub const fn new(value: u8) -> Result<Self, FeedMixError> {
+        if value > 100 {
+            Err(FeedMixError::Percentage(value))
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Returns the validated primitive percentage.
+    #[must_use]
+    pub const fn value(self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<u8> for FeedPercentage {
+    type Error = FeedMixError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl std::str::FromStr for FeedPercentage {
+    type Err = FeedMixError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse::<u8>()
+            .map_err(|_| FeedMixError::PercentageParse(value.into()))?
+            .try_into()
+    }
+}
+
+/// Positive maximum contribution attributed to one Pod or source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct FeedCap(std::num::NonZeroUsize);
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawFeedCap {
+    Number(usize),
+    String(String),
+}
+
+impl<'de> Deserialize<'de> for FeedCap {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match RawFeedCap::deserialize(deserializer)? {
+            RawFeedCap::Number(value) => Self::new(value),
+            RawFeedCap::String(value) => value.parse(),
+        }
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+impl FeedCap {
+    /// Parses a strictly positive cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FeedMixError::ZeroCap`] when `value` is zero.
+    pub const fn new(value: usize) -> Result<Self, FeedMixError> {
+        match std::num::NonZeroUsize::new(value) {
+            Some(value) => Ok(Self(value)),
+            None => Err(FeedMixError::ZeroCap),
+        }
+    }
+
+    /// Returns the validated positive primitive cap.
+    #[must_use]
+    pub const fn value(self) -> usize {
+        self.0.get()
+    }
+}
+
+impl TryFrom<usize> for FeedCap {
+    type Error = FeedMixError;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl std::str::FromStr for FeedCap {
+    type Err = FeedMixError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse::<usize>()
+            .map_err(|_| FeedMixError::CapParse(value.into()))?
+            .try_into()
+    }
+}
+
+/// Error returned when Feed Mix constraints are not valid domain values.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum FeedMixError {
+    /// A percentage exceeded one hundred.
+    #[error("Feed Mix percentage {0} exceeds 100")]
+    Percentage(u8),
+    /// A percentage transport value was not an unsigned integer.
+    #[error("Feed Mix percentage must be an unsigned integer: {0}")]
+    PercentageParse(String),
+    /// A cap transport value was not an unsigned integer.
+    #[error("Feed Mix cap must be an unsigned integer: {0}")]
+    CapParse(String),
+    /// A cap was zero.
+    #[error("Feed Mix caps must be positive")]
+    ZeroCap,
+    /// Percentage targets exceeded one complete batch.
+    #[error("Feed Mix percentage targets must total at most 100")]
+    TargetTotal,
+}
+
+/// Configurable constraints used to compose one finite Feed Batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawFeedMix")]
+#[non_exhaustive]
+pub struct FeedMix {
+    /// Target percentage of highest-value subscribed Content Items.
+    high_value_percent: FeedPercentage,
+    /// Maximum target percentage of Exploration Items when all categories exist.
+    exploration_percent: FeedPercentage,
+    /// Maximum target percentage of Old Gems when all categories exist.
+    old_gem_percent: FeedPercentage,
+    /// Maximum selected items attributed to one Pod.
+    per_pod_cap: FeedCap,
+    /// Maximum selected items from one source.
+    per_source_cap: FeedCap,
+}
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawFeedMix {
+    high_value_percent: u8,
+    exploration_percent: u8,
+    old_gem_percent: u8,
+    per_pod_cap: usize,
+    per_source_cap: usize,
+}
+
+impl Default for RawFeedMix {
+    fn default() -> Self {
+        Self {
+            high_value_percent: 80,
+            exploration_percent: 10,
+            old_gem_percent: 10,
+            per_pod_cap: 3,
+            per_source_cap: 2,
+        }
+    }
+}
+
+impl TryFrom<RawFeedMix> for FeedMix {
+    type Error = FeedMixError;
+
+    fn try_from(raw: RawFeedMix) -> Result<Self, Self::Error> {
+        Self::new(
+            raw.high_value_percent,
+            raw.exploration_percent,
+            raw.old_gem_percent,
+            raw.per_pod_cap,
+            raw.per_source_cap,
+        )
+    }
+}
+
+impl Default for FeedMix {
+    fn default() -> Self {
+        Self {
+            high_value_percent: FeedPercentage(80),
+            exploration_percent: FeedPercentage(10),
+            old_gem_percent: FeedPercentage(10),
+            per_pod_cap: FeedCap(
+                std::num::NonZeroUsize::new(3).unwrap_or(std::num::NonZeroUsize::MIN),
+            ),
+            per_source_cap: FeedCap(
+                std::num::NonZeroUsize::new(2).unwrap_or(std::num::NonZeroUsize::MIN),
+            ),
+        }
+    }
+}
+
+impl FeedMix {
+    /// Creates validated Feed Mix constraints.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for percentages above one hundred, zero caps, or targets
+    /// whose sum exceeds one complete batch.
+    pub fn new(
+        high_value_percent: u8,
+        exploration_percent: u8,
+        old_gem_percent: u8,
+        per_pod_cap: usize,
+        per_source_cap: usize,
+    ) -> Result<Self, FeedMixError> {
+        let high_value_percent = FeedPercentage::new(high_value_percent)?;
+        let exploration_percent = FeedPercentage::new(exploration_percent)?;
+        let old_gem_percent = FeedPercentage::new(old_gem_percent)?;
+        if u16::from(high_value_percent.value())
+            + u16::from(exploration_percent.value())
+            + u16::from(old_gem_percent.value())
+            > 100
+        {
+            return Err(FeedMixError::TargetTotal);
+        }
+        Ok(Self {
+            high_value_percent,
+            exploration_percent,
+            old_gem_percent,
+            per_pod_cap: FeedCap::new(per_pod_cap)?,
+            per_source_cap: FeedCap::new(per_source_cap)?,
+        })
+    }
+
+    /// Replaces the percentage targets used before unavailable-category backfill.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a percentage or the combined target is invalid.
+    pub fn with_targets(
+        self,
+        high_value_percent: u8,
+        exploration_percent: u8,
+        old_gem_percent: u8,
+    ) -> Result<Self, FeedMixError> {
+        Self::new(
+            high_value_percent,
+            exploration_percent,
+            old_gem_percent,
+            self.per_pod_cap.value(),
+            self.per_source_cap.value(),
+        )
+    }
+
+    /// Replaces the maximum contribution attributed to one Pod or source.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either cap is zero.
+    pub fn with_caps(
+        self,
+        per_pod_cap: usize,
+        per_source_cap: usize,
+    ) -> Result<Self, FeedMixError> {
+        Self::new(
+            self.high_value_percent.value(),
+            self.exploration_percent.value(),
+            self.old_gem_percent.value(),
+            per_pod_cap,
+            per_source_cap,
+        )
+    }
+
+    /// Returns the highest-value subscribed target.
+    #[must_use]
+    pub const fn high_value_percent(self) -> FeedPercentage {
+        self.high_value_percent
+    }
+
+    /// Returns the Exploration Item target.
+    #[must_use]
+    pub const fn exploration_percent(self) -> FeedPercentage {
+        self.exploration_percent
+    }
+
+    /// Returns the Old Gem target.
+    #[must_use]
+    pub const fn old_gem_percent(self) -> FeedPercentage {
+        self.old_gem_percent
+    }
+
+    /// Returns the per-Pod diversity cap.
+    #[must_use]
+    pub const fn per_pod_cap(self) -> FeedCap {
+        self.per_pod_cap
+    }
+
+    /// Returns the per-source diversity cap.
+    #[must_use]
+    pub const fn per_source_cap(self) -> FeedCap {
+        self.per_source_cap
+    }
+}
+
+/// Optional transport-level overrides resolved against a complete Feed Mix.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct FeedMixOverrides {
+    /// Optional highest-value subscribed target override.
+    pub high_value_percent: Option<FeedPercentage>,
+    /// Optional Exploration Item target override.
+    pub exploration_percent: Option<FeedPercentage>,
+    /// Optional Old Gem target override.
+    pub old_gem_percent: Option<FeedPercentage>,
+    /// Optional per-Pod diversity cap override.
+    pub per_pod_cap: Option<FeedCap>,
+    /// Optional per-source diversity cap override.
+    pub per_source_cap: Option<FeedCap>,
+}
+
+impl FeedMixOverrides {
+    /// Creates a partial Feed Mix override from adapter-provided values.
+    #[must_use]
+    pub const fn new(
+        high_value_percent: Option<FeedPercentage>,
+        exploration_percent: Option<FeedPercentage>,
+        old_gem_percent: Option<FeedPercentage>,
+        per_pod_cap: Option<FeedCap>,
+        per_source_cap: Option<FeedCap>,
+    ) -> Self {
+        Self {
+            high_value_percent,
+            exploration_percent,
+            old_gem_percent,
+            per_pod_cap,
+            per_source_cap,
+        }
+    }
+
+    /// Resolves omitted values from `defaults` and validates the resulting mix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the combined percentage targets exceed one batch.
+    pub fn resolve(self, defaults: FeedMix) -> Result<FeedMix, FeedMixError> {
+        FeedMix::new(
+            self.high_value_percent
+                .unwrap_or(defaults.high_value_percent())
+                .value(),
+            self.exploration_percent
+                .unwrap_or(defaults.exploration_percent())
+                .value(),
+            self.old_gem_percent
+                .unwrap_or(defaults.old_gem_percent())
+                .value(),
+            self.per_pod_cap.unwrap_or(defaults.per_pod_cap()).value(),
+            self.per_source_cap
+                .unwrap_or(defaults.per_source_cap())
+                .value(),
+        )
+    }
+}
+
+/// Temporary focus and avoidance instructions affecting only one Feed Batch.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct BatchIntent {
+    /// Topics whose matching Content References receive a temporary boost.
+    pub focus_topics: Vec<String>,
+    /// Topics excluded from this Feed Batch without changing the Taste Profile.
+    pub avoid_topics: Vec<String>,
+}
+
+impl BatchIntent {
+    /// Creates temporary focus and avoidance instructions for one request.
+    #[must_use]
+    pub const fn new(focus_topics: Vec<String>, avoid_topics: Vec<String>) -> Self {
+        Self {
+            focus_topics,
+            avoid_topics,
+        }
+    }
+}
+
+/// Composition role under which a Content Item was selected.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FeedItemKind {
+    /// Highest-value unseen content from a subscribed Pod.
+    #[default]
+    Subscribed,
+    /// Clearly labeled content from an unsubscribed public Pod.
+    Exploration,
+    /// Previously Delivered content deliberately resurfaced after eligibility returned.
+    OldGem,
 }
 
 /// Validated recurrence suppression window in days.
@@ -724,6 +1162,9 @@ pub struct FeedBatchItem {
     pub ranking_evidence: FeedRankingEvidence,
     /// Explicit label for unsubscribed public-Pod exploration.
     pub is_exploration: bool,
+    /// Composition role under which this item was selected.
+    #[serde(default)]
+    pub kind: FeedItemKind,
     /// Current private explicit feedback for this item.
     pub feedback_state: FeedFeedbackState,
     /// Operations allowed by the current Harness Grant.
@@ -746,6 +1187,12 @@ pub struct FeedBatch {
     pub requested_size: usize,
     /// Recurrence suppression window used during selection.
     pub recurrence_penalty_days: u32,
+    /// Composition constraints used to select this stable batch.
+    #[serde(default)]
+    pub feed_mix: FeedMix,
+    /// Temporary request instructions recorded with this stable batch.
+    #[serde(default)]
+    pub batch_intent: BatchIntent,
     /// Ready or explicit Caught Up state.
     pub state: FeedBatchState,
     /// Stable finite item sequence.
@@ -1082,6 +1529,7 @@ pub enum HarnessWriteOperation {
     IndexPublicPods,
     CreatePod,
     JoinPod,
+    SetPrioritySubscription,
     SubscribePublicPod,
     SynchronizeSubscription,
     SubmitLinkToPod,
@@ -1276,6 +1724,9 @@ pub struct PodMembership {
     pub user_id: UserId,
     pub pod_id: PodId,
     pub role: PodRole,
+    /// Whether this Subscription receives bounded Feed representation.
+    #[serde(default)]
+    pub is_priority: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -2597,6 +3048,28 @@ pub struct Subscription {
     pub created_at: DateTime<Utc>,
     /// Time of the latest successful synchronization attempt.
     pub synchronized_at: DateTime<Utc>,
+}
+
+/// Request to enable or disable one User's Priority Subscription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct SetPrioritySubscriptionRequest {
+    /// Subscribed Pod whose bounded representation changes.
+    pub pod_id: PodId,
+    /// Whether future Feed Batches should guarantee bounded representation.
+    pub is_priority: bool,
+}
+
+impl SetPrioritySubscriptionRequest {
+    /// Creates a Priority Subscription update.
+    #[must_use]
+    pub const fn new(pod_id: PodId, is_priority: bool) -> Self {
+        Self {
+            pod_id,
+            is_priority,
+        }
+    }
 }
 
 /// Direct-address request containing artifacts fetched outbound from an Origin Node.

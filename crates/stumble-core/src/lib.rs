@@ -1,5 +1,6 @@
 pub mod agent_tools;
 pub mod domain;
+mod feed_mix;
 pub mod ranking;
 pub mod seeds;
 pub mod signing;

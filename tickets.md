@@ -202,21 +202,21 @@ Work the **frontier**: any ticket whose blockers are all done. Each ticket is si
 
 ## Complete the constrained Feed Mix
 
-**Status:** ready-for-agent
+**Status:** complete
 
 **What to build:** Produce the intended Personal Feed by blending high-value subscribed content, controlled exploration, Priority Subscriptions, and deliberate Old Gems under configurable diversity constraints and temporary Batch Intent.
 
 **Blocked by:** Learn a private Taste Profile; Apply tombstones without erasing local curation; Discover Pods through the Stumble Substrate.
 
-- [ ] Default batches target roughly 70–80% highest-value subscribed content, up to 10% Exploration Items, and up to 10% Old Gems.
-- [ ] Per-Pod and per-source caps prevent domination while unavailable categories backfill cleanly.
-- [ ] Eligible Priority Subscriptions receive representation without overwhelming the batch.
-- [ ] The same canonical Content Item appearing through several Pods is delivered once with all contributing placement evidence.
-- [ ] Exploration Items are clearly labeled and do not silently create a Subscription.
-- [ ] Batch Intent changes only the requested batch and remains visible in its explanation.
-- [ ] Old Gems become eligible after the recurrence penalty decays or strong new evidence appears.
-- [ ] Dismissed, blocked, and Less like this items do not automatically resurface.
-- [ ] Observable composition tests avoid locking down one exact floating-point scoring formula.
+- [x] Default batches target roughly 70–80% highest-value subscribed content, up to 10% Exploration Items, and up to 10% Old Gems.
+- [x] Per-Pod and per-source caps prevent domination while unavailable categories backfill cleanly.
+- [x] Eligible Priority Subscriptions receive representation without overwhelming the batch.
+- [x] The same canonical Content Item appearing through several Pods is delivered once with all contributing placement evidence.
+- [x] Exploration Items are clearly labeled and do not silently create a Subscription.
+- [x] Batch Intent changes only the requested batch and remains visible in its explanation.
+- [x] Old Gems become eligible after the recurrence penalty decays or strong new evidence appears.
+- [x] Dismissed, blocked, and Less like this items do not automatically resurface.
+- [x] Observable composition tests avoid locking down one exact floating-point scoring formula.
 
 ## Retire legacy crawler and submission contracts
 
