@@ -443,7 +443,7 @@ fn materialize_and_wake_discovery(
     let wake =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/wake-discovery.sh");
     let scheduler = Command::new(wake)
-        .env("STUMBLE_PODCTL", env!("CARGO_BIN_EXE_podctl"))
+        .env("STUMBLE_CLI", env!("CARGO_BIN_EXE_stumble"))
         .env("STUMBLE_DISCOVERY_TOKEN", worker_token)
         .env("STUMBLE_DATA_DIR", &home_dir.0)
         .env("STUMBLE_DISCOVERY_EVENT_PATH", &scheduler_event)

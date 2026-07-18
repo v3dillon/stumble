@@ -15,8 +15,9 @@ use stumble_core::{
     validate_pod_package_contents, validate_portable_package_files, AddContentItemToPodRequest,
     AgentHarnessId, AgentHarnessKind, AgentTools, AgentToolsError, AuthContext,
     CandidateConfidence, ContentItemId, CreatePodLifecycleRequest, CreatePodOutcome,
-    CreatePodRequest, CurationPolicy, CurationRationale, ExploreRequest, HarnessCapability,
-    PackageVersion, PendingProposalId, Pod, PodCreationPackage, PodPackageRevisionOutcome, PodRole,
+    CreatePodRequest, CurationPolicy, CurationRationale, DiscoveryLeaseSeconds, DiscoveryTask,
+    DiscoveryTaskId, DiscoveryTaskState, ExploreRequest, HarnessCapability, PackageVersion,
+    PendingProposalId, Pod, PodCreationPackage, PodPackageRevisionOutcome, PodRole,
     RegisterAgentHarnessRequest, SensitiveChange, StoreError, Visibility, PORTABLE_PACKAGE_FILES,
 };
 
@@ -515,6 +516,69 @@ fn dispatch(
                 }),
             });
         }
+        "discover task list" => {
+            let now = chrono::Utc::now();
+            let pod = leaf
+                .get_one::<String>("pod")
+                .map(|reference| resolve_pod(&tools, &actor, reference))
+                .transpose()?;
+            let state = leaf.get_one::<String>("state").map(String::as_str);
+            let mut items = tools
+                .list_discovery_tasks(&actor, now)
+                .map_err(agent_tools_error)?;
+            items.retain(|task| {
+                pod.as_ref().is_none_or(|pod| task.pod_id == pod.id)
+                    && discovery_task_matches_state(task, state, now)
+            });
+            items.sort_by(|left, right| {
+                left.due_at
+                    .cmp(&right.due_at)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            return serde_json::to_value(page(items, leaf)?).map_err(internal_error);
+        }
+        "discover task show" => {
+            let id = required_id::<DiscoveryTaskId>(leaf, "id")?;
+            let now = chrono::Utc::now();
+            let task = tools
+                .discovery_task_status(&actor, id, now)
+                .map_err(agent_tools_error)?;
+            return discovery_task_detail(&actor, task, now);
+        }
+        "discover task claim" => {
+            let id = required_id::<DiscoveryTaskId>(leaf, "id")?;
+            let lease = discovery_lease(leaf)?;
+            let now = chrono::Utc::now();
+            let task = tools
+                .claim_discovery_task(&actor, id, now, lease)
+                .map_err(agent_tools_error)?;
+            return discovery_task_mutation_result(&actor, task, now);
+        }
+        "discover task renew" => {
+            let id = required_id::<DiscoveryTaskId>(leaf, "id")?;
+            let lease = discovery_lease(leaf)?;
+            let now = chrono::Utc::now();
+            let task = tools
+                .renew_discovery_task_lease(&actor, id, now, lease)
+                .map_err(agent_tools_error)?;
+            return discovery_task_mutation_result(&actor, task, now);
+        }
+        "discover task complete" => {
+            let id = required_id::<DiscoveryTaskId>(leaf, "id")?;
+            let now = chrono::Utc::now();
+            let task = tools
+                .complete_discovery_task(&actor, id, now)
+                .map_err(agent_tools_error)?;
+            return discovery_task_mutation_result(&actor, task, now);
+        }
+        "discover task fail" => {
+            let id = required_id::<DiscoveryTaskId>(leaf, "id")?;
+            let now = chrono::Utc::now();
+            let task = tools
+                .fail_discovery_task(&actor, id, now, required_string(leaf, "reason")?.to_owned())
+                .map_err(agent_tools_error)?;
+            return discovery_task_mutation_result(&actor, task, now);
+        }
         "node harness list" => {
             let items = tools
                 .list_agent_harnesses(&actor)
@@ -740,6 +804,77 @@ fn pod_result(pod: Pod) -> Result<Value, (ErrorBody, ExitStatusCategory)> {
     Ok(result)
 }
 
+fn discovery_task_matches_state(
+    task: &DiscoveryTask,
+    state: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    match state {
+        None => true,
+        Some("ready") => task.state == DiscoveryTaskState::Pending && task.due_at <= now,
+        Some("pending") => task.state == DiscoveryTaskState::Pending,
+        Some("leased") => matches!(task.state, DiscoveryTaskState::Leased(_)),
+        Some("completed") => task.state == DiscoveryTaskState::Completed,
+        Some("terminal-failure") => task.state == DiscoveryTaskState::TerminalFailure,
+        Some(_) => false,
+    }
+}
+
+fn discovery_task_allowed_actions(
+    actor: &AuthContext,
+    task: &DiscoveryTask,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<&'static str> {
+    let Some(harness_id) = actor.harness_id else {
+        return Vec::new();
+    };
+    match &task.state {
+        DiscoveryTaskState::Pending if task.due_at <= now => vec!["claim"],
+        DiscoveryTaskState::Leased(lease)
+            if lease.harness_id == harness_id && lease.expires_at > now =>
+        {
+            vec!["renew", "complete", "fail"]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn discovery_task_detail(
+    actor: &AuthContext,
+    task: DiscoveryTask,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Value, (ErrorBody, ExitStatusCategory)> {
+    let allowed_actions = discovery_task_allowed_actions(actor, &task, now);
+    serde_json::to_value(ResourceDetail {
+        resource: task,
+        allowed_actions,
+    })
+    .map_err(internal_error)
+}
+
+fn discovery_task_mutation_result(
+    actor: &AuthContext,
+    task: DiscoveryTask,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Value, (ErrorBody, ExitStatusCategory)> {
+    let allowed_actions = discovery_task_allowed_actions(actor, &task, now);
+    Ok(json!({ "task": task, "allowed_actions": allowed_actions }))
+}
+
+fn discovery_lease(
+    matches: &ArgMatches,
+) -> Result<DiscoveryLeaseSeconds, (ErrorBody, ExitStatusCategory)> {
+    let seconds = *matches
+        .get_one::<u64>("lease-seconds")
+        .expect("required by clap");
+    DiscoveryLeaseSeconds::new(seconds).map_err(|error| {
+        (
+            ErrorBody::new("validation_error", error.to_string()),
+            ExitStatusCategory::ValidationOrConflict,
+        )
+    })
+}
+
 fn direct_subscription_error(
     error: stumble_sync::DirectSubscriptionError,
 ) -> (ErrorBody, ExitStatusCategory) {
@@ -836,6 +971,18 @@ fn agent_tools_error(error: AgentToolsError) -> (ErrorBody, ExitStatusCategory) 
         ),
         AgentToolsError::Store(StoreError::InvalidSignature) => (
             ErrorBody::new("invalid_signature", error.to_string()),
+            ExitStatusCategory::ValidationOrConflict,
+        ),
+        AgentToolsError::TaskLeaseConflict => (
+            ErrorBody::new("task_lease_conflict", error.to_string()),
+            ExitStatusCategory::ValidationOrConflict,
+        ),
+        AgentToolsError::TaskLeaseRequired => (
+            ErrorBody::new("task_lease_required", error.to_string()),
+            ExitStatusCategory::ValidationOrConflict,
+        ),
+        AgentToolsError::TaskTerminal => (
+            ErrorBody::new("task_terminal", error.to_string()),
             ExitStatusCategory::ValidationOrConflict,
         ),
         error => internal_error(error),
@@ -1171,10 +1318,7 @@ fn package() -> Command {
 fn discover() -> Command {
     Command::new("discover")
         .subcommand_required(true)
-        .subcommand(resource(
-            "task",
-            &["list", "show", "claim", "renew", "complete", "fail"],
-        ))
+        .subcommand(discovery_task())
         .subcommand(
             resource(
                 "candidate",
@@ -1189,6 +1333,43 @@ fn discover() -> Command {
                         .value_hint(ValueHint::FilePath),
                 )
             }),
+        )
+}
+
+fn discovery_task() -> Command {
+    let lease_arg = || {
+        Arg::new("lease-seconds")
+            .long("lease-seconds")
+            .required(true)
+            .value_parser(clap::value_parser!(u64).range(1..=u64::from(DiscoveryLeaseSeconds::MAX)))
+    };
+    Command::new("task")
+        .subcommand_required(true)
+        .subcommand(list_leaf("list").arg(Arg::new("pod").long("pod")).arg(
+            Arg::new("state").long("state").value_parser([
+                "ready",
+                "pending",
+                "leased",
+                "completed",
+                "terminal-failure",
+            ]),
+        ))
+        .subcommand(Command::new("show").arg(Arg::new("id").required(true)))
+        .subcommand(
+            Command::new("claim")
+                .arg(Arg::new("id").required(true))
+                .arg(lease_arg()),
+        )
+        .subcommand(
+            Command::new("renew")
+                .arg(Arg::new("id").required(true))
+                .arg(lease_arg()),
+        )
+        .subcommand(Command::new("complete").arg(Arg::new("id").required(true)))
+        .subcommand(
+            Command::new("fail")
+                .arg(Arg::new("id").required(true))
+                .arg(Arg::new("reason").long("reason").required(true)),
         )
 }
 

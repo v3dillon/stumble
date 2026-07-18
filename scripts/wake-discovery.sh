@@ -2,11 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DATA_DIR="${STUMBLE_DATA_DIR:-$HOME/.stumble/nodes/default}"
-PODCTL="${STUMBLE_PODCTL:-$ROOT/target/release/podctl}"
+DATA_DIR="${STUMBLE_DATA_DIR:-$HOME/.stumble/nodes/home}"
+STUMBLE="${STUMBLE_CLI:-$ROOT/target/release/stumble}"
 TOKEN="${STUMBLE_DISCOVERY_TOKEN:-}"
 HARNESS_COMMAND="${STUMBLE_DISCOVERY_HARNESS_COMMAND:-}"
-API_URL="${STUMBLE_API_URL:-}"
 EVENT_PATH="${STUMBLE_DISCOVERY_EVENT_PATH:-$DATA_DIR/discovery-ready.json}"
 
 if [[ -z "$TOKEN" ]]; then
@@ -14,12 +13,13 @@ if [[ -z "$TOKEN" ]]; then
   exit 2
 fi
 
-if [[ -n "$API_URL" ]]; then
-  curl -fsS -X POST "$API_URL/discovery-tasks" -H "authorization: Bearer $TOKEN" >/dev/null
-  tasks="$(curl -fsS "$API_URL/discovery-tasks/ready" -H "authorization: Bearer $TOKEN")"
-else
-  "$PODCTL" --data-dir "$DATA_DIR" --token "$TOKEN" materialize-discovery-tasks >/dev/null
-  tasks="$("$PODCTL" --data-dir "$DATA_DIR" --token "$TOKEN" list-ready-discovery-tasks)"
+response="$(STUMBLE_HARNESS_CREDENTIAL="$TOKEN" "$STUMBLE" \
+  --data-dir "$DATA_DIR" discover task list --state ready --limit 100)"
+tasks="$(printf '%s' "$response" | sed -E \
+  's/^\{"version":1,"data":\{"items":(\[.*\]),"next_cursor":(null|"[^"]*")\}\}$/\1/')"
+if [[ "$tasks" == "$response" ]]; then
+  printf 'stumble returned an unexpected Discovery Task response\n' >&2
+  exit 1
 fi
 compact="${tasks//$'\n'/}"
 compact="${compact// /}"

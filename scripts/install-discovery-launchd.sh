@@ -28,12 +28,11 @@ fi
 mkdir -p "$PLIST_DIR" "$LOG_DIR"
 LABEL_XML="$(escape_value "$LABEL")"
 WAKE_XML="$(escape_value "$ROOT/scripts/wake-discovery.sh")"
-DATA_DIR_XML="$(escape_value "${STUMBLE_DATA_DIR:-$HOME/.stumble/nodes/default}")"
-PODCTL_XML="$(escape_value "${STUMBLE_PODCTL:-$ROOT/target/release/podctl}")"
+DATA_DIR_XML="$(escape_value "${STUMBLE_DATA_DIR:-$HOME/.stumble/nodes/home}")"
+STUMBLE_XML="$(escape_value "${STUMBLE_CLI:-$ROOT/target/release/stumble}")"
 TOKEN_XML="$(escape_value "$STUMBLE_DISCOVERY_TOKEN")"
 HARNESS_XML="$(escape_value "${STUMBLE_DISCOVERY_HARNESS_COMMAND:-}")"
-API_URL_XML="$(escape_value "${STUMBLE_API_URL:-http://127.0.0.1:8787}")"
-EVENT_PATH_XML="$(escape_value "${STUMBLE_DISCOVERY_EVENT_PATH:-${STUMBLE_DATA_DIR:-$HOME/.stumble/nodes/default}/discovery-ready.json}")"
+EVENT_PATH_XML="$(escape_value "${STUMBLE_DISCOVERY_EVENT_PATH:-${STUMBLE_DATA_DIR:-$HOME/.stumble/nodes/home}/discovery-ready.json}")"
 OUT_XML="$(escape_value "$LOG_DIR/stumble-discovery.out.log")"
 ERR_XML="$(escape_value "$LOG_DIR/stumble-discovery.err.log")"
 cat >"$PLIST" <<PLIST
@@ -49,10 +48,9 @@ cat >"$PLIST" <<PLIST
   <key>EnvironmentVariables</key>
   <dict>
     <key>STUMBLE_DATA_DIR</key><string>$DATA_DIR_XML</string>
-    <key>STUMBLE_PODCTL</key><string>$PODCTL_XML</string>
+    <key>STUMBLE_CLI</key><string>$STUMBLE_XML</string>
     <key>STUMBLE_DISCOVERY_TOKEN</key><string>$TOKEN_XML</string>
     <key>STUMBLE_DISCOVERY_HARNESS_COMMAND</key><string>$HARNESS_XML</string>
-    <key>STUMBLE_API_URL</key><string>$API_URL_XML</string>
     <key>STUMBLE_DISCOVERY_EVENT_PATH</key><string>$EVENT_PATH_XML</string>
   </dict>
 </dict>

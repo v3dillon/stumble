@@ -140,6 +140,11 @@ fn leases_are_exclusive_renewable_and_expire_safely() {
         },
         now + Duration::minutes(12)
     );
+    assert!(matches!(
+        tools
+            .renew_discovery_task_lease(&worker, task.id, now + Duration::minutes(13), lease(600),),
+        Err(AgentToolsError::TaskLeaseRequired)
+    ));
     let reclaimed = tools
         .claim_discovery_task(
             &competitor,

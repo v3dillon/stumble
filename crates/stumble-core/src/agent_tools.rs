@@ -2495,6 +2495,7 @@ impl AgentTools {
         ctx: &AuthContext,
         now: chrono::DateTime<Utc>,
     ) -> Result<Vec<DiscoveryTask>, AgentToolsError> {
+        self.materialize_due_discovery_tasks(ctx, now)?;
         let store = self
             .store
             .read()

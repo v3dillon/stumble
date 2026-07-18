@@ -76,15 +76,14 @@ Inspect the current immutable Pod Package with `stumble pod package show <pod>` 
 
 ### Discovery tasks
 
-- `materialize-discovery-tasks` — Creates due Discovery Tasks from Pod schedules. Flags: none.
-- `list-discovery-tasks` — Lists all visible Discovery Tasks. Flags: none.
-- `list-ready-discovery-tasks` — Lists Discovery Tasks ready to claim. Flags: none.
-- `create-discovery-task <POD_ID>` — Creates a Discovery Task for a Pod. Flags: `--instructions` and `--idempotency-key`.
-- `discovery-task-status <ID>` — Prints a Discovery Task's status. Flags: none.
-- `claim-discovery-task <ID>` — Claims a task for a limited lease. Flags: `--lease-seconds`.
-- `renew-discovery-task <ID>` — Renews a claimed task's lease. Flags: `--lease-seconds`.
-- `complete-discovery-task <ID>` — Marks a claimed task complete. Flags: none.
-- `fail-discovery-task <ID>` — Marks a claimed task failed. Flags: `--reason`.
+- `stumble discover task list` — Automatically materializes due work from current Source Rules, then returns the scoped task collection. Use `--state <ready|pending|leased|completed|terminal-failure>`, `--pod <slug-or-id>`, `--limit`, and `--cursor`.
+- `stumble discover task show <ID>` — Inspects current state, attempt history, and allowed actions.
+- `stumble discover task claim|renew <ID> --lease-seconds <SECONDS>` — Acquires or extends an exclusive Harness-owned lease.
+- `stumble discover task complete <ID>` and `stumble discover task fail <ID> --reason <REASON>` — Finish the current owned attempt. Failures remain retryable until the attempt limit is reached.
+
+Manual task creation and materialization are not public commands. Scheduler
+Adapters wake workers through the same filtered list surface and never control
+a browser.
 
 ### Administration and synchronization
 

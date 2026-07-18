@@ -93,10 +93,14 @@ configured harness command. It never controls a browser:
 ```bash
 export STUMBLE_DATA_DIR="$HOME/.stumble/nodes/home"
 export STUMBLE_DISCOVERY_TOKEN='<scoped one-time token>'
-export STUMBLE_PODCTL="$PWD/target/release/podctl"
+export STUMBLE_CLI="$PWD/target/release/stumble"
 export STUMBLE_DISCOVERY_HARNESS_COMMAND='/absolute/path/to/harness-command'
 scripts/wake-discovery.sh
 ```
+
+The adapter calls `stumble discover task list --state ready`. Listing
+automatically creates due work from the current Source Rules, and repeated
+invocations return the same task identities rather than duplicating work.
 
 On macOS, install the same adapter as a private launchd job with
 `scripts/install-discovery-launchd.sh`. On other systems, invoke
