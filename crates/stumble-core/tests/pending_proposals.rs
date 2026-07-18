@@ -1,4 +1,5 @@
 use chrono::{Duration, Utc};
+use serde_json::json;
 use stumble_core::*;
 use uuid::Uuid;
 
@@ -75,6 +76,143 @@ fn create_public_pod(tools: &AgentTools, owner: &AuthContext, name: &str, slug: 
         .approve_pending_proposal(&approver, proposal.id, now)
         .unwrap();
     tools.pod_by_slug(slug, owner.tenant_id).unwrap()
+}
+
+#[test]
+fn legacy_public_creation_contract_uses_the_canonical_pod_lifecycle() {
+    let data_dir = TestDataDir::new();
+    let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
+    let owner = tools.default_auth_context().unwrap();
+    let proposer = harness_context(
+        &tools,
+        &owner,
+        "legacy public proposer",
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::PodCuration],
+    );
+    let approver = harness_context(
+        &tools,
+        &owner,
+        "legacy public approver",
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::Approval],
+    );
+    let now = Utc::now();
+
+    let CreatePodOutcome::PendingApproval(proposal) = tools
+        .request_create_pod(
+            &proposer,
+            CreatePodRequest {
+                name: "Legacy public Pod".into(),
+                slug: "legacy-public-pod".into(),
+                description: "Preserved adapter contract".into(),
+                visibility: Visibility::Public,
+            },
+            now,
+        )
+        .unwrap()
+    else {
+        panic!("public creation must remain pending approval");
+    };
+    assert!(matches!(
+        proposal.requested_change,
+        SensitiveChange::CreatePublicPod { .. }
+    ));
+
+    drop(tools);
+    let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
+    tools
+        .approve_pending_proposal(&approver, proposal.id, now)
+        .unwrap();
+
+    let pod = tools
+        .pod_by_slug("legacy-public-pod", owner.tenant_id)
+        .unwrap();
+    assert_eq!(pod.created_by, proposer.user_id);
+    assert_eq!(
+        tools.list_pod_roles(&proposer, pod.id).unwrap(),
+        vec![PodRoleAssignment {
+            user_id: proposer.user_id.unwrap(),
+            pod_id: pod.id,
+            role: PodRole::Owner,
+            created_at: pod.created_at,
+        }]
+    );
+    let package = tools.get_skill_pack(&proposer, &pod.slug).unwrap();
+    assert_eq!(package.owner_id, proposer.user_id);
+    assert_eq!(package.proposer_harness_id, proposer.harness_id);
+    assert_eq!(
+        tools.federation_pod_events(&owner, &pod.slug).unwrap()[0].event_type,
+        "pod_created"
+    );
+    assert!(!tools
+        .list_harness_write_audit(&owner)
+        .unwrap()
+        .iter()
+        .any(|entry| {
+            entry.operation == HarnessWriteOperation::CreatePod && entry.pod_id == Some(pod.id)
+        }));
+}
+
+#[test]
+fn legacy_public_creation_never_transfers_an_absent_proposers_ownership() {
+    let mut store = seed_store();
+    let owner_user_id = *store.users.keys().next().unwrap();
+    let proposer = AgentHarnessId::from(Uuid::now_v7());
+    let proposal_id = PendingProposalId::from(Uuid::now_v7());
+    let request = CreatePodRequest {
+        name: "Orphaned legacy proposal".into(),
+        slug: "orphaned-legacy-proposal".into(),
+        description: "Must not transfer ownership to the approver".into(),
+        visibility: Visibility::Public,
+    };
+    let now = Utc::now();
+    store.pending_proposals.insert(
+        proposal_id,
+        PendingProposal {
+            id: proposal_id,
+            requested_change: SensitiveChange::CreatePublicPod {
+                request: request.clone(),
+            },
+            affected_resources: vec![ProposalResource::PodSlug(request.slug.clone())],
+            expected_consequences: vec!["legacy public exposure".into()],
+            structured_diff: vec![ProposalResourceDiff {
+                resource: ProposalResource::PodSlug(request.slug.clone()),
+                before: serde_json::Value::Null,
+                after: json!(request),
+            }],
+            proposer,
+            user_id: owner_user_id,
+            tenant_id: None,
+            created_at: now,
+            expires_at: now + Duration::hours(1),
+            status: ProposalStatus::Pending,
+            decided_by: None,
+            decided_at: None,
+            rejection_reason: None,
+        },
+    );
+    let tools = AgentTools::new(store);
+    let mut owner = tools.default_auth_context().unwrap();
+    owner.user_id = Some(owner_user_id);
+
+    tools
+        .approve_pending_proposal(&owner, proposal_id, now)
+        .unwrap();
+
+    let pod = tools
+        .pod_by_slug("orphaned-legacy-proposal", owner.tenant_id)
+        .unwrap();
+    assert_eq!(pod.created_by, None);
+    assert!(tools.list_pod_roles(&owner, pod.id).unwrap().is_empty());
+    let package = tools.get_skill_pack(&owner, &pod.slug).unwrap();
+    assert_eq!(package.owner_id, None);
+    assert_eq!(package.proposer_harness_id, Some(proposer));
+    assert!(!tools
+        .list_harness_write_audit(&owner)
+        .unwrap()
+        .iter()
+        .any(|entry| entry.pod_id == Some(pod.id)));
 }
 
 #[test]

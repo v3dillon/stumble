@@ -39,6 +39,47 @@ fn package_harness(tools: &AgentTools) -> AuthContext {
 }
 
 #[test]
+fn ownerless_simple_creation_keeps_its_legacy_fallback_without_weakening_lifecycle_creation() {
+    let tools = AgentTools::new(seed_store());
+    let ownerless = tools.default_auth_context().unwrap();
+    assert_eq!(ownerless.user_id, None);
+
+    let simple = tools
+        .create_pod(
+            &ownerless,
+            CreatePodRequest {
+                name: "Simple compatibility".into(),
+                slug: "simple-compatibility".into(),
+                description: String::new(),
+                visibility: Visibility::Private,
+            },
+        )
+        .unwrap();
+    assert!(simple.created_by.is_some());
+
+    let error = tools
+        .request_create_pod_lifecycle(
+            &ownerless,
+            CreatePodLifecycleRequest {
+                pod: CreatePodRequest {
+                    name: "Strict lifecycle".into(),
+                    slug: "strict-lifecycle".into(),
+                    description: String::new(),
+                    visibility: Visibility::Private,
+                },
+                package: PodCreationPackage::Default,
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("Pod creation requires an owner"));
+    assert!(matches!(
+        tools.pod_by_slug("strict-lifecycle", ownerless.tenant_id),
+        Err(AgentToolsError::Store(StoreError::NotFound(_)))
+    ));
+}
+
+#[test]
 fn authorized_harness_creates_private_pod_with_complete_initial_package() {
     let tools = AgentTools::new(seed_store());
     let harness = package_harness(&tools);

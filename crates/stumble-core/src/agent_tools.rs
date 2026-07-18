@@ -2887,7 +2887,7 @@ impl AgentTools {
                 )
                 .map(|proposal| CreatePodOutcome::PendingApproval(Box::new(proposal)));
         }
-        self.create_pod_lifecycle_immediately(ctx, request)
+        self.create_pod_lifecycle_immediately(ctx, request, PodCreationMode::Canonical)
             .map(|created| CreatePodOutcome::Created(created.pod))
     }
 
@@ -2895,6 +2895,7 @@ impl AgentTools {
         &self,
         ctx: &AuthContext,
         request: CreatePodLifecycleRequest,
+        mode: PodCreationMode,
     ) -> Result<CreatedPodPackage, AgentToolsError> {
         let mut store = self
             .store
@@ -2904,8 +2905,10 @@ impl AgentTools {
         if !matches!(request.package, PodCreationPackage::Default) {
             authorize_harness_for_new_pod(&store, ctx, HarnessCapability::PackageManagement)?;
         }
-        let created = create_pod_lifecycle_locked(&mut store, ctx, request, ctx.harness_id)?;
-        self.persist_locked(&mut store)?;
+        let mut staged = store.clone();
+        let created = stage_pod_lifecycle(&mut staged, ctx, request, ctx.harness_id, mode)?;
+        self.persist_locked(&mut staged)?;
+        *store = staged;
         Ok(created)
     }
 
@@ -2983,7 +2986,15 @@ impl AgentTools {
             )
             .into());
         }
-        self.create_pod_immediately(ctx, request)
+        self.create_pod_lifecycle_immediately(
+            ctx,
+            CreatePodLifecycleRequest {
+                pod: request,
+                package: PodCreationPackage::Default,
+            },
+            PodCreationMode::SimpleCreate,
+        )
+        .map(|created| created.pod)
     }
 
     #[cfg(test)]
@@ -2992,78 +3003,15 @@ impl AgentTools {
         ctx: &AuthContext,
         request: CreatePodRequest,
     ) -> Result<Pod, AgentToolsError> {
-        self.create_pod_immediately(ctx, request)
-    }
-
-    fn create_pod_immediately(
-        &self,
-        ctx: &AuthContext,
-        request: CreatePodRequest,
-    ) -> Result<Pod, AgentToolsError> {
-        let mut store = self
-            .store
-            .write()
-            .map_err(|_| AgentToolsError::LockPoisoned)?;
-        authorize_harness_for_new_pod(&store, ctx, HarnessCapability::PodCuration)?;
-        if store
-            .pods
-            .values()
-            .any(|pod| pod.slug == request.slug && pod.tenant_id == ctx.tenant_id)
-        {
-            return Err(StoreError::Duplicate(format!("pod {}", request.slug)).into());
-        }
-        let node = store.node_for_tenant(ctx.tenant_id)?;
-        let creator_user_id = ctx.user_id.or_else(|| store.users.keys().next().copied());
-        let pod = Pod {
-            id: Uuid::now_v7(),
-            tenant_id: ctx.tenant_id,
-            name: request.name,
-            slug: request.slug,
-            description: request.description,
-            visibility: request.visibility,
-            created_by: creator_user_id,
-            created_at: Utc::now(),
-            origin_node_id: Some(node.id),
-        };
-        store.pods.insert(pod.id, pod.clone());
-        store.pod_rules.insert(
-            pod.id,
-            PodRules {
-                pod_id: pod.id,
-                blocked_topics: vec![],
-                blocked_domains: vec![],
-                auto_promote_crawler_candidates: false,
-                federate_sources: matches!(pod.visibility, Visibility::Public),
-            },
-        );
-        let mut package = default_skill_pack(&pod);
-        package.proposer_harness_id = ctx.harness_id;
-        store.insert_pod_package_version(package.clone())?;
-        store.pod_skill_packs.insert(pod.id, package.clone());
-        if let Some(user_id) = creator_user_id {
-            store.pod_roles.push(PodRoleAssignment {
-                user_id,
-                pod_id: pod.id,
-                role: PodRole::Owner,
-                created_at: Utc::now(),
-            });
-        }
-        let event = sign_public_event(
-            &node,
-            "pod_created",
-            &pod.slug,
-            json!({"pod": pod.clone(), "package": package}),
-            store.latest_event_hash(&pod.slug),
-        )?;
-        store.event_log.push(event);
-        record_harness_write(
-            &mut store,
+        self.create_pod_lifecycle_immediately(
             ctx,
-            HarnessWriteOperation::CreatePod,
-            Some(pod.id),
-        );
-        self.persist_locked(&mut store)?;
-        Ok(pod)
+            CreatePodLifecycleRequest {
+                pod: request,
+                package: PodCreationPackage::Default,
+            },
+            PodCreationMode::SimpleCreate,
+        )
+        .map(|created| created.pod)
     }
 
     /// Atomically creates a private Pod and its complete initial Pod Package.
@@ -3077,93 +3025,21 @@ impl AgentTools {
         ctx: &AuthContext,
         request: CreatePrivatePodWithPackageRequest,
     ) -> Result<CreatedPodPackage, AgentToolsError> {
-        let validation = validate_pod_package_contents(&request.package);
-        if !validation.valid {
-            return Err(StoreError::Validation(validation.errors.join(", ")).into());
-        }
-        let mut store = self
-            .store
-            .write()
-            .map_err(|_| AgentToolsError::LockPoisoned)?;
-        authorize_harness_for_new_pod(&store, ctx, HarnessCapability::PodCuration)?;
-        authorize_harness_for_new_pod(&store, ctx, HarnessCapability::PackageManagement)?;
-        if store
-            .pods
-            .values()
-            .any(|pod| pod.slug == request.slug && pod.tenant_id == ctx.tenant_id)
-        {
-            return Err(StoreError::Duplicate(format!("pod {}", request.slug)).into());
-        }
-        let owner_id = ctx.user_id.ok_or_else(|| {
-            StoreError::Validation("private Pod Package requires an owner".to_string())
-        })?;
-        let node = store.node_for_tenant(ctx.tenant_id)?;
-        let now = Utc::now();
-        let pod = Pod {
-            id: Uuid::now_v7(),
-            tenant_id: ctx.tenant_id,
-            name: request.name,
-            slug: request.slug,
-            description: request.description,
-            visibility: Visibility::Private,
-            created_by: Some(owner_id),
-            created_at: now,
-            origin_node_id: Some(node.id),
-        };
-        let package = PodSkillPack {
-            id: Uuid::now_v7(),
-            pod_id: pod.id,
-            version: 1,
-            context_md: request.package.context_md,
-            pod_yaml: format!(
-                "name: {}\nslug: {}\ndescription: {}\nvisibility: private\n",
-                pod.name, pod.slug, pod.description
-            ),
-            skill_md: request.package.skill_md,
-            sources_yaml: request.package.sources_yaml,
-            filters_yaml: request.package.filters_yaml,
-            examples_good_md: request.package.examples_good_md,
-            examples_bad_md: request.package.examples_bad_md,
-            owner_id: Some(owner_id),
-            proposer_harness_id: ctx.harness_id,
-            created_at: now,
-            updated_at: now,
-        };
-        store.pods.insert(pod.id, pod.clone());
-        store.pod_rules.insert(
-            pod.id,
-            PodRules {
-                pod_id: pod.id,
-                blocked_topics: Vec::new(),
-                blocked_domains: Vec::new(),
-                auto_promote_crawler_candidates: false,
-                federate_sources: false,
-            },
-        );
-        store.pod_roles.push(PodRoleAssignment {
-            user_id: owner_id,
-            pod_id: pod.id,
-            role: PodRole::Owner,
-            created_at: now,
-        });
-        store.insert_pod_package_version(package.clone())?;
-        store.pod_skill_packs.insert(pod.id, package.clone());
-        let event = sign_public_event(
-            &node,
-            "private_pod_package_created",
-            &pod.slug,
-            json!({"pod": pod, "package": package}),
-            store.latest_event_hash(&pod.slug),
-        )?;
-        store.event_log.push(event);
-        record_harness_write(
-            &mut store,
+        self.create_pod_lifecycle_immediately(
             ctx,
-            HarnessWriteOperation::CreatePod,
-            Some(pod.id),
-        );
-        self.persist_locked(&mut store)?;
-        Ok(CreatedPodPackage { pod, package })
+            CreatePodLifecycleRequest {
+                pod: CreatePodRequest {
+                    name: request.name,
+                    slug: request.slug,
+                    description: request.description,
+                    visibility: Visibility::Private,
+                },
+                package: PodCreationPackage::Initial {
+                    package: request.package,
+                },
+            },
+            PodCreationMode::PrivatePackage,
+        )
     }
 
     /// Creates Feed eligibility for a local Pod without granting Pod authority.
@@ -9763,11 +9639,46 @@ fn validate_creation_package_locked(
     }
 }
 
+#[derive(Clone, Copy)]
+enum PodCreationMode {
+    Canonical,
+    SimpleCreate,
+    PrivatePackage,
+    LegacyPublic,
+}
+
+impl PodCreationMode {
+    const fn event_type(self) -> &'static str {
+        match self {
+            Self::PrivatePackage => "private_pod_package_created",
+            Self::Canonical | Self::SimpleCreate | Self::LegacyPublic => "pod_created",
+        }
+    }
+
+    const fn records_audit(self) -> bool {
+        !matches!(self, Self::LegacyPublic)
+    }
+}
+
 fn create_pod_lifecycle_locked(
     store: &mut InMemoryStore,
     ctx: &AuthContext,
     request: CreatePodLifecycleRequest,
     proposer: Option<AgentHarnessId>,
+    mode: PodCreationMode,
+) -> Result<CreatedPodPackage, AgentToolsError> {
+    let mut staged = store.clone();
+    let created = stage_pod_lifecycle(&mut staged, ctx, request, proposer, mode)?;
+    *store = staged;
+    Ok(created)
+}
+
+fn stage_pod_lifecycle(
+    store: &mut InMemoryStore,
+    ctx: &AuthContext,
+    request: CreatePodLifecycleRequest,
+    proposer: Option<AgentHarnessId>,
+    mode: PodCreationMode,
 ) -> Result<CreatedPodPackage, AgentToolsError> {
     validate_creation_package_locked(store, ctx, &request.package)?;
     if store
@@ -9778,15 +9689,31 @@ fn create_pod_lifecycle_locked(
         return Err(StoreError::Duplicate(format!("pod {}", request.pod.slug)).into());
     }
     let node = store.node_for_tenant(ctx.tenant_id)?;
-    let owner_id = proposer
-        .and_then(|id| {
+    let proposer_user_id = || {
+        proposer.and_then(|id| {
             store
                 .agent_harnesses
                 .get(&id)
                 .map(|harness| harness.user_id)
         })
-        .or(ctx.user_id)
-        .ok_or_else(|| StoreError::Validation("Pod creation requires an owner".into()))?;
+    };
+    let owner_id = match mode {
+        PodCreationMode::PrivatePackage => Some(ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("private Pod Package requires an owner".to_string())
+        })?),
+        PodCreationMode::Canonical => Some(
+            proposer_user_id()
+                .or(ctx.user_id)
+                .ok_or_else(|| StoreError::Validation("Pod creation requires an owner".into()))?,
+        ),
+        PodCreationMode::SimpleCreate => Some(
+            proposer_user_id()
+                .or(ctx.user_id)
+                .or_else(|| store.users.keys().next().copied())
+                .ok_or_else(|| StoreError::Validation("Pod creation requires an owner".into()))?,
+        ),
+        PodCreationMode::LegacyPublic => proposer_user_id(),
+    };
     let now = Utc::now();
     let pod = Pod {
         id: Uuid::now_v7(),
@@ -9795,7 +9722,7 @@ fn create_pod_lifecycle_locked(
         slug: request.pod.slug,
         description: request.pod.description,
         visibility: request.pod.visibility,
-        created_by: Some(owner_id),
+        created_by: owner_id,
         created_at: now,
         origin_node_id: Some(node.id),
     };
@@ -9822,7 +9749,7 @@ fn create_pod_lifecycle_locked(
             filters_yaml: package.filters_yaml,
             examples_good_md: package.examples_good_md,
             examples_bad_md: package.examples_bad_md,
-            owner_id: Some(owner_id),
+            owner_id,
             proposer_harness_id: proposer,
             created_at: now,
             updated_at: now,
@@ -9842,23 +9769,27 @@ fn create_pod_lifecycle_locked(
             federate_sources: pod.visibility == Visibility::Public,
         },
     );
-    store.pod_roles.push(PodRoleAssignment {
-        user_id: owner_id,
-        pod_id: pod.id,
-        role: PodRole::Owner,
-        created_at: now,
-    });
+    if let Some(owner_id) = owner_id {
+        store.pod_roles.push(PodRoleAssignment {
+            user_id: owner_id,
+            pod_id: pod.id,
+            role: PodRole::Owner,
+            created_at: now,
+        });
+    }
     store.insert_pod_package_version(package.clone())?;
     store.pod_skill_packs.insert(pod.id, package.clone());
     let event = sign_public_event(
         &node,
-        "pod_created",
+        mode.event_type(),
         &pod.slug,
         json!({"pod": pod, "package": package}),
         store.latest_event_hash(&pod.slug),
     )?;
     store.event_log.push(event);
-    record_harness_write(store, ctx, HarnessWriteOperation::CreatePod, Some(pod.id));
+    if mode.records_audit() {
+        record_harness_write(store, ctx, HarnessWriteOperation::CreatePod, Some(pod.id));
+    }
     Ok(CreatedPodPackage { pod, package })
 }
 
@@ -9986,63 +9917,25 @@ fn apply_sensitive_change(
 ) -> Result<(), AgentToolsError> {
     match requested_change {
         SensitiveChange::CreatePublicPod { request } => {
-            if store
-                .pods
-                .values()
-                .any(|pod| pod.slug == request.slug && pod.tenant_id == ctx.tenant_id)
-            {
-                return Err(StoreError::Duplicate(format!("pod {}", request.slug)).into());
-            }
-            let node = store.node_for_tenant(ctx.tenant_id)?;
-            let created_by = store
-                .agent_harnesses
-                .get(&proposer)
-                .map(|harness| harness.user_id);
-            let pod = Pod {
-                id: Uuid::now_v7(),
-                tenant_id: ctx.tenant_id,
-                name: request.name.clone(),
-                slug: request.slug.clone(),
-                description: request.description.clone(),
-                visibility: Visibility::Public,
-                created_by,
-                created_at: Utc::now(),
-                origin_node_id: Some(node.id),
-            };
-            store.pods.insert(pod.id, pod.clone());
-            store.pod_rules.insert(
-                pod.id,
-                PodRules {
-                    pod_id: pod.id,
-                    blocked_topics: vec![],
-                    blocked_domains: vec![],
-                    auto_promote_crawler_candidates: false,
-                    federate_sources: true,
+            create_pod_lifecycle_locked(
+                store,
+                ctx,
+                CreatePodLifecycleRequest {
+                    pod: request.clone(),
+                    package: PodCreationPackage::Default,
                 },
-            );
-            let mut package = default_skill_pack(&pod);
-            package.proposer_harness_id = Some(proposer);
-            store.insert_pod_package_version(package.clone())?;
-            store.pod_skill_packs.insert(pod.id, package.clone());
-            if let Some(user_id) = created_by {
-                store.pod_roles.push(PodRoleAssignment {
-                    user_id,
-                    pod_id: pod.id,
-                    role: PodRole::Owner,
-                    created_at: Utc::now(),
-                });
-            }
-            let event = sign_public_event(
-                &node,
-                "pod_created",
-                &pod.slug,
-                json!({"pod": pod, "package": package}),
-                store.latest_event_hash(&pod.slug),
+                Some(proposer),
+                PodCreationMode::LegacyPublic,
             )?;
-            store.event_log.push(event);
         }
         SensitiveChange::CreatePublicPodLifecycle { request } => {
-            create_pod_lifecycle_locked(store, ctx, request.clone(), Some(proposer))?;
+            create_pod_lifecycle_locked(
+                store,
+                ctx,
+                request.clone(),
+                Some(proposer),
+                PodCreationMode::Canonical,
+            )?;
         }
         SensitiveChange::PublishPod { pod_id } => {
             let tenant_id = store
