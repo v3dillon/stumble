@@ -1,14 +1,24 @@
-# Stumble Agent Guide
+# Stumble installation instructions for agents
 
-Stumble is a headless personal discovery system using protocol `stumble/1.0`.
-Agent Harnesses own external browser, search, API, credential, and scheduler
-access. Stumble never crawls or controls a browser.
+Stumble requires Rust and Cargo. If `cargo` is missing, ask the user to install Rust from https://rustup.rs before continuing.
 
-Use scoped Harness Grants. Read `/pods/:slug/package`, claim work through
-`/discovery-tasks`, submit structured provenance through `/candidates`, and
-retrieve finite presentation-neutral batches through `/feed`. Record only
-explicit Feedback Signals. Never export tokens, grants, Candidates, Taste
-Profiles, feedback, Saves, or Feed history.
+From the repository root, install the CLI:
 
-Legacy crawler, source-connector, direct link submission, in-node discovery,
-and brief endpoints are retired and return a versioned compatibility error.
+```bash
+cargo install --path crates/stumble-cli --locked
+```
+
+Initialize a Home Node and verify the installation:
+
+```bash
+podctl --data-dir ~/.stumble/nodes/default init-node
+podctl --data-dir ~/.stumble/nodes/default node-info
+```
+
+Start the local HTTP API only when the User asks to run it:
+
+```bash
+podctl --data-dir ~/.stumble/nodes/default serve
+```
+
+Keep the default loopback binding unless the user explicitly requests and understands public exposure. Use `podctl --help` and `podctl <command> --help` for the complete CLI contract.
