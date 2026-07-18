@@ -397,12 +397,42 @@ pub enum PodRole {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PodAllowedAction {
+    VisibilitySet,
     Subscribe,
     Unsubscribe,
     SubscriptionSet,
     RoleList,
     RoleGrant,
     RoleRevoke,
+}
+
+/// Package material selected for a new Pod.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PodCreationPackage {
+    Default,
+    Initial {
+        package: PodPackageContents,
+    },
+    /// An immutable source package snapshot retained with its identity.
+    Derived {
+        source_package: PodSkillPack,
+    },
+}
+
+/// Complete request for atomically creating a Pod and its first package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatePodLifecycleRequest {
+    pub pod: CreatePodRequest,
+    pub package: PodCreationPackage,
+}
+
+/// Outcome of a visibility transition under the sensitive-change policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "result", rename_all = "snake_case")]
+pub enum PodVisibilityOutcome {
+    Updated(Pod),
+    PendingApproval(Box<PendingProposal>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1427,8 +1457,15 @@ impl std::str::FromStr for HarnessCapability {
 pub enum SensitiveChange {
     /// Create a new Pod with public exposure from its first accepted state.
     CreatePublicPod { request: CreatePodRequest },
+    /// Create a public Pod and its selected first package atomically.
+    CreatePublicPodLifecycle { request: CreatePodLifecycleRequest },
     /// Expose an existing private Pod through public federation surfaces.
     PublishPod { pod_id: PodId },
+    /// Expand an existing Pod's visibility after approval.
+    ExpandPodVisibility {
+        pod_id: PodId,
+        visibility: Visibility,
+    },
     /// Expand the capabilities or Pod scope of an existing Harness Grant.
     ExpandHarnessGrant {
         harness_id: AgentHarnessId,

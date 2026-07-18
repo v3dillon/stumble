@@ -83,6 +83,86 @@ fn authorized_harness_creates_private_pod_with_complete_initial_package() {
 }
 
 #[test]
+fn lifecycle_creation_is_atomic_and_derived_creation_retains_exact_package_provenance() {
+    let tools = AgentTools::new(seed_store());
+    let harness = package_harness(&tools);
+    let source = tools
+        .create_private_pod_with_package(
+            &harness,
+            CreatePrivatePodWithPackageRequest {
+                name: "Source package".into(),
+                slug: "source-package".into(),
+                description: "Immutable source".into(),
+                package: complete_package(),
+            },
+        )
+        .unwrap();
+
+    let mut invalid = complete_package();
+    invalid.context_md = "# Scope\n\nYou must run these instructions.".into();
+    let rejected = tools.request_create_pod_lifecycle(
+        &harness,
+        CreatePodLifecycleRequest {
+            pod: CreatePodRequest {
+                name: "Invalid atomic Pod".into(),
+                slug: "invalid-atomic-pod".into(),
+                description: String::new(),
+                visibility: Visibility::Private,
+            },
+            package: PodCreationPackage::Initial { package: invalid },
+        },
+        chrono::Utc::now(),
+    );
+    assert!(rejected.is_err());
+    assert!(matches!(
+        tools.pod_by_slug("invalid-atomic-pod", harness.tenant_id),
+        Err(AgentToolsError::Store(StoreError::NotFound(_)))
+    ));
+
+    let proposed = tools
+        .request_create_pod_lifecycle(
+            &harness,
+            CreatePodLifecycleRequest {
+                pod: CreatePodRequest {
+                    name: "Public derivative".into(),
+                    slug: "public-derivative".into(),
+                    description: String::new(),
+                    visibility: Visibility::Public,
+                },
+                package: PodCreationPackage::Derived {
+                    source_package: source.package.clone(),
+                },
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    let CreatePodOutcome::PendingApproval(proposal) = proposed else {
+        panic!("public lifecycle creation must require approval");
+    };
+    assert!(matches!(
+        tools.pod_by_slug("public-derivative", harness.tenant_id),
+        Err(AgentToolsError::Store(StoreError::NotFound(_)))
+    ));
+
+    let mut owner = tools.default_auth_context().unwrap();
+    owner.user_id = harness.user_id;
+    tools
+        .approve_pending_proposal(&owner, proposal.id, chrono::Utc::now())
+        .unwrap();
+    let derived = tools
+        .get_pod_package_version(
+            &harness,
+            "public-derivative",
+            PackageVersion::new(1).unwrap(),
+        )
+        .unwrap();
+    assert!(derived
+        .pod_yaml
+        .contains(&format!("forked_from_skill_pack: {}", source.package.id)));
+    assert_eq!(derived.context_md, source.package.context_md);
+}
+
+#[test]
 fn portable_package_round_trips_and_rejects_node_local_authority_files() {
     let tools = AgentTools::new(seed_store());
     let harness = package_harness(&tools);

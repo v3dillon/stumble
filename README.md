@@ -68,6 +68,8 @@ Local Owner commands authenticate from the Home Node Owner Credential automatica
 
 Subscription and Pod authority are separate workflows. Use an exact local slug or immutable Pod ID with `stumble pod subscribe`, `pod unsubscribe`, and `pod subscription set --priority <true|false>`; `pod subscribe` also accepts a canonical public URL of the form `https://origin.example/federation/pods/<slug>`. Pod governance uses only `owner` and `curator`: `pod role list`, `pod role grant --user-id <id> --role <owner|curator>`, and `pod role revoke ...`. Grants and revocations return Pending Proposals and do not take effect until an independent Owner or scoped interactive approval Harness approves them.
 
+Create Pods with `stumble pod create --name <name> --slug <slug> --visibility <private|invite-only|public>`. Add either `--package <directory>` for a complete initial Pod Package or `--from-pod <slug-or-id>` to derive one with source-package provenance; the two options are mutually exclusive. Public creation and visibility expansion return Pending Proposals, while visibility restrictions apply directly. `stumble pod explore --query <subject>` returns Trust Policy-filtered public Pods and bounded sample Content Items without creating a Subscription.
+
 ### Discovery tasks
 
 - `materialize-discovery-tasks` — Creates due Discovery Tasks from Pod schedules. Flags: none.

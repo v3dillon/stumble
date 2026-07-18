@@ -84,7 +84,13 @@ fn owner_subscribes_sets_priority_and_unsubscribes_without_losing_authority() {
     assert_eq!(body(&shown)["data"]["slug"], "rust-craft");
     assert_eq!(
         body(&shown)["data"]["allowed_actions"],
-        json!(["subscribe", "role_list", "role_grant", "role_revoke"])
+        json!([
+            "subscribe",
+            "role_list",
+            "visibility_set",
+            "role_grant",
+            "role_revoke"
+        ])
     );
 
     let subscribed = environment

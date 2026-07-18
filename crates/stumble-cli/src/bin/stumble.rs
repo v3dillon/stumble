@@ -1,15 +1,21 @@
 use clap::{Arg, ArgMatches, Command, ValueHint};
 use serde_json::{json, Value};
-use std::{path::PathBuf, process::ExitCode};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 use stumble_cli::{
     owner_credential_store, paginate, read_json_input, render_text, resolve_existing_data_dir,
     resolve_initialized_data_dir, selected_data_dir, CursorPage, ErrorBody, ErrorEnvelope,
     ExitStatusCategory, OwnerCredentialStore, ResourceDetail, SuccessEnvelope,
 };
 use stumble_core::{
-    new_plaintext_api_token, seed_store, AgentHarnessId, AgentHarnessKind, AgentTools,
-    AgentToolsError, AuthContext, HarnessCapability, PendingProposalId, Pod, PodRole,
-    RegisterAgentHarnessRequest, StoreError,
+    new_plaintext_api_token, pod_package_contents_from_files, seed_store, AgentHarnessId,
+    AgentHarnessKind, AgentTools, AgentToolsError, AuthContext, CreatePodLifecycleRequest,
+    CreatePodOutcome, CreatePodRequest, ExploreRequest, HarnessCapability, PendingProposalId, Pod,
+    PodCreationPackage, PodRole, RegisterAgentHarnessRequest, StoreError, Visibility,
+    PORTABLE_PACKAGE_FILES,
 };
 
 fn main() -> ExitCode {
@@ -73,9 +79,15 @@ fn dispatch(
     }
     match path.as_str() {
         "pod list" => {
-            let items = tools
+            let mut pods = tools
                 .list_pods_for_harness(&actor)
-                .map_err(agent_tools_error)?
+                .map_err(agent_tools_error)?;
+            pods.sort_by(|left, right| {
+                left.slug
+                    .cmp(&right.slug)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            let items = pods
                 .into_iter()
                 .map(pod_result)
                 .collect::<Result<Vec<_>, _>>()?;
@@ -90,6 +102,90 @@ fn dispatch(
             result["allowed_actions"] =
                 serde_json::to_value(allowed_actions).map_err(internal_error)?;
             return Ok(result);
+        }
+        "pod create" => {
+            let visibility = leaf
+                .get_one::<Visibility>("visibility")
+                .expect("required by clap")
+                .clone();
+            let package = if let Some(path) = leaf.get_one::<PathBuf>("package") {
+                let files = read_portable_package_directory(path)
+                    .map_err(|error| (error, ExitStatusCategory::ValidationOrConflict))?;
+                PodCreationPackage::Initial {
+                    package: pod_package_contents_from_files(&files)
+                        .map_err(agent_tools_error_from_store)?,
+                }
+            } else if let Some(reference) = leaf.get_one::<String>("from-pod") {
+                let source = resolve_pod(&tools, &actor, reference)?;
+                PodCreationPackage::Derived {
+                    source_package: tools
+                        .get_skill_pack(&actor, &source.slug)
+                        .map_err(agent_tools_error)?,
+                }
+            } else {
+                PodCreationPackage::Default
+            };
+            let outcome = tools
+                .request_create_pod_lifecycle(
+                    &actor,
+                    CreatePodLifecycleRequest {
+                        pod: CreatePodRequest {
+                            name: required_string(leaf, "name")?.to_string(),
+                            slug: required_string(leaf, "slug")?.to_string(),
+                            description: leaf
+                                .get_one::<String>("description")
+                                .cloned()
+                                .unwrap_or_default(),
+                            visibility,
+                        },
+                        package,
+                    },
+                    chrono::Utc::now(),
+                )
+                .map_err(agent_tools_error)?;
+            return match outcome {
+                CreatePodOutcome::Created(pod) => Ok(json!({
+                    "status": "created",
+                    "result": pod_result(pod)?,
+                })),
+                CreatePodOutcome::PendingApproval(proposal) => Ok(json!({
+                    "status": "pending_approval",
+                    "result": proposal,
+                })),
+            };
+        }
+        "pod visibility set" => {
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let visibility = leaf
+                .get_one::<Visibility>("visibility")
+                .expect("required by clap")
+                .clone();
+            let outcome = tools
+                .request_set_pod_visibility(&actor, pod.id, visibility, chrono::Utc::now())
+                .map_err(agent_tools_error)?;
+            return Ok(json!({ "pod_id": pod.id, "slug": pod.slug, "outcome": outcome }));
+        }
+        "pod explore" => {
+            let limit = *leaf.get_one::<u16>("limit").expect("defaulted by clap");
+            let request = ExploreRequest::new(
+                leaf.get_one::<String>("query").cloned().unwrap_or_default(),
+                50,
+                *leaf
+                    .get_one::<u8>("sample-size")
+                    .expect("defaulted by clap") as usize,
+            )
+            .map_err(|error| agent_tools_error(error.into()))?;
+            let explored = tools
+                .explore_public_pods(&actor, request)
+                .map_err(agent_tools_error)?;
+            let cursor = leaf.get_one::<String>("cursor").map(String::as_str);
+            let results = paginate(explored.results, limit, cursor)
+                .map_err(|error| (error, ExitStatusCategory::ValidationOrConflict))?;
+            return Ok(json!({
+                "query": explored.query,
+                "items": results.items,
+                "next_cursor": results.next_cursor,
+            }));
         }
         "pod subscribe" => {
             let reference = required_string(leaf, "pod")?;
@@ -495,6 +591,43 @@ fn agent_tools_error(error: AgentToolsError) -> (ErrorBody, ExitStatusCategory) 
     }
 }
 
+fn agent_tools_error_from_store(error: StoreError) -> (ErrorBody, ExitStatusCategory) {
+    agent_tools_error(error.into())
+}
+
+fn read_portable_package_directory(path: &Path) -> Result<BTreeMap<String, String>, ErrorBody> {
+    let entries = std::fs::read_dir(path).map_err(|error| {
+        ErrorBody::new(
+            "invalid_package_directory",
+            format!("could not read {}: {error}", path.display()),
+        )
+    })?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| ErrorBody::new("invalid_package_directory", error.to_string()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !PORTABLE_PACKAGE_FILES.contains(&name.as_str()) {
+            return Err(ErrorBody::new(
+                "invalid_package_directory",
+                format!("unsupported portable Pod Package file {name}"),
+            ));
+        }
+    }
+    PORTABLE_PACKAGE_FILES
+        .iter()
+        .map(|name| {
+            std::fs::read_to_string(path.join(name))
+                .map(|contents| ((*name).to_string(), contents))
+                .map_err(|error| {
+                    ErrorBody::new(
+                        "invalid_package_directory",
+                        format!("could not read {}: {error}", path.join(name).display()),
+                    )
+                })
+        })
+        .collect()
+}
+
 fn command_path(matches: &ArgMatches) -> (String, &ArgMatches) {
     let mut names = Vec::new();
     let mut current = matches;
@@ -611,8 +744,31 @@ fn pod() -> Command {
         .subcommand_required(true)
         .subcommand(list_leaf("list"))
         .subcommand(Command::new("show").arg(Arg::new("pod").required(true)))
-        .subcommand(Command::new("create"))
-        .subcommand(list_leaf("explore"))
+        .subcommand(
+            Command::new("create")
+                .arg(Arg::new("name").long("name").required(true))
+                .arg(Arg::new("slug").long("slug").required(true))
+                .arg(Arg::new("description").long("description"))
+                .arg(visibility_arg())
+                .arg(
+                    Arg::new("package")
+                        .long("package")
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .value_hint(ValueHint::DirPath)
+                        .conflicts_with("from-pod"),
+                )
+                .arg(Arg::new("from-pod").long("from-pod")),
+        )
+        .subcommand(
+            list_leaf("explore")
+                .arg(Arg::new("query").long("query"))
+                .arg(
+                    Arg::new("sample-size")
+                        .long("sample-size")
+                        .default_value("3")
+                        .value_parser(clap::value_parser!(u8).range(0..=10)),
+                ),
+        )
         .subcommand(Command::new("subscribe").arg(Arg::new("pod").required(true)))
         .subcommand(Command::new("unsubscribe").arg(Arg::new("pod").required(true)))
         .subcommand(
@@ -627,7 +783,15 @@ fn pod() -> Command {
                     ),
                 ),
         )
-        .subcommand(resource("visibility", &["set"]))
+        .subcommand(
+            Command::new("visibility")
+                .subcommand_required(true)
+                .subcommand(
+                    Command::new("set")
+                        .arg(Arg::new("pod").required(true))
+                        .arg(visibility_arg()),
+                ),
+        )
         .subcommand(
             Command::new("role")
                 .subcommand_required(true)
@@ -640,6 +804,21 @@ fn pod() -> Command {
         .subcommand(resource(
             "package",
             &["show", "export", "validate", "revise"],
+        ))
+}
+
+fn visibility_arg() -> Arg {
+    Arg::new("visibility")
+        .long("visibility")
+        .required(true)
+        .value_parser(clap::builder::TypedValueParser::map(
+            clap::builder::PossibleValuesParser::new(["private", "invite-only", "public"]),
+            |value| match value.as_str() {
+                "private" => Visibility::Private,
+                "invite-only" => Visibility::InviteOnly,
+                "public" => Visibility::Public,
+                _ => unreachable!("constrained by possible values"),
+            },
         ))
 }
 

@@ -757,7 +757,11 @@ impl AgentTools {
         if capability(HarnessCapability::PodCuration) && role.is_some() {
             actions.push(PodAllowedAction::RoleList);
             if role == Some(PodRole::Owner) {
-                actions.extend([PodAllowedAction::RoleGrant, PodAllowedAction::RoleRevoke]);
+                actions.extend([
+                    PodAllowedAction::VisibilitySet,
+                    PodAllowedAction::RoleGrant,
+                    PodAllowedAction::RoleRevoke,
+                ]);
             }
         }
         Ok(actions)
@@ -1651,6 +1655,40 @@ impl AgentTools {
                     }],
                 )
             }
+            SensitiveChange::CreatePublicPodLifecycle { request } => {
+                authorize_harness_for_new_pod(&store, ctx, HarnessCapability::PodCuration)?;
+                if !matches!(request.package, PodCreationPackage::Default) {
+                    authorize_harness_for_new_pod(
+                        &store,
+                        ctx,
+                        HarnessCapability::PackageManagement,
+                    )?;
+                }
+                if request.pod.visibility != Visibility::Public {
+                    return Err(StoreError::Validation(
+                        "public Pod lifecycle creation requires public visibility".into(),
+                    )
+                    .into());
+                }
+                if store
+                    .pods
+                    .values()
+                    .any(|pod| pod.slug == request.pod.slug && pod.tenant_id == ctx.tenant_id)
+                {
+                    return Err(StoreError::Duplicate(format!("pod {}", request.pod.slug)).into());
+                }
+                validate_creation_package_locked(&store, ctx, &request.package)?;
+                let resource = ProposalResource::PodSlug(request.pod.slug.clone());
+                (
+                    vec![resource.clone()],
+                    vec!["A new Pod and its selected signed Package become available atomically through federation and Explore surfaces.".into()],
+                    vec![ProposalResourceDiff {
+                        resource,
+                        before: serde_json::Value::Null,
+                        after: json!(request),
+                    }],
+                )
+            }
             SensitiveChange::PublishPod { pod_id } => {
                 authorize_harness(&store, ctx, HarnessCapability::PodCuration, Some(*pod_id))?;
                 let pod = store
@@ -1669,6 +1707,30 @@ impl AgentTools {
                         resource,
                         before: json!({"visibility": pod.visibility}),
                         after: json!({"visibility": Visibility::Public}),
+                    }],
+                )
+            }
+            SensitiveChange::ExpandPodVisibility { pod_id, visibility } => {
+                authorize_pod_role_owner(&store, ctx, *pod_id)?;
+                let pod = store
+                    .pods
+                    .get(pod_id)
+                    .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+                store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+                if visibility_exposure(visibility) <= visibility_exposure(&pod.visibility) {
+                    return Err(StoreError::Validation(
+                        "Pending Proposals only apply to visibility expansion".into(),
+                    )
+                    .into());
+                }
+                let resource = ProposalResource::Pod(*pod_id);
+                (
+                    vec![resource.clone()],
+                    vec!["The Pod becomes visible to a broader audience.".into()],
+                    vec![ProposalResourceDiff {
+                        resource,
+                        before: json!({"visibility": pod.visibility}),
+                        after: json!({"visibility": visibility}),
                     }],
                 )
             }
@@ -2711,6 +2773,111 @@ impl AgentTools {
                 .map(|proposal| CreatePodOutcome::PendingApproval(Box::new(proposal)));
         }
         self.create_pod(ctx, request).map(CreatePodOutcome::Created)
+    }
+
+    /// Atomically creates a Pod with its selected initial package, routing
+    /// public exposure through a Pending Proposal.
+    pub fn request_create_pod_lifecycle(
+        &self,
+        ctx: &AuthContext,
+        request: CreatePodLifecycleRequest,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<CreatePodOutcome, AgentToolsError> {
+        if request.pod.visibility == Visibility::Public {
+            return self
+                .create_pending_proposal_from_request(
+                    ctx,
+                    CreatePendingProposalRequest {
+                        requested_change: SensitiveChange::CreatePublicPodLifecycle { request },
+                        expires_in_seconds: DEFAULT_PENDING_PROPOSAL_SECONDS,
+                    },
+                    now,
+                )
+                .map(|proposal| CreatePodOutcome::PendingApproval(Box::new(proposal)));
+        }
+        self.create_pod_lifecycle_immediately(ctx, request)
+            .map(|created| CreatePodOutcome::Created(created.pod))
+    }
+
+    fn create_pod_lifecycle_immediately(
+        &self,
+        ctx: &AuthContext,
+        request: CreatePodLifecycleRequest,
+    ) -> Result<CreatedPodPackage, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness_for_new_pod(&store, ctx, HarnessCapability::PodCuration)?;
+        if !matches!(request.package, PodCreationPackage::Default) {
+            authorize_harness_for_new_pod(&store, ctx, HarnessCapability::PackageManagement)?;
+        }
+        let created = create_pod_lifecycle_locked(&mut store, ctx, request, ctx.harness_id)?;
+        self.persist_locked(&mut store)?;
+        Ok(created)
+    }
+
+    /// Changes Pod visibility directly for restrictions and proposes expansions.
+    pub fn request_set_pod_visibility(
+        &self,
+        ctx: &AuthContext,
+        pod_id: PodId,
+        visibility: Visibility,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PodVisibilityOutcome, AgentToolsError> {
+        let current = {
+            let store = self
+                .store
+                .read()
+                .map_err(|_| AgentToolsError::LockPoisoned)?;
+            authorize_pod_role_owner(&store, ctx, pod_id)?;
+            let pod = store
+                .pods
+                .get(&pod_id)
+                .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+            store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+            pod.visibility.clone()
+        };
+        if current == visibility {
+            return Err(StoreError::Validation("Pod already has that visibility".into()).into());
+        }
+        if visibility_exposure(&visibility) > visibility_exposure(&current) {
+            return self
+                .create_pending_proposal_from_request(
+                    ctx,
+                    CreatePendingProposalRequest {
+                        requested_change: SensitiveChange::ExpandPodVisibility {
+                            pod_id,
+                            visibility,
+                        },
+                        expires_in_seconds: DEFAULT_PENDING_PROPOSAL_SECONDS,
+                    },
+                    now,
+                )
+                .map(|proposal| PodVisibilityOutcome::PendingApproval(Box::new(proposal)));
+        }
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_pod_role_owner(&store, ctx, pod_id)?;
+        let pod = store
+            .pods
+            .get_mut(&pod_id)
+            .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+        pod.visibility = visibility;
+        let result = pod.clone();
+        if let Some(rules) = store.pod_rules.get_mut(&pod_id) {
+            rules.federate_sources = result.visibility == Visibility::Public;
+        }
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::CreatePod,
+            Some(pod_id),
+        );
+        self.persist_locked(&mut store)?;
+        Ok(PodVisibilityOutcome::Updated(result))
     }
 
     pub fn create_pod(
@@ -9049,6 +9216,156 @@ fn approval_scope_allows(harness: &AgentHarness, proposal: &PendingProposal) -> 
         })
 }
 
+fn visibility_exposure(visibility: &Visibility) -> u8 {
+    match visibility {
+        Visibility::Private => 0,
+        Visibility::InviteOnly => 1,
+        Visibility::Public => 2,
+    }
+}
+
+fn validate_creation_package_locked(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    package: &PodCreationPackage,
+) -> Result<(), AgentToolsError> {
+    match package {
+        PodCreationPackage::Default => Ok(()),
+        PodCreationPackage::Initial { package } => {
+            let report = validate_pod_package_contents(package);
+            if report.valid {
+                Ok(())
+            } else {
+                Err(StoreError::Validation(report.errors.join(", ")).into())
+            }
+        }
+        PodCreationPackage::Derived { source_package } => {
+            let source = store
+                .pod_package_versions
+                .values()
+                .find(|candidate| candidate.id == source_package.id)
+                .ok_or_else(|| StoreError::NotFound("source Pod Package".into()))?;
+            let source_pod = store
+                .pods
+                .get(&source.pod_id)
+                .ok_or_else(|| StoreError::NotFound(format!("pod {}", source.pod_id)))?;
+            store.assert_tenant(source_pod.tenant_id, ctx.tenant_id)?;
+            authorize_harness(
+                store,
+                ctx,
+                HarnessCapability::PackageManagement,
+                Some(source_pod.id),
+            )?;
+            if source != source_package {
+                return Err(StoreError::Validation(
+                    "derived source Pod Package does not match stored provenance".into(),
+                )
+                .into());
+            }
+            Ok(())
+        }
+    }
+}
+
+fn create_pod_lifecycle_locked(
+    store: &mut InMemoryStore,
+    ctx: &AuthContext,
+    request: CreatePodLifecycleRequest,
+    proposer: Option<AgentHarnessId>,
+) -> Result<CreatedPodPackage, AgentToolsError> {
+    validate_creation_package_locked(store, ctx, &request.package)?;
+    if store
+        .pods
+        .values()
+        .any(|pod| pod.slug == request.pod.slug && pod.tenant_id == ctx.tenant_id)
+    {
+        return Err(StoreError::Duplicate(format!("pod {}", request.pod.slug)).into());
+    }
+    let node = store.node_for_tenant(ctx.tenant_id)?;
+    let owner_id = proposer
+        .and_then(|id| {
+            store
+                .agent_harnesses
+                .get(&id)
+                .map(|harness| harness.user_id)
+        })
+        .or(ctx.user_id)
+        .ok_or_else(|| StoreError::Validation("Pod creation requires an owner".into()))?;
+    let now = Utc::now();
+    let pod = Pod {
+        id: Uuid::now_v7(),
+        tenant_id: ctx.tenant_id,
+        name: request.pod.name,
+        slug: request.pod.slug,
+        description: request.pod.description,
+        visibility: request.pod.visibility,
+        created_by: Some(owner_id),
+        created_at: now,
+        origin_node_id: Some(node.id),
+    };
+    let mut package = match request.package {
+        PodCreationPackage::Default => default_skill_pack(&pod),
+        PodCreationPackage::Initial { package } => PodSkillPack {
+            id: Uuid::now_v7(),
+            pod_id: pod.id,
+            version: 1,
+            context_md: package.context_md,
+            pod_yaml: format!(
+                "name: {}\nslug: {}\ndescription: {}\nvisibility: {}\n",
+                pod.name,
+                pod.slug,
+                pod.description,
+                match pod.visibility {
+                    Visibility::Public => "public",
+                    Visibility::InviteOnly => "invite_only",
+                    Visibility::Private => "private",
+                }
+            ),
+            skill_md: package.skill_md,
+            sources_yaml: package.sources_yaml,
+            filters_yaml: package.filters_yaml,
+            examples_good_md: package.examples_good_md,
+            examples_bad_md: package.examples_bad_md,
+            owner_id: Some(owner_id),
+            proposer_harness_id: proposer,
+            created_at: now,
+            updated_at: now,
+        },
+        PodCreationPackage::Derived { source_package } => fork_skill_pack(&source_package, &pod),
+    };
+    package.version = 1;
+    package.proposer_harness_id = proposer;
+    store.pods.insert(pod.id, pod.clone());
+    store.pod_rules.insert(
+        pod.id,
+        PodRules {
+            pod_id: pod.id,
+            blocked_topics: Vec::new(),
+            blocked_domains: Vec::new(),
+            auto_promote_crawler_candidates: false,
+            federate_sources: pod.visibility == Visibility::Public,
+        },
+    );
+    store.pod_roles.push(PodRoleAssignment {
+        user_id: owner_id,
+        pod_id: pod.id,
+        role: PodRole::Owner,
+        created_at: now,
+    });
+    store.insert_pod_package_version(package.clone())?;
+    store.pod_skill_packs.insert(pod.id, package.clone());
+    let event = sign_public_event(
+        &node,
+        "pod_created",
+        &pod.slug,
+        json!({"pod": pod, "package": package}),
+        store.latest_event_hash(&pod.slug),
+    )?;
+    store.event_log.push(event);
+    record_harness_write(store, ctx, HarnessWriteOperation::CreatePod, Some(pod.id));
+    Ok(CreatedPodPackage { pod, package })
+}
+
 fn expire_proposal(
     store: &mut InMemoryStore,
     proposal_id: PendingProposalId,
@@ -9228,6 +9545,9 @@ fn apply_sensitive_change(
             )?;
             store.event_log.push(event);
         }
+        SensitiveChange::CreatePublicPodLifecycle { request } => {
+            create_pod_lifecycle_locked(store, ctx, request.clone(), Some(proposer))?;
+        }
         SensitiveChange::PublishPod { pod_id } => {
             let tenant_id = store
                 .pods
@@ -9261,6 +9581,28 @@ fn apply_sensitive_change(
                 store.latest_event_hash(&pod.slug),
             )?;
             store.event_log.push(event);
+        }
+        SensitiveChange::ExpandPodVisibility { pod_id, visibility } => {
+            let tenant_id = store
+                .pods
+                .get(pod_id)
+                .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?
+                .tenant_id;
+            store.assert_tenant(tenant_id, ctx.tenant_id)?;
+            let pod = store
+                .pods
+                .get_mut(pod_id)
+                .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+            if visibility_exposure(visibility) <= visibility_exposure(&pod.visibility) {
+                return Err(StoreError::Validation(
+                    "approved visibility must expand exposure".into(),
+                )
+                .into());
+            }
+            pod.visibility = visibility.clone();
+            if let Some(rules) = store.pod_rules.get_mut(pod_id) {
+                rules.federate_sources = *visibility == Visibility::Public;
+            }
         }
         SensitiveChange::ExpandHarnessGrant {
             harness_id,
