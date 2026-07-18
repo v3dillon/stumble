@@ -1339,6 +1339,18 @@ pub enum AgentHarnessKind {
     Unattended,
 }
 
+impl std::str::FromStr for AgentHarnessKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "interactive" => Ok(Self::Interactive),
+            "unattended" => Ok(Self::Unattended),
+            _ => Err(format!("unknown Agent Harness kind: {value}")),
+        }
+    }
+}
+
 /// Independently grantable Home Node operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1486,11 +1498,28 @@ pub struct PendingProposal {
     /// Current auditable lifecycle state.
     pub status: ProposalStatus,
     /// Independent harness that decided the proposal, when applicable.
-    pub decided_by: Option<AgentHarnessId>,
+    pub decided_by: Option<ProposalDecisionActor>,
     /// Decision or expiry time, when terminal.
     pub decided_at: Option<DateTime<Utc>>,
     /// Optional reason supplied when rejecting the proposal.
     pub rejection_reason: Option<String>,
+}
+
+/// Identity that independently approved or rejected a Pending Proposal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ProposalDecisionActor {
+    /// Backward-compatible Harness identity representation.
+    Harness(AgentHarnessId),
+    /// Automatically authenticated local Home Node Owner.
+    Owner { owner_user_id: UserId },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalAllowedAction {
+    Approve,
+    Reject,
 }
 
 /// One affected resource's inspectable state transition.
@@ -1584,6 +1613,24 @@ pub struct AgentHarness {
     pub created_at: DateTime<Utc>,
     /// Revocation timestamp, if revoked.
     pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// Inspectable Agent Harness metadata that never includes credential material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentHarnessView {
+    #[serde(flatten)]
+    pub harness: AgentHarness,
+    /// Stable, non-secret identifier derived from the stored credential hash.
+    pub credential_fingerprint: String,
+    /// Current lifecycle state, derived from revocation metadata.
+    pub status: AgentHarnessStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentHarnessStatus {
+    Active,
+    Revoked,
 }
 
 /// Type-safe operation recorded in a harness write audit entry.

@@ -60,12 +60,11 @@ The pre-release `podctl` executable remains temporarily as an expand-phase bridg
 
 ### Harnesses and approvals
 
-- `register-harness` — Registers an Agent Harness and returns its token once. Flags: `--label`, `--kind <interactive|unattended>`, repeatable `--capability`, and repeatable `--pod-id`.
-- `revoke-harness <ID>` — Revokes a Harness Grant. Flags: none.
-- `propose-change` — Creates a Pending Proposal from a JSON file. Flags: `--from <FILE>` and `--expires-in-seconds`.
-- `get-proposal <ID>` — Prints a Pending Proposal. Flags: none.
-- `approve-proposal <ID>` — Approves a Pending Proposal. Flags: none.
-- `reject-proposal <ID>` — Rejects a Pending Proposal. Flags: `--reason`.
+- `stumble node harness register` — Owner-only bootstrap that activates a scoped Harness Grant and returns its credential once. Flags: `--label`, `--kind <interactive|unattended>`, repeatable `--capability`, and repeatable `--pod-id`.
+- `stumble node harness list|show|revoke` — Inspects credential fingerprints and metadata or immediately revokes a Harness. Plaintext credentials are never returned by reads.
+- `stumble node proposal list|show|approve|reject` — Reviews expiring Pending Proposals. Approval and rejection require either the automatically authenticated Owner or an independent interactive Harness with approval capability and matching User and Pod scope.
+
+Local Owner commands authenticate from the Home Node Owner Credential automatically. Scoped automation supplies `STUMBLE_HARNESS_CREDENTIAL`; authority expansion creates a Pending Proposal and never changes the Harness Grant before approval. Generic proposal creation and tenant or raw-token administration are not CLI workflows.
 
 ### Discovery tasks
 

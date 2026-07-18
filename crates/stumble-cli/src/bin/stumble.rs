@@ -2,11 +2,15 @@ use clap::{Arg, ArgMatches, Command, ValueHint};
 use serde_json::{json, Value};
 use std::{path::PathBuf, process::ExitCode};
 use stumble_cli::{
-    owner_credential_store, read_json_input, render_text, resolve_existing_data_dir,
+    owner_credential_store, paginate, read_json_input, render_text, resolve_existing_data_dir,
     resolve_initialized_data_dir, selected_data_dir, CursorPage, ErrorBody, ErrorEnvelope,
-    ExitStatusCategory, OwnerCredentialStore, SuccessEnvelope,
+    ExitStatusCategory, OwnerCredentialStore, ResourceDetail, SuccessEnvelope,
 };
-use stumble_core::{new_plaintext_api_token, seed_store, AgentTools, AgentToolsError};
+use stumble_core::{
+    new_plaintext_api_token, seed_store, AgentHarnessId, AgentHarnessKind, AgentTools,
+    AgentToolsError, AuthContext, HarnessCapability, PendingProposalId,
+    RegisterAgentHarnessRequest, StoreError,
+};
 
 fn main() -> ExitCode {
     let matches = match cli().try_get_matches() {
@@ -60,26 +64,128 @@ fn dispatch(
             ExitStatusCategory::ValidationOrConflict,
         ));
     }
-    let _owner_credential = credentials
-        .load(&data_dir)
-        .map_err(credential_error)?
-        .ok_or_else(|| {
-            (
-                ErrorBody::new(
-                    "owner_credential_not_found",
-                    "Home Node Owner credential was not found in the credential store",
-                ),
-                ExitStatusCategory::Authorization,
-            )
-        })?;
     let tools = AgentTools::open_initialized_home_node(&data_dir).map_err(agent_tools_error)?;
-    let owner = tools
-        .local_owner_auth_context()
-        .map_err(agent_tools_error)?;
+    let actor = authenticate_actor(&tools, &data_dir, credentials)?;
 
     if path == "node show" {
-        let node = tools.node_info(&owner).map_err(agent_tools_error)?;
-        return Ok(json!({ "data_dir": data_dir, "node": node }));
+        let node = tools.node_info(&actor).map_err(agent_tools_error)?;
+        return Ok(json!({ "data_dir": data_dir, "node": node, "allowed_actions": [] }));
+    }
+    match path.as_str() {
+        "node harness list" => {
+            let items = tools
+                .list_agent_harnesses(&actor)
+                .map_err(agent_tools_error)?;
+            return serde_json::to_value(page(items, leaf)?).map_err(internal_error);
+        }
+        "node harness show" => {
+            let id = required_id::<AgentHarnessId>(leaf, "id")?;
+            let view = tools.agent_harness(&actor, id).map_err(agent_tools_error)?;
+            let allowed_actions = if actor.harness_id.is_none()
+                && view.status == stumble_core::AgentHarnessStatus::Active
+            {
+                vec!["revoke"]
+            } else {
+                Vec::new()
+            };
+            return serde_json::to_value(ResourceDetail {
+                resource: view,
+                allowed_actions,
+            })
+            .map_err(internal_error);
+        }
+        "node harness register" => {
+            if actor.harness_id.is_some() {
+                return Err((
+                    ErrorBody::new(
+                        "forbidden",
+                        "only the Home Node Owner may register an Agent Harness directly",
+                    ),
+                    ExitStatusCategory::Authorization,
+                ));
+            }
+            let request = RegisterAgentHarnessRequest {
+                label: leaf
+                    .get_one::<String>("label")
+                    .cloned()
+                    .expect("required by clap"),
+                kind: *leaf
+                    .get_one::<AgentHarnessKind>("kind")
+                    .expect("required by clap"),
+                capabilities: leaf
+                    .get_many::<HarnessCapability>("capability")
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .collect(),
+                pod_ids: leaf
+                    .get_many::<stumble_core::PodId>("pod-id")
+                    .map(|values| values.copied().collect()),
+            };
+            let issued = tools
+                .register_agent_harness(&actor, request)
+                .map_err(agent_tools_error)?;
+            return Ok(json!({ "harness": issued.harness, "credential": issued.token.expose() }));
+        }
+        "node harness revoke" => {
+            if actor.harness_id.is_some() {
+                return Err((
+                    ErrorBody::new(
+                        "forbidden",
+                        "only the Home Node Owner may revoke an Agent Harness directly",
+                    ),
+                    ExitStatusCategory::Authorization,
+                ));
+            }
+            let id = required_id::<AgentHarnessId>(leaf, "id")?;
+            tools
+                .revoke_agent_harness(&actor, id)
+                .map_err(agent_tools_error)?;
+            return Ok(json!({ "id": id, "status": "revoked" }));
+        }
+        "node proposal list" => {
+            let items = tools
+                .list_pending_proposals(&actor, chrono::Utc::now())
+                .map_err(agent_tools_error)?;
+            return serde_json::to_value(page(items, leaf)?).map_err(internal_error);
+        }
+        "node proposal show" => {
+            let id = required_id::<PendingProposalId>(leaf, "id")?;
+            let proposal = tools
+                .pending_proposal(&actor, id, chrono::Utc::now())
+                .map_err(agent_tools_error)?;
+            let allowed_actions = tools
+                .pending_proposal_allowed_actions(&actor, id)
+                .map_err(agent_tools_error)?;
+            return serde_json::to_value(ResourceDetail {
+                resource: proposal,
+                allowed_actions,
+            })
+            .map_err(internal_error);
+        }
+        "node proposal approve" => {
+            let id = required_id::<PendingProposalId>(leaf, "id")?;
+            return serde_json::to_value(
+                tools
+                    .approve_pending_proposal(&actor, id, chrono::Utc::now())
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error);
+        }
+        "node proposal reject" => {
+            let id = required_id::<PendingProposalId>(leaf, "id")?;
+            let reason = leaf
+                .get_one::<String>("reason")
+                .cloned()
+                .expect("required by clap");
+            return serde_json::to_value(
+                tools
+                    .reject_pending_proposal(&actor, id, chrono::Utc::now(), reason)
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error);
+        }
+        _ => {}
     }
     if let Some(input) = leaf.try_get_one::<PathBuf>("input").ok().flatten() {
         let input = read_json_input(input)
@@ -103,6 +209,67 @@ fn dispatch(
         "status": "shell_available",
         "allowed_actions": []
     }))
+}
+
+fn authenticate_actor(
+    tools: &AgentTools,
+    data_dir: &std::path::Path,
+    credentials: &dyn OwnerCredentialStore,
+) -> Result<AuthContext, (ErrorBody, ExitStatusCategory)> {
+    if let Ok(credential) = std::env::var("STUMBLE_HARNESS_CREDENTIAL") {
+        return tools
+            .authenticate_token(&credential)
+            .map_err(agent_tools_error)?
+            .ok_or_else(|| {
+                (
+                    ErrorBody::new(
+                        "invalid_harness_credential",
+                        "Agent Harness credential is invalid or revoked",
+                    ),
+                    ExitStatusCategory::Authorization,
+                )
+            });
+    }
+    credentials
+        .load(data_dir)
+        .map_err(credential_error)?
+        .ok_or_else(|| {
+            (
+                ErrorBody::new(
+                    "owner_credential_not_found",
+                    "Home Node Owner credential was not found in the credential store",
+                ),
+                ExitStatusCategory::Authorization,
+            )
+        })?;
+    tools.local_owner_auth_context().map_err(agent_tools_error)
+}
+
+fn required_id<T>(matches: &ArgMatches, name: &str) -> Result<T, (ErrorBody, ExitStatusCategory)>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    matches
+        .get_one::<String>(name)
+        .expect("required by clap")
+        .parse::<T>()
+        .map_err(|error: T::Err| {
+            (
+                ErrorBody::new("invalid_id", error.to_string()),
+                ExitStatusCategory::ValidationOrConflict,
+            )
+        })
+}
+
+fn page<T>(
+    items: Vec<T>,
+    matches: &ArgMatches,
+) -> Result<CursorPage<T>, (ErrorBody, ExitStatusCategory)> {
+    let limit = *matches.get_one::<u16>("limit").expect("defaulted by clap");
+    let cursor = matches.get_one::<String>("cursor").map(String::as_str);
+    paginate(items, limit, cursor)
+        .map_err(|error| (error, ExitStatusCategory::ValidationOrConflict))
 }
 
 fn initialize_node(
@@ -161,6 +328,18 @@ fn agent_tools_error(error: AgentToolsError) -> (ErrorBody, ExitStatusCategory) 
         ),
         AgentToolsError::NodeAlreadyInitialized => (
             ErrorBody::new("node_already_initialized", error.to_string()),
+            ExitStatusCategory::ValidationOrConflict,
+        ),
+        AgentToolsError::Forbidden { .. } => (
+            ErrorBody::new("forbidden", error.to_string()),
+            ExitStatusCategory::Authorization,
+        ),
+        AgentToolsError::Store(StoreError::Validation(_)) => (
+            ErrorBody::new("validation_error", error.to_string()),
+            ExitStatusCategory::ValidationOrConflict,
+        ),
+        AgentToolsError::Store(StoreError::NotFound(_)) => (
+            ErrorBody::new("not_found", error.to_string()),
             ExitStatusCategory::ValidationOrConflict,
         ),
         error => internal_error(error),
@@ -230,8 +409,52 @@ fn node() -> Command {
         .subcommand_required(true)
         .subcommand(Command::new("init"))
         .subcommand(Command::new("show"))
-        .subcommand(resource("harness", &["list", "show", "register", "revoke"]))
-        .subcommand(resource("proposal", &["list", "show", "approve", "reject"]))
+        .subcommand(harness())
+        .subcommand(proposal())
+}
+
+fn harness() -> Command {
+    Command::new("harness")
+        .subcommand_required(true)
+        .subcommand(list_leaf("list"))
+        .subcommand(Command::new("show").arg(Arg::new("id").required(true)))
+        .subcommand(
+            Command::new("register")
+                .arg(Arg::new("label").long("label").required(true))
+                .arg(
+                    Arg::new("kind")
+                        .long("kind")
+                        .required(true)
+                        .value_parser(clap::value_parser!(AgentHarnessKind)),
+                )
+                .arg(
+                    Arg::new("capability")
+                        .long("capability")
+                        .required(true)
+                        .action(clap::ArgAction::Append)
+                        .value_parser(clap::value_parser!(HarnessCapability)),
+                )
+                .arg(
+                    Arg::new("pod-id")
+                        .long("pod-id")
+                        .action(clap::ArgAction::Append)
+                        .value_parser(clap::value_parser!(stumble_core::PodId)),
+                ),
+        )
+        .subcommand(Command::new("revoke").arg(Arg::new("id").required(true)))
+}
+
+fn proposal() -> Command {
+    Command::new("proposal")
+        .subcommand_required(true)
+        .subcommand(list_leaf("list"))
+        .subcommand(Command::new("show").arg(Arg::new("id").required(true)))
+        .subcommand(Command::new("approve").arg(Arg::new("id").required(true)))
+        .subcommand(
+            Command::new("reject")
+                .arg(Arg::new("id").required(true))
+                .arg(Arg::new("reason").long("reason").required(true)),
+        )
 }
 
 fn pod() -> Command {

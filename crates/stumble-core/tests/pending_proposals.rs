@@ -169,6 +169,16 @@ fn public_exposure_requires_independent_interactive_approval_and_remains_auditab
         tools.approve_pending_proposal(&scoped_approval, proposal.id, now),
         Err(AgentToolsError::Forbidden { .. })
     ));
+    let wrong_user = AuthContext {
+        user_id: Some(UserId::from(Uuid::now_v7())),
+        tenant_id: owner.tenant_id,
+        node_id: owner.node_id,
+        harness_id: None,
+    };
+    assert!(matches!(
+        tools.pending_proposal(&wrong_user, proposal.id, now),
+        Err(AgentToolsError::Forbidden { .. })
+    ));
 
     let accepted = tools
         .approve_pending_proposal(&approver, proposal.id, now)

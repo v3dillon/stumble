@@ -354,6 +354,35 @@ impl<T> CursorPage<T> {
     }
 }
 
+pub fn paginate<T>(
+    items: Vec<T>,
+    limit: u16,
+    cursor: Option<&str>,
+) -> Result<CursorPage<T>, ErrorBody> {
+    let offset = match cursor {
+        None => 0,
+        Some(cursor) => cursor
+            .strip_prefix("v1.")
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or_else(|| {
+                ErrorBody::new("invalid_cursor", "cursor is not valid for this collection")
+            })?,
+    };
+    if offset > items.len() {
+        return Err(ErrorBody::new(
+            "invalid_cursor",
+            "cursor is outside this collection",
+        ));
+    }
+    let limit = usize::from(limit);
+    let has_more = offset.saturating_add(limit) < items.len();
+    let items = items.into_iter().skip(offset).take(limit).collect();
+    Ok(CursorPage {
+        items,
+        next_cursor: has_more.then(|| format!("v1.{}", offset + limit)),
+    })
+}
+
 #[derive(Debug, Serialize)]
 pub struct ResourceDetail<T, A> {
     #[serde(flatten)]

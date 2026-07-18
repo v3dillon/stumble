@@ -1296,6 +1296,12 @@ impl AgentTools {
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
+        if ctx.harness_id.is_some() {
+            return Err(AgentToolsError::Forbidden {
+                reason: "only the Home Node Owner may register an Agent Harness directly"
+                    .to_string(),
+            });
+        }
         authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
         if request.label.trim().is_empty() {
             return Err(StoreError::Validation(
@@ -1418,6 +1424,11 @@ impl AgentTools {
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
+        if ctx.harness_id.is_some() {
+            return Err(AgentToolsError::Forbidden {
+                reason: "only the Home Node Owner may revoke an Agent Harness directly".to_string(),
+            });
+        }
         authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
         let now = Utc::now();
         let harness = store
@@ -1440,6 +1451,66 @@ impl AgentTools {
         );
         self.persist_locked(&mut store)?;
         Ok(())
+    }
+
+    /// Lists Agent Harness metadata without exposing bearer credentials or hashes.
+    pub fn list_agent_harnesses(
+        &self,
+        ctx: &AuthContext,
+    ) -> Result<Vec<AgentHarnessView>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        let mut harnesses = store
+            .agent_harnesses
+            .values()
+            .filter(|harness| harness.tenant_id == ctx.tenant_id)
+            .map(|harness| agent_harness_view(&store, harness))
+            .collect::<Result<Vec<_>, _>>()?;
+        harnesses.sort_by_key(|view| view.harness.created_at);
+        Ok(harnesses)
+    }
+
+    /// Returns one Agent Harness's safe metadata view.
+    pub fn agent_harness(
+        &self,
+        ctx: &AuthContext,
+        harness_id: AgentHarnessId,
+    ) -> Result<AgentHarnessView, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        let harness = store
+            .agent_harnesses
+            .get(&harness_id)
+            .ok_or_else(|| StoreError::NotFound(format!("Agent Harness {harness_id}")))?;
+        store.assert_tenant(harness.tenant_id, ctx.tenant_id)?;
+        agent_harness_view(&store, harness)
+    }
+
+    /// Requests an authority expansion through the Pending Proposal policy.
+    pub fn request_harness_grant_expansion(
+        &self,
+        ctx: &AuthContext,
+        harness_id: AgentHarnessId,
+        capabilities: Vec<HarnessCapability>,
+        pod_ids: Option<Vec<PodId>>,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PendingProposal, AgentToolsError> {
+        self.create_pending_proposal(
+            ctx,
+            SensitiveChange::ExpandHarnessGrant {
+                harness_id,
+                capabilities,
+                pod_ids,
+            },
+            now,
+            now + Duration::hours(24),
+        )
     }
 
     /// Returns local-only harness write attribution records.
@@ -1903,6 +1974,60 @@ impl AgentTools {
             .ok_or_else(|| StoreError::NotFound(format!("Pending Proposal {proposal_id}")))?;
         self.persist_locked(&mut store)?;
         Ok(proposal)
+    }
+
+    /// Lists Pending Proposals visible to the acting User or Harness Grant.
+    pub fn list_pending_proposals(
+        &self,
+        ctx: &AuthContext,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Vec<PendingProposal>, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        // Validate a supplied Harness identity even when there are no visible proposals.
+        let _ = harness_for_context(&store, ctx)?;
+        let proposal_ids = store.pending_proposals.keys().copied().collect::<Vec<_>>();
+        for proposal_id in proposal_ids {
+            expire_proposal(&mut store, proposal_id, now)?;
+        }
+        let mut proposals = store
+            .pending_proposals
+            .values()
+            .filter(|proposal| authorize_proposal_reader(&store, ctx, proposal.id).is_ok())
+            .cloned()
+            .collect::<Vec<_>>();
+        proposals.sort_by_key(|proposal| proposal.created_at);
+        self.persist_locked(&mut store)?;
+        Ok(proposals)
+    }
+
+    /// Returns the proposal decisions currently allowed for this actor.
+    pub fn pending_proposal_allowed_actions(
+        &self,
+        ctx: &AuthContext,
+        proposal_id: PendingProposalId,
+    ) -> Result<Vec<ProposalAllowedAction>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let proposal = store
+            .pending_proposals
+            .get(&proposal_id)
+            .ok_or_else(|| StoreError::NotFound(format!("Pending Proposal {proposal_id}")))?;
+        authorize_proposal_reader(&store, ctx, proposal_id)?;
+        if proposal.status == ProposalStatus::Pending
+            && authorize_independent_approver(&store, ctx, proposal_id).is_ok()
+        {
+            Ok(vec![
+                ProposalAllowedAction::Approve,
+                ProposalAllowedAction::Reject,
+            ])
+        } else {
+            Ok(Vec::new())
+        }
     }
 
     /// Independently approves and atomically applies a live proposal.
@@ -7244,6 +7369,30 @@ fn authorize_harness(
     Ok(())
 }
 
+fn agent_harness_view(
+    store: &InMemoryStore,
+    harness: &AgentHarness,
+) -> Result<AgentHarnessView, AgentToolsError> {
+    let token_hash = store
+        .api_tokens
+        .values()
+        .find(|token| token.harness_id == Some(harness.id))
+        .map(|token| token.token_hash.as_str())
+        .ok_or_else(|| {
+            StoreError::NotFound(format!("credential for Agent Harness {}", harness.id))
+        })?;
+    let prefix = &token_hash[..token_hash.len().min(12)];
+    Ok(AgentHarnessView {
+        harness: harness.clone(),
+        credential_fingerprint: format!("sha256:{prefix}"),
+        status: if harness.revoked_at.is_some() {
+            AgentHarnessStatus::Revoked
+        } else {
+            AgentHarnessStatus::Active
+        },
+    })
+}
+
 fn authorize_taste_profile(
     store: &InMemoryStore,
     ctx: &AuthContext,
@@ -8540,11 +8689,13 @@ fn authorize_proposal_reader(
         .get(&proposal_id)
         .ok_or_else(|| StoreError::NotFound(format!("Pending Proposal {proposal_id}")))?;
     let Some(harness) = harness_for_context(store, ctx)? else {
-        if ctx.tenant_id == proposal.tenant_id {
+        if ctx.tenant_id == proposal.tenant_id
+            && (ctx.user_id.is_none() || ctx.user_id == Some(proposal.user_id))
+        {
             return Ok(());
         }
         return Err(AgentToolsError::Forbidden {
-            reason: "Pending Proposal belongs to another tenant".to_string(),
+            reason: "Pending Proposal belongs to another User or tenant".to_string(),
         });
     };
     if harness.tenant_id == proposal.tenant_id
@@ -8567,20 +8718,27 @@ fn authorize_independent_approver(
     store: &InMemoryStore,
     ctx: &AuthContext,
     proposal_id: PendingProposalId,
-) -> Result<AgentHarnessId, AgentToolsError> {
+) -> Result<ProposalDecisionActor, AgentToolsError> {
+    let proposal = store
+        .pending_proposals
+        .get(&proposal_id)
+        .ok_or_else(|| StoreError::NotFound(format!("Pending Proposal {proposal_id}")))?;
+    let Some(harness) = harness_for_context(store, ctx)? else {
+        if ctx.tenant_id == proposal.tenant_id && ctx.user_id == Some(proposal.user_id) {
+            return Ok(ProposalDecisionActor::Owner {
+                owner_user_id: proposal.user_id,
+            });
+        }
+        return Err(AgentToolsError::Forbidden {
+            reason: "approval must belong to the proposal User and tenant".to_string(),
+        });
+    };
     authorize_harness(store, ctx, HarnessCapability::Approval, None)?;
-    let harness = harness_for_context(store, ctx)?.ok_or_else(|| AgentToolsError::Forbidden {
-        reason: "approval requires an authenticated Agent Harness".to_string(),
-    })?;
     if harness.kind != AgentHarnessKind::Interactive {
         return Err(AgentToolsError::Forbidden {
             reason: "approval requires an interactive Agent Harness".to_string(),
         });
     }
-    let proposal = store
-        .pending_proposals
-        .get(&proposal_id)
-        .ok_or_else(|| StoreError::NotFound(format!("Pending Proposal {proposal_id}")))?;
     if harness.tenant_id != proposal.tenant_id || harness.user_id != proposal.user_id {
         return Err(AgentToolsError::Forbidden {
             reason: "approval must belong to the proposal User and tenant".to_string(),
@@ -8596,7 +8754,7 @@ fn authorize_independent_approver(
             reason: "a harness cannot approve its own Pending Proposal".to_string(),
         });
     }
-    Ok(harness.id)
+    Ok(ProposalDecisionActor::Harness(harness.id))
 }
 
 fn approval_scope_allows(harness: &AgentHarness, proposal: &PendingProposal) -> bool {
