@@ -7,7 +7,7 @@ use stumble_core::*;
 struct Cli {
     #[arg(long)]
     api: Option<String>,
-    #[arg(long)]
+    #[arg(long, env = "STUMBLE_MCP_TOKEN", hide_env_values = true)]
     token: Option<String>,
     #[arg(long, env = "STUMBLE_DATA_DIR")]
     data_dir: Option<PathBuf>,
@@ -44,6 +44,8 @@ impl From<FeedMixArgs> for FeedMixOverrides {
 #[derive(Debug, Subcommand)]
 enum Command {
     InitNode,
+    /// Serve authenticated MCP messages over standard input and output.
+    Mcp,
     Serve {
         #[arg(long, default_value = "local")]
         mode: ServeMode,
@@ -342,10 +344,32 @@ fn exit_legacy_contract(error: LegacyContractError) -> ! {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let mcp_mode = matches!(&cli.command, Command::Mcp);
+    anyhow::ensure!(
+        !mcp_mode || cli.token.is_some(),
+        "podctl mcp requires --token"
+    );
     if cli.api.is_some() {
         eprintln!("Remote HTTP mode is documented in README; this MVP CLI executes against the local AgentTools store.");
     }
     let data_dir = cli.data_dir.unwrap_or_else(|| PathBuf::from(".stumble"));
+    if mcp_mode {
+        let token = cli.token.as_deref().expect("MCP token checked above");
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        stumble_mcp::serve_stdio(
+            || {
+                let tools = AgentTools::open_home_node(&data_dir, seed_store)?;
+                let context = tools
+                    .authenticate_token(token)?
+                    .ok_or_else(|| anyhow::anyhow!("invalid or revoked Harness token"))?;
+                Ok((tools, context))
+            },
+            stdin.lock(),
+            stdout.lock(),
+        )?;
+        return Ok(());
+    }
     let tools = AgentTools::open_home_node(data_dir, seed_store)?;
     let store = tools.store();
     let default_ctx = {
@@ -370,6 +394,7 @@ async fn main() -> anyhow::Result<()> {
             let info = tools.node_info(&ctx)?;
             print_json(&info)?;
         }
+        Command::Mcp => unreachable!("MCP mode returns before local command dispatch"),
         Command::Serve {
             mode: _,
             bind,

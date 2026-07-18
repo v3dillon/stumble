@@ -2,9 +2,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use stumble_core::*;
 
-mod streamable_http;
+mod protocol;
+mod stdio;
 
-pub use streamable_http::streamable_http_router;
+pub use protocol::streamable_http_router;
+pub use stdio::serve_stdio;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolCall {

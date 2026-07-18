@@ -1,4 +1,4 @@
-//! Stateless Streamable HTTP transport for authenticated Stumble MCP tools.
+//! Shared MCP protocol dispatch and authenticated Streamable HTTP transport.
 
 use axum::{
     extract::{rejection::JsonRejection, State},
@@ -25,7 +25,7 @@ struct McpHttpState {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct JsonRpcRequest {
+pub(crate) struct JsonRpcRequest {
     jsonrpc: String,
     #[serde(default)]
     id: RequestId,
@@ -89,6 +89,16 @@ impl RequestId {
             Self::Missing => None,
             Self::Present(id) => Some(json!(id)),
         }
+    }
+}
+
+impl JsonRpcRequest {
+    pub(crate) fn has_valid_version(&self) -> bool {
+        self.jsonrpc == "2.0"
+    }
+
+    pub(crate) fn id_json(&self) -> Option<Value> {
+        self.id.to_json()
     }
 }
 
@@ -208,19 +218,25 @@ fn dispatch(
         .authenticate_token(token)
         .map_err(DispatchError::Internal)?
         .ok_or(DispatchError::Unauthorized)?;
-    let Some(id) = request.id.into_json() else {
-        return Ok(None);
-    };
+    Ok(dispatch_authenticated(tools, context, request))
+}
+
+pub(crate) fn dispatch_authenticated(
+    tools: AgentTools,
+    context: AuthContext,
+    request: JsonRpcRequest,
+) -> Option<Value> {
+    let id = request.id.into_json()?;
     let result = match request.method.as_str() {
         "initialize" => {
             let Ok(params) =
                 serde_json::from_value::<InitializeParams>(Value::Object(request.params.clone()))
             else {
-                return Ok(Some(rpc_error_value(
+                return Some(rpc_error_value(
                     id,
                     -32602,
                     "initialize requires protocolVersion, capabilities, and clientInfo",
-                )));
+                ));
             };
             json!({
                 "protocolVersion": negotiated_version(&params.protocol_version),
@@ -232,7 +248,7 @@ fn dispatch(
         "tools/list" => json!({"tools": tool_descriptors(&tools, &context)}),
         "tools/call" => {
             let Some(name) = request.params.get("name").and_then(Value::as_str) else {
-                return Ok(Some(rpc_error_value(id, -32602, "missing tool name")));
+                return Some(rpc_error_value(id, -32602, "missing tool name"));
             };
             let arguments = request
                 .params
@@ -241,13 +257,13 @@ fn dispatch(
                 .unwrap_or_else(|| json!({}));
             let available_tools = tool_descriptors(&tools, &context);
             let Some(descriptor) = available_tools.iter().find(|tool| tool["name"] == name) else {
-                return Ok(Some(rpc_error_value(id, -32602, "unknown tool")));
+                return Some(rpc_error_value(id, -32602, "unknown tool"));
             };
             if let Err(message) = validate_schema(&descriptor["inputSchema"], &arguments, "$args") {
-                return Ok(Some(rpc_error_value(id, -32602, &message)));
+                return Some(rpc_error_value(id, -32602, &message));
             }
             let router = McpToolRouter::new(tools, context);
-            return Ok(Some(
+            return Some(
                 match router.call_checked(McpToolCall {
                     tool: name.to_string(),
                     arguments,
@@ -277,19 +293,19 @@ fn dispatch(
                         }
                     }),
                 },
-            ));
+            );
         }
         "ping" => json!({}),
-        _ => return Ok(Some(rpc_error_value(id, -32601, "method not found"))),
+        _ => return Some(rpc_error_value(id, -32601, "method not found")),
     };
-    Ok(Some(json!({"jsonrpc": "2.0", "id": id, "result": result})))
+    Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
 }
 
 fn rpc_error(id: Value, code: i32, message: &str) -> Response {
     Json(rpc_error_value(id, code, message)).into_response()
 }
 
-fn rpc_error_value(id: Value, code: i32, message: &str) -> Value {
+pub(crate) fn rpc_error_value(id: Value, code: i32, message: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
