@@ -19,7 +19,9 @@ credential store, and later local commands retrieve it automatically.
 
 For agent-assisted setup, ask your agent to read [llms.txt](llms.txt) and install Stumble.
 
-To start the optional local HTTP API, run `podctl --data-dir ~/.stumble/nodes/default serve`.
+To start the optional local HTTP API, run
+`stumble-api --data-dir ~/.stumble/nodes/home`. Long-running HTTP and MCP
+transports are separate from the one-shot `stumble` workflow CLI.
 
 ## Legacy CLI
 

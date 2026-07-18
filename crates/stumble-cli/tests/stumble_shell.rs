@@ -69,6 +69,28 @@ fn exposes_only_the_five_workflow_families() {
 }
 
 #[test]
+fn rejects_long_running_and_remote_transport_modes() {
+    for arguments in [
+        ["serve", ""],
+        ["mcp", ""],
+        ["--api", "http://127.0.0.1:8787"],
+    ] {
+        let arguments = arguments
+            .iter()
+            .filter(|argument| !argument.is_empty())
+            .copied()
+            .collect::<Vec<_>>();
+        let output = stumble()
+            .args(&arguments)
+            .output()
+            .expect("run rejected transport mode");
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        assert!(output.stdout.is_empty(), "{arguments:?}");
+        assert_eq!(json(&output.stderr)["error"]["code"], "usage_error");
+    }
+}
+
+#[test]
 fn resource_first_paths_are_discoverable() {
     let cases = [
         (

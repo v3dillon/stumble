@@ -14,7 +14,7 @@ a public Origin Node:
 cargo build --release --workspace
 target/release/podctl --data-dir ~/.stumble/nodes/home init-node
 target/release/podctl --data-dir ~/.stumble/nodes/origin init-node
-target/release/podctl --data-dir ~/.stumble/nodes/origin serve \
+target/release/stumble-api --data-dir ~/.stumble/nodes/origin \
   --bind 127.0.0.1:8788
 ```
 
@@ -64,8 +64,8 @@ For a local MCP client on the same machine, configure it to launch the stdio
 adapter with a narrowly scoped Harness token in the child process environment:
 
 ```bash
-STUMBLE_MCP_TOKEN="$TOKEN" target/release/podctl \
-  --data-dir ~/.stumble/nodes/home mcp
+STUMBLE_MCP_TOKEN="$TOKEN" target/release/stumble-mcp \
+  --data-dir ~/.stumble/nodes/home --transport stdio
 ```
 
 The process reads and writes one JSON-RPC message per line and reserves standard
@@ -76,7 +76,7 @@ Remote clients use the separate Streamable HTTP bridge:
 
 ```bash
 target/release/stumble-mcp --data-dir ~/.stumble/nodes/home \
-  --bind 127.0.0.1:8790
+  --transport http --bind 127.0.0.1:8790
 ```
 
 Its endpoint is `/mcp`. Every request carries a bearer token; unexpected

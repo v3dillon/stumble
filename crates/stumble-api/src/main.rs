@@ -5,7 +5,7 @@ use std::time::Duration;
 use stumble_api::{
     bind_with_port, dev_tokens_allowed_for_bind, router_with_options, RouterOptions,
 };
-use stumble_core::{seed_store, AgentTools};
+use stumble_core::AgentTools;
 use tokio::{sync::watch, task::JoinHandle};
 
 #[derive(Debug, Parser)]
@@ -42,7 +42,7 @@ enum Mode {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let data_dir = args.data_dir.unwrap_or_else(|| PathBuf::from(".stumble"));
-    let tools = AgentTools::open_home_node(data_dir, seed_store)?;
+    let tools = AgentTools::open_initialized_home_node(data_dir)?;
     let bind = bind_with_port(args.bind, args.port);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let base_url = args
