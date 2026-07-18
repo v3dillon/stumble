@@ -164,7 +164,7 @@ fn success_and_usage_failure_use_versioned_json_envelopes() {
 #[test]
 fn list_results_use_the_shared_cursor_page_shape() {
     let output = stumble()
-        .args(["pod", "list", "--limit", "25", "--cursor", "opaque-page-2"])
+        .args(["pod", "list", "--limit", "25"])
         .output()
         .expect("run pod list");
     assert!(
@@ -175,6 +175,13 @@ fn list_results_use_the_shared_cursor_page_shape() {
     let body = json(&output.stdout);
     assert_eq!(body["data"]["items"], serde_json::json!([]));
     assert_eq!(body["data"]["next_cursor"], Value::Null);
+
+    let invalid = stumble()
+        .args(["pod", "list", "--cursor", "opaque-page-2"])
+        .output()
+        .expect("reject invalid cursor");
+    assert_eq!(invalid.status.code(), Some(4));
+    assert_eq!(json(&invalid.stderr)["error"]["code"], "invalid_cursor");
 }
 
 #[test]

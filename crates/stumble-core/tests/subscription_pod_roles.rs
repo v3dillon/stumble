@@ -390,3 +390,178 @@ fn priority_is_stored_on_the_subscription_without_changing_pod_roles() {
     assert!(subscription.is_priority);
     assert_eq!(store.pod_roles, roles_before);
 }
+
+#[test]
+fn role_grants_require_an_owner_proposal_and_independent_approval() {
+    let tools = AgentTools::new(seed_store());
+    let owner = tools.local_owner_auth_context().unwrap();
+    let pod = tools
+        .create_pod(
+            &owner,
+            CreatePodRequest {
+                name: "Governed roles".into(),
+                slug: "governed-roles".into(),
+                description: "Two-step role delegation".into(),
+                visibility: Visibility::Private,
+            },
+        )
+        .unwrap();
+    let target_id = uuid::Uuid::now_v7();
+    {
+        let shared = tools.store();
+        shared.write().unwrap().users.insert(
+            target_id,
+            User {
+                id: target_id,
+                display_name: "Future Curator".into(),
+                created_at: Utc::now(),
+            },
+        );
+    }
+    let owner_id = owner.user_id.unwrap();
+    let proposer = harness_for_user(
+        &tools,
+        owner_id,
+        "role proposer",
+        vec![HarnessCapability::PodCuration],
+    );
+    let approver = harness_for_user(
+        &tools,
+        owner_id,
+        "independent approver",
+        vec![HarnessCapability::Approval],
+    );
+
+    let proposal = tools
+        .request_grant_pod_role(&proposer, pod.id, target_id, PodRole::Curator, Utc::now())
+        .unwrap();
+    assert!(tools
+        .list_pod_roles(&owner, pod.id)
+        .unwrap()
+        .iter()
+        .all(|assignment| assignment.user_id != target_id));
+    let self_approval = tools
+        .approve_pending_proposal(&proposer, proposal.id, Utc::now())
+        .unwrap_err();
+    assert!(matches!(self_approval, AgentToolsError::Forbidden { .. }));
+
+    tools
+        .approve_pending_proposal(&approver, proposal.id, Utc::now())
+        .unwrap();
+    assert!(tools
+        .list_pod_roles(&owner, pod.id)
+        .unwrap()
+        .iter()
+        .any(|assignment| assignment.user_id == target_id && assignment.role == PodRole::Curator));
+}
+
+#[test]
+fn subscribers_curators_owners_and_scoped_harnesses_have_separate_authority() {
+    let tools = AgentTools::new(seed_store());
+    let owner = tools.local_owner_auth_context().unwrap();
+    let pod = tools
+        .create_pod(
+            &owner,
+            CreatePodRequest {
+                name: "Scoped authority".into(),
+                slug: "scoped-authority".into(),
+                description: "Relationship authorization".into(),
+                visibility: Visibility::Private,
+            },
+        )
+        .unwrap();
+    let other = tools
+        .create_pod(
+            &owner,
+            CreatePodRequest {
+                name: "Other scope".into(),
+                slug: "other-scope".into(),
+                description: "Outside the grant".into(),
+                visibility: Visibility::Private,
+            },
+        )
+        .unwrap();
+    let subscriber_id = uuid::Uuid::now_v7();
+    let curator_id = uuid::Uuid::now_v7();
+    {
+        let shared = tools.store();
+        let mut store = shared.write().unwrap();
+        for (id, display_name) in [(subscriber_id, "Subscriber"), (curator_id, "Curator")] {
+            store.users.insert(
+                id,
+                User {
+                    id,
+                    display_name: display_name.into(),
+                    created_at: Utc::now(),
+                },
+            );
+        }
+        store.pod_roles.push(PodRoleAssignment {
+            user_id: curator_id,
+            pod_id: pod.id,
+            role: PodRole::Curator,
+            created_at: Utc::now(),
+        });
+    }
+    let subscriber = harness_for_user(
+        &tools,
+        subscriber_id,
+        "subscriber harness",
+        vec![HarnessCapability::SubscriptionManagement],
+    );
+    tools.subscribe_local_pod(&subscriber, pod.id).unwrap();
+    assert_eq!(
+        tools.pod_allowed_actions(&subscriber, pod.id).unwrap(),
+        vec![
+            PodAllowedAction::Unsubscribe,
+            PodAllowedAction::SubscriptionSet
+        ]
+    );
+    assert!(matches!(
+        tools.list_pod_roles(&subscriber, pod.id),
+        Err(AgentToolsError::Forbidden { .. })
+    ));
+
+    let curator = harness_for_user(
+        &tools,
+        curator_id,
+        "curator harness",
+        vec![HarnessCapability::PodCuration],
+    );
+    assert!(tools.list_pod_roles(&curator, pod.id).is_ok());
+    assert_eq!(
+        tools.pod_allowed_actions(&curator, pod.id).unwrap(),
+        vec![PodAllowedAction::RoleList]
+    );
+    assert!(matches!(
+        tools.request_grant_pod_role(
+            &curator,
+            pod.id,
+            subscriber_id,
+            PodRole::Curator,
+            Utc::now()
+        ),
+        Err(AgentToolsError::Forbidden { .. })
+    ));
+
+    let scoped = tools
+        .register_agent_harness(
+            &owner,
+            RegisterAgentHarnessRequest {
+                label: "scoped subscriber".into(),
+                kind: AgentHarnessKind::Interactive,
+                capabilities: vec![HarnessCapability::SubscriptionManagement],
+                pod_ids: Some(vec![pod.id]),
+            },
+        )
+        .unwrap();
+    let scoped = tools
+        .authenticate_token(scoped.token.expose())
+        .unwrap()
+        .unwrap();
+    assert!(tools.subscribe_local_pod(&scoped, pod.id).is_ok());
+    assert!(matches!(
+        tools.subscribe_local_pod(&scoped, other.id),
+        Err(AgentToolsError::Forbidden { .. })
+    ));
+}

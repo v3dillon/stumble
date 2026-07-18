@@ -710,6 +710,59 @@ impl AgentTools {
             .collect())
     }
 
+    /// Returns Pod workflow actions allowed by relationship, Harness Grant, and Pod scope.
+    pub fn pod_allowed_actions(
+        &self,
+        ctx: &AuthContext,
+        pod_id: PodId,
+    ) -> Result<Vec<PodAllowedAction>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let harness = harness_for_context(&store, ctx)?;
+        let capability = |capability| {
+            harness.is_none_or(|harness| {
+                harness.grant.capabilities.contains(&capability)
+                    && harness
+                        .grant
+                        .pod_ids
+                        .as_ref()
+                        .is_none_or(|pod_ids| pod_ids.contains(&pod_id))
+            })
+        };
+        let subscribed = ctx.user_id.is_some_and(|user_id| {
+            store.subscriptions.values().any(|subscription| {
+                subscription.user_id == user_id && subscription.local_pod_id == pod_id
+            })
+        });
+        let role = ctx.user_id.and_then(|user_id| {
+            store
+                .pod_roles
+                .iter()
+                .find(|assignment| assignment.user_id == user_id && assignment.pod_id == pod_id)
+                .map(|assignment| assignment.role.clone())
+        });
+        let mut actions = Vec::new();
+        if capability(HarnessCapability::SubscriptionManagement) {
+            if subscribed {
+                actions.extend([
+                    PodAllowedAction::Unsubscribe,
+                    PodAllowedAction::SubscriptionSet,
+                ]);
+            } else {
+                actions.push(PodAllowedAction::Subscribe);
+            }
+        }
+        if capability(HarnessCapability::PodCuration) && role.is_some() {
+            actions.push(PodAllowedAction::RoleList);
+            if role == Some(PodRole::Owner) {
+                actions.extend([PodAllowedAction::RoleGrant, PodAllowedAction::RoleRevoke]);
+            }
+        }
+        Ok(actions)
+    }
+
     /// Pods that are safe to expose on the unauthenticated federation surface.
     /// Only `Public` pods are returned; private and invite-only pods are withheld.
     pub fn list_public_pods(&self, ctx: &AuthContext) -> Result<Vec<Pod>, AgentToolsError> {
@@ -1890,6 +1943,111 @@ impl AgentTools {
                     }],
                 )
             }
+            SensitiveChange::GrantPodRole {
+                pod_id,
+                user_id,
+                role,
+            } => {
+                authorize_pod_role_owner(&store, ctx, *pod_id)?;
+                if !store.users.contains_key(user_id) {
+                    return Err(StoreError::NotFound(format!("User {user_id}")).into());
+                }
+                if store.pod_roles.iter().any(|assignment| {
+                    assignment.pod_id == *pod_id
+                        && assignment.user_id == *user_id
+                        && assignment.role == *role
+                }) {
+                    return Err(
+                        StoreError::Duplicate(format!("Pod Role for User {user_id}")).into(),
+                    );
+                }
+                if *role != PodRole::Owner
+                    && store.pod_roles.iter().any(|assignment| {
+                        assignment.pod_id == *pod_id
+                            && assignment.user_id == *user_id
+                            && assignment.role == PodRole::Owner
+                    })
+                    && store
+                        .pod_roles
+                        .iter()
+                        .filter(|assignment| {
+                            assignment.pod_id == *pod_id && assignment.role == PodRole::Owner
+                        })
+                        .count()
+                        == 1
+                {
+                    return Err(
+                        StoreError::Validation("cannot replace the last Pod Owner".into()).into(),
+                    );
+                }
+                let before = pod_roles_value(&store, *pod_id);
+                let mut prospective = store.clone();
+                prospective.pod_roles.retain(|assignment| {
+                    assignment.pod_id != *pod_id || assignment.user_id != *user_id
+                });
+                prospective.pod_roles.push(PodRoleAssignment {
+                    user_id: *user_id,
+                    pod_id: *pod_id,
+                    role: role.clone(),
+                    created_at: now,
+                });
+                let resource = ProposalResource::PodRoles(*pod_id);
+                (
+                    vec![resource.clone()],
+                    vec!["The User gains explicit authority over this Pod.".into()],
+                    vec![ProposalResourceDiff {
+                        resource,
+                        before,
+                        after: pod_roles_value(&prospective, *pod_id),
+                    }],
+                )
+            }
+            SensitiveChange::RevokePodRole {
+                pod_id,
+                user_id,
+                role,
+            } => {
+                authorize_pod_role_owner(&store, ctx, *pod_id)?;
+                let assignment = store
+                    .pod_roles
+                    .iter()
+                    .find(|assignment| {
+                        assignment.pod_id == *pod_id
+                            && assignment.user_id == *user_id
+                            && assignment.role == *role
+                    })
+                    .cloned()
+                    .ok_or_else(|| StoreError::NotFound(format!("Pod Role for User {user_id}")))?;
+                if assignment.role == PodRole::Owner
+                    && store
+                        .pod_roles
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.pod_id == *pod_id && candidate.role == PodRole::Owner
+                        })
+                        .count()
+                        == 1
+                {
+                    return Err(
+                        StoreError::Validation("cannot revoke the last Pod Owner".into()).into(),
+                    );
+                }
+                let before = pod_roles_value(&store, *pod_id);
+                let mut prospective = store.clone();
+                prospective
+                    .pod_roles
+                    .retain(|candidate| candidate != &assignment);
+                let resource = ProposalResource::PodRoles(*pod_id);
+                (
+                    vec![resource.clone()],
+                    vec!["The User loses explicit authority over this Pod.".into()],
+                    vec![ProposalResourceDiff {
+                        resource,
+                        before,
+                        after: pod_roles_value(&prospective, *pod_id),
+                    }],
+                )
+            }
         };
         let proposal = PendingProposal {
             id: PendingProposalId::from(Uuid::now_v7()),
@@ -2749,12 +2907,21 @@ impl AgentTools {
         Ok(CreatedPodPackage { pod, package })
     }
 
-    pub fn join_pod(&self, ctx: &AuthContext, pod_slug: &str) -> Result<(), AgentToolsError> {
+    /// Creates Feed eligibility for a local Pod without granting Pod authority.
+    pub fn subscribe_local_pod(
+        &self,
+        ctx: &AuthContext,
+        pod_id: PodId,
+    ) -> Result<Subscription, AgentToolsError> {
         let mut store = self
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
-        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        let pod = store
+            .pods
+            .get(&pod_id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
         store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
         authorize_harness(
             &store,
@@ -2762,26 +2929,132 @@ impl AgentTools {
             HarnessCapability::SubscriptionManagement,
             Some(pod.id),
         )?;
-        let Some(user_id) = ctx.user_id else {
-            return Ok(());
-        };
-        if !store.subscriptions.values().any(|subscription| {
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Subscription requires an authenticated User".into())
+        })?;
+        if let Some(subscription) = store.subscriptions.values().find(|subscription| {
             subscription.user_id == user_id && subscription.local_pod_id == pod.id
         }) {
-            let node = store.node_for_tenant(ctx.tenant_id)?;
-            let now = Utc::now();
-            let subscription =
-                Subscription::new_local(Uuid::now_v7().into(), user_id, &pod, &node, now);
-            store.subscriptions.insert(subscription.id, subscription);
-            record_harness_write(
-                &mut store,
-                ctx,
-                HarnessWriteOperation::JoinPod,
-                Some(pod.id),
-            );
-            self.persist_locked(&mut store)?;
+            return Ok(subscription.clone());
         }
-        Ok(())
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        let now = Utc::now();
+        let subscription =
+            Subscription::new_local(Uuid::now_v7().into(), user_id, &pod, &node, now);
+        store
+            .subscriptions
+            .insert(subscription.id, subscription.clone());
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::JoinPod,
+            Some(pod.id),
+        );
+        self.persist_locked(&mut store)?;
+        Ok(subscription)
+    }
+
+    pub fn join_pod(&self, ctx: &AuthContext, pod_slug: &str) -> Result<(), AgentToolsError> {
+        let pod = self.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        self.subscribe_local_pod(ctx, pod.id).map(|_| ())
+    }
+
+    /// Removes Feed eligibility while leaving all Pod Roles unchanged.
+    pub fn unsubscribe_pod(
+        &self,
+        ctx: &AuthContext,
+        pod_id: PodId,
+    ) -> Result<Subscription, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(
+            &store,
+            ctx,
+            HarnessCapability::SubscriptionManagement,
+            Some(pod_id),
+        )?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("unsubscribe requires an authenticated User".into())
+        })?;
+        let subscription_id = store
+            .subscriptions
+            .values()
+            .find(|subscription| {
+                subscription.user_id == user_id && subscription.local_pod_id == pod_id
+            })
+            .map(|subscription| subscription.id)
+            .ok_or_else(|| StoreError::NotFound("Subscription".into()))?;
+        let subscription = store
+            .subscriptions
+            .remove(&subscription_id)
+            .expect("Subscription was resolved above");
+        self.persist_locked(&mut store)?;
+        Ok(subscription)
+    }
+
+    /// Lists canonical Pod Roles for an authorized Owner or Curator.
+    pub fn list_pod_roles(
+        &self,
+        ctx: &AuthContext,
+        pod_id: PodId,
+    ) -> Result<Vec<PodRoleAssignment>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::PodCuration, Some(pod_id))?;
+        let mut roles = store
+            .pod_roles
+            .iter()
+            .filter(|assignment| assignment.pod_id == pod_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        roles.sort_by_key(|assignment| (assignment.created_at, assignment.user_id));
+        Ok(roles)
+    }
+
+    /// Requests an Owner-authorized Pod Role grant through independent approval.
+    pub fn request_grant_pod_role(
+        &self,
+        ctx: &AuthContext,
+        pod_id: PodId,
+        user_id: UserId,
+        role: PodRole,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PendingProposal, AgentToolsError> {
+        self.create_pending_proposal(
+            ctx,
+            SensitiveChange::GrantPodRole {
+                pod_id,
+                user_id,
+                role,
+            },
+            now,
+            now + Duration::hours(24),
+        )
+    }
+
+    /// Requests an Owner-authorized Pod Role revocation through independent approval.
+    pub fn request_revoke_pod_role(
+        &self,
+        ctx: &AuthContext,
+        pod_id: PodId,
+        user_id: UserId,
+        role: PodRole,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PendingProposal, AgentToolsError> {
+        self.create_pending_proposal(
+            ctx,
+            SensitiveChange::RevokePodRole {
+                pod_id,
+                user_id,
+                role,
+            },
+            now,
+            now + Duration::hours(24),
+        )
     }
 
     /// Configures bounded Priority Subscription representation in future Feed Batches.
@@ -8763,6 +9036,7 @@ fn approval_scope_allows(harness: &AgentHarness, proposal: &PendingProposal) -> 
             ProposalResource::Pod(pod_id)
             | ProposalResource::PodPackage(pod_id)
             | ProposalResource::PodCurationPolicy(pod_id)
+            | ProposalResource::PodRoles(pod_id)
             | ProposalResource::SubmissionPlacement { pod_id, .. } => harness
                 .grant
                 .pod_ids
@@ -8831,6 +9105,7 @@ fn validate_structured_diff(
                     .copied()
                     .unwrap_or_default()
             }),
+            ProposalResource::PodRoles(pod_id) => pod_roles_value(store, *pod_id),
             ProposalResource::SubmissionPlacement {
                 pod_id,
                 submission_id,
@@ -8848,6 +9123,46 @@ fn validate_structured_diff(
         }
     }
     Ok(())
+}
+
+fn pod_roles_value(store: &InMemoryStore, pod_id: PodId) -> serde_json::Value {
+    let mut roles = store
+        .pod_roles
+        .iter()
+        .filter(|assignment| assignment.pod_id == pod_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    roles.sort_by_key(|assignment| {
+        (
+            assignment.user_id,
+            match assignment.role {
+                PodRole::Owner => 0,
+                PodRole::Curator => 1,
+            },
+        )
+    });
+    json!(roles)
+}
+
+fn authorize_pod_role_owner(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    pod_id: PodId,
+) -> Result<(), AgentToolsError> {
+    authorize_harness(store, ctx, HarnessCapability::PodCuration, Some(pod_id))?;
+    if ctx.user_id.is_some_and(|user_id| {
+        store.pod_roles.iter().any(|assignment| {
+            assignment.user_id == user_id
+                && assignment.pod_id == pod_id
+                && assignment.role == PodRole::Owner
+        })
+    }) {
+        Ok(())
+    } else {
+        Err(AgentToolsError::Forbidden {
+            reason: format!("User is not an Owner of Pod {pod_id}"),
+        })
+    }
 }
 
 fn apply_sensitive_change(
@@ -9180,6 +9495,36 @@ fn apply_sensitive_change(
                     confidence_threshold: *confidence_threshold,
                 },
             );
+        }
+        SensitiveChange::GrantPodRole {
+            pod_id,
+            user_id,
+            role,
+        } => {
+            store.pod_roles.retain(|assignment| {
+                assignment.pod_id != *pod_id || assignment.user_id != *user_id
+            });
+            store.pod_roles.push(PodRoleAssignment {
+                user_id: *user_id,
+                pod_id: *pod_id,
+                role: role.clone(),
+                created_at: Utc::now(),
+            });
+        }
+        SensitiveChange::RevokePodRole {
+            pod_id,
+            user_id,
+            role,
+        } => {
+            let before = store.pod_roles.len();
+            store.pod_roles.retain(|assignment| {
+                assignment.pod_id != *pod_id
+                    || assignment.user_id != *user_id
+                    || assignment.role != *role
+            });
+            if store.pod_roles.len() == before {
+                return Err(StoreError::NotFound(format!("Pod Role for User {user_id}")).into());
+            }
         }
     }
     Ok(())

@@ -393,6 +393,18 @@ pub enum PodRole {
     Curator,
 }
 
+/// Pod workflow actions allowed by current relationship, capability, and scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PodAllowedAction {
+    Subscribe,
+    Unsubscribe,
+    SubscriptionSet,
+    RoleList,
+    RoleGrant,
+    RoleRevoke,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrustLevel {
@@ -1455,6 +1467,18 @@ pub enum SensitiveChange {
         pod_id: PodId,
         confidence_threshold: CandidateConfidence,
     },
+    /// Assign one of the two canonical Pod Roles to a User.
+    GrantPodRole {
+        pod_id: PodId,
+        user_id: UserId,
+        role: PodRole,
+    },
+    /// Remove one canonical Pod Role from a User.
+    RevokePodRole {
+        pod_id: PodId,
+        user_id: UserId,
+        role: PodRole,
+    },
 }
 
 /// Auditable lifecycle state of a [`PendingProposal`].
@@ -1544,6 +1568,7 @@ pub enum ProposalResource {
     TrustPolicy(UserId),
     PodPackage(PodId),
     PodCurationPolicy(PodId),
+    PodRoles(PodId),
     SubmissionPlacement {
         pod_id: PodId,
         submission_id: SubmissionId,

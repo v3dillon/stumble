@@ -8,7 +8,7 @@ use stumble_cli::{
 };
 use stumble_core::{
     new_plaintext_api_token, seed_store, AgentHarnessId, AgentHarnessKind, AgentTools,
-    AgentToolsError, AuthContext, HarnessCapability, PendingProposalId,
+    AgentToolsError, AuthContext, HarnessCapability, PendingProposalId, Pod, PodRole,
     RegisterAgentHarnessRequest, StoreError,
 };
 
@@ -72,6 +72,106 @@ fn dispatch(
         return Ok(json!({ "data_dir": data_dir, "node": node, "allowed_actions": [] }));
     }
     match path.as_str() {
+        "pod list" => {
+            let items = tools
+                .list_pods_for_harness(&actor)
+                .map_err(agent_tools_error)?
+                .into_iter()
+                .map(pod_result)
+                .collect::<Result<Vec<_>, _>>()?;
+            return serde_json::to_value(page(items, leaf)?).map_err(internal_error);
+        }
+        "pod show" => {
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let allowed_actions = tools
+                .pod_allowed_actions(&actor, pod.id)
+                .map_err(agent_tools_error)?;
+            let mut result = pod_result(pod)?;
+            result["allowed_actions"] =
+                serde_json::to_value(allowed_actions).map_err(internal_error)?;
+            return Ok(result);
+        }
+        "pod subscribe" => {
+            let reference = required_string(leaf, "pod")?;
+            if reference.starts_with("https://") || reference.starts_with("http://") {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(internal_error)?;
+                let result = runtime
+                    .block_on(stumble_sync::subscribe_pod_from_url(
+                        &tools, &actor, reference,
+                    ))
+                    .map_err(direct_subscription_error)?;
+                return Ok(json!({
+                    "pod_id": result.subscription.local_pod_id,
+                    "slug": result.subscription.pod_slug,
+                    "subscription": result.subscription,
+                    "imported_events": result.imported_events,
+                }));
+            }
+            let pod = resolve_pod(&tools, &actor, reference)?;
+            let subscription = tools
+                .subscribe_local_pod(&actor, pod.id)
+                .map_err(agent_tools_error)?;
+            return Ok(json!({
+                "pod_id": pod.id,
+                "slug": pod.slug,
+                "subscription": subscription,
+            }));
+        }
+        "pod unsubscribe" => {
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let subscription = tools
+                .unsubscribe_pod(&actor, pod.id)
+                .map_err(agent_tools_error)?;
+            return Ok(json!({
+                "pod_id": pod.id,
+                "slug": pod.slug,
+                "subscription_id": subscription.id,
+                "unsubscribed": true,
+            }));
+        }
+        "pod subscription set" => {
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let is_priority = *leaf.get_one::<bool>("priority").expect("required by clap");
+            tools
+                .set_priority_subscription(&actor, pod.id, is_priority)
+                .map_err(agent_tools_error)?;
+            return Ok(json!({
+                "pod_id": pod.id,
+                "slug": pod.slug,
+                "is_priority": is_priority,
+            }));
+        }
+        "pod role list" => {
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let roles = tools
+                .list_pod_roles(&actor, pod.id)
+                .map_err(agent_tools_error)?;
+            let page = page(roles, leaf)?;
+            return Ok(json!({
+                "pod_id": pod.id,
+                "slug": pod.slug,
+                "items": page.items,
+                "next_cursor": page.next_cursor,
+            }));
+        }
+        "pod role grant" | "pod role revoke" => {
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let user_id = required_id::<uuid::Uuid>(leaf, "user-id")?;
+            let role = leaf
+                .get_one::<PodRole>("role")
+                .expect("required by clap")
+                .clone();
+            let proposal = if path.ends_with(" grant") {
+                tools.request_grant_pod_role(&actor, pod.id, user_id, role, chrono::Utc::now())
+            } else {
+                tools.request_revoke_pod_role(&actor, pod.id, user_id, role, chrono::Utc::now())
+            }
+            .map_err(agent_tools_error)?;
+            return Ok(json!({ "pod_id": pod.id, "slug": pod.slug, "proposal": proposal }));
+        }
         "node harness list" => {
             let items = tools
                 .list_agent_harnesses(&actor)
@@ -262,6 +362,51 @@ where
         })
 }
 
+fn required_string<'a>(
+    matches: &'a ArgMatches,
+    name: &str,
+) -> Result<&'a str, (ErrorBody, ExitStatusCategory)> {
+    matches
+        .get_one::<String>(name)
+        .map(String::as_str)
+        .ok_or_else(|| internal_error(format!("missing required argument {name}")))
+}
+
+fn resolve_pod(
+    tools: &AgentTools,
+    actor: &AuthContext,
+    reference: &str,
+) -> Result<Pod, (ErrorBody, ExitStatusCategory)> {
+    tools
+        .list_pods_for_harness(actor)
+        .map_err(agent_tools_error)?
+        .into_iter()
+        .find(|pod| pod.slug == reference || pod.id.to_string() == reference)
+        .ok_or_else(|| {
+            (
+                ErrorBody::new("not_found", format!("Pod {reference} was not found")),
+                ExitStatusCategory::ValidationOrConflict,
+            )
+        })
+}
+
+fn pod_result(pod: Pod) -> Result<Value, (ErrorBody, ExitStatusCategory)> {
+    let pod_id = pod.id;
+    let mut result = serde_json::to_value(pod).map_err(internal_error)?;
+    result["pod_id"] = json!(pod_id);
+    Ok(result)
+}
+
+fn direct_subscription_error(
+    error: stumble_sync::DirectSubscriptionError,
+) -> (ErrorBody, ExitStatusCategory) {
+    match error {
+        stumble_sync::DirectSubscriptionError::Core(error) => agent_tools_error(error),
+        stumble_sync::DirectSubscriptionError::InvalidAddress(error) => agent_tools_error(error),
+        error => internal_error(error),
+    }
+}
+
 fn page<T>(
     items: Vec<T>,
     matches: &ArgMatches,
@@ -340,6 +485,10 @@ fn agent_tools_error(error: AgentToolsError) -> (ErrorBody, ExitStatusCategory) 
         ),
         AgentToolsError::Store(StoreError::NotFound(_)) => (
             ErrorBody::new("not_found", error.to_string()),
+            ExitStatusCategory::ValidationOrConflict,
+        ),
+        AgentToolsError::Store(StoreError::Duplicate(_)) | AgentToolsError::BadUrl(_) => (
+            ErrorBody::new("validation_error", error.to_string()),
             ExitStatusCategory::ValidationOrConflict,
         ),
         error => internal_error(error),
@@ -461,19 +610,52 @@ fn pod() -> Command {
     Command::new("pod")
         .subcommand_required(true)
         .subcommand(list_leaf("list"))
-        .subcommand(Command::new("show"))
+        .subcommand(Command::new("show").arg(Arg::new("pod").required(true)))
         .subcommand(Command::new("create"))
         .subcommand(list_leaf("explore"))
-        .subcommand(Command::new("subscribe"))
-        .subcommand(Command::new("unsubscribe"))
-        .subcommand(resource("subscription", &["set"]))
+        .subcommand(Command::new("subscribe").arg(Arg::new("pod").required(true)))
+        .subcommand(Command::new("unsubscribe").arg(Arg::new("pod").required(true)))
+        .subcommand(
+            Command::new("subscription")
+                .subcommand_required(true)
+                .subcommand(
+                    Command::new("set").arg(Arg::new("pod").required(true)).arg(
+                        Arg::new("priority")
+                            .long("priority")
+                            .required(true)
+                            .value_parser(clap::value_parser!(bool)),
+                    ),
+                ),
+        )
         .subcommand(resource("visibility", &["set"]))
-        .subcommand(resource("role", &["list", "grant", "revoke"]))
+        .subcommand(
+            Command::new("role")
+                .subcommand_required(true)
+                .subcommand(list_leaf("list").arg(Arg::new("pod").required(true)))
+                .subcommand(role_change("grant"))
+                .subcommand(role_change("revoke")),
+        )
         .subcommand(resource("content", &["list", "show", "add", "remove"]))
         .subcommand(resource("policy", &["show", "set"]))
         .subcommand(resource(
             "package",
             &["show", "export", "validate", "revise"],
+        ))
+}
+
+fn role_change(name: &'static str) -> Command {
+    Command::new(name)
+        .arg(Arg::new("pod").required(true))
+        .arg(Arg::new("user-id").long("user-id").required(true))
+        .arg(Arg::new("role").long("role").required(true).value_parser(
+            clap::builder::TypedValueParser::map(
+                clap::builder::PossibleValuesParser::new(["owner", "curator"]),
+                |value| match value.as_str() {
+                    "owner" => PodRole::Owner,
+                    "curator" => PodRole::Curator,
+                    _ => unreachable!("constrained by possible values"),
+                },
+            ),
         ))
 }
 
