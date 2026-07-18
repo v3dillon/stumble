@@ -15,7 +15,8 @@ use crate::skill_pack::{
 };
 use crate::store::{
     load_or_initialize_sqlite_store, load_sqlite_store, persist_sqlite_store_changes,
-    save_store_snapshot, FederatedContentItemKey, InMemoryStore, StoreError, StorePersistenceError,
+    save_store_snapshot, sqlite_home_node_is_initialized, FederatedContentItemKey, InMemoryStore,
+    StoreError, StorePersistenceError,
 };
 use chrono::{Duration, Utc};
 use serde_json::json;
@@ -63,6 +64,10 @@ pub enum AgentToolsError {
     CandidatePackageVersionMismatch,
     #[error("candidate submission idempotency key was reused with different input")]
     CandidateIdempotencyConflict,
+    #[error("Home Node is not initialized")]
+    NodeNotInitialized,
+    #[error("Home Node is already initialized")]
+    NodeAlreadyInitialized,
     /// A remote node advertises a protocol this node cannot safely interpret.
     #[error("incompatible protocol version {received}; this node supports {supported}")]
     IncompatibleProtocol {
@@ -575,6 +580,36 @@ impl AgentTools {
         Ok(Self::new_sqlite_persistent(store, database_path))
     }
 
+    /// Returns whether the selected path contains initialized Home Node state.
+    pub fn home_node_is_initialized(data_dir: impl AsRef<Path>) -> Result<bool, AgentToolsError> {
+        Ok(sqlite_home_node_is_initialized(
+            &data_dir.as_ref().join("stumble.sqlite3"),
+        )?)
+    }
+
+    /// Initializes a new Home Node and refuses to reopen an existing one.
+    pub fn initialize_home_node(
+        data_dir: impl AsRef<Path>,
+        seed: impl FnOnce() -> InMemoryStore,
+    ) -> Result<Self, AgentToolsError> {
+        let data_dir = data_dir.as_ref();
+        if Self::home_node_is_initialized(data_dir)? {
+            return Err(AgentToolsError::NodeAlreadyInitialized);
+        }
+        Self::open_home_node(data_dir, seed)
+    }
+
+    /// Opens existing Home Node state without initializing an empty path.
+    pub fn open_initialized_home_node(data_dir: impl AsRef<Path>) -> Result<Self, AgentToolsError> {
+        let data_dir = data_dir.as_ref();
+        let database_path = data_dir.join("stumble.sqlite3");
+        if !sqlite_home_node_is_initialized(&database_path)? {
+            return Err(AgentToolsError::NodeNotInitialized);
+        }
+        let store = load_sqlite_store(&database_path)?;
+        Ok(Self::new_sqlite_persistent(store, database_path))
+    }
+
     pub fn store(&self) -> Arc<RwLock<InMemoryStore>> {
         self.store.clone()
     }
@@ -595,6 +630,27 @@ impl AgentTools {
         let node = store.default_node()?;
         Ok(AuthContext {
             user_id: None,
+            tenant_id: node.tenant_id,
+            node_id: node.id,
+            harness_id: None,
+        })
+    }
+
+    /// Returns the automatically authenticated local User context for the Home
+    /// Node Owner Credential.
+    pub fn local_owner_auth_context(&self) -> Result<AuthContext, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let node = store.default_node()?;
+        let user_id = store
+            .users
+            .values()
+            .min_by_key(|user| (user.created_at, user.id))
+            .map(|user| user.id);
+        Ok(AuthContext {
+            user_id,
             tenant_id: node.tenant_id,
             node_id: node.id,
             harness_id: None,

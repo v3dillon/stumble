@@ -44,6 +44,31 @@ pub enum StorePersistenceError {
     PopulatedUninitializedDatabase,
 }
 
+/// Reports whether a SQLite path contains an initialized Stumble store without
+/// creating the file when it is absent.
+pub fn sqlite_home_node_is_initialized(
+    database_path: &Path,
+) -> Result<bool, StorePersistenceError> {
+    if !database_path.is_file() {
+        return Ok(false);
+    }
+    let connection = rusqlite::Connection::open_with_flags(
+        database_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let has_schema: bool = connection.query_row(
+        "SELECT
+           EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'stumble_store_metadata')
+           AND EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'stumble_store_records')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_schema {
+        return Ok(false);
+    }
+    Ok(sqlite_store_state(&connection)? == SqliteStoreState::Initialized)
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryStore {
     pub tenants: HashMap<TenantId, Tenant>,
@@ -707,6 +732,7 @@ fn open_sqlite_store(path: &Path) -> Result<rusqlite::Connection, StorePersisten
     Ok(connection)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SqliteStoreState {
     Empty,
     Initialized,

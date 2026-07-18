@@ -1,11 +1,37 @@
 use serde_json::Value;
 use std::{
     io::Write,
+    path::PathBuf,
     process::{Command, Stdio},
+    sync::OnceLock,
 };
 
 fn stumble() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_stumble"))
+    static ENVIRONMENT: OnceLock<PathBuf> = OnceLock::new();
+    let root = ENVIRONMENT.get_or_init(|| {
+        let root = std::env::temp_dir().join(format!(
+            "stumble-shell-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let output = Command::new(env!("CARGO_BIN_EXE_stumble"))
+            .env("STUMBLE_DATA_DIR", root.join("home"))
+            .env("STUMBLE_CREDENTIAL_STORE_DIR", root.join("credentials"))
+            .args(["node", "init"])
+            .output()
+            .expect("initialize shell test Home Node");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        root
+    });
+    let mut command = Command::new(env!("CARGO_BIN_EXE_stumble"));
+    command
+        .env("STUMBLE_DATA_DIR", root.join("home"))
+        .env("STUMBLE_CREDENTIAL_STORE_DIR", root.join("credentials"));
+    command
 }
 
 fn podctl() -> Command {
@@ -95,11 +121,8 @@ fn success_and_usage_failure_use_versioned_json_envelopes() {
     assert!(success.stderr.is_empty());
     let success_json = json(&success.stdout);
     assert_eq!(success_json["version"], 1);
-    assert_eq!(success_json["data"]["command"], "node show");
-    assert_eq!(
-        success_json["data"]["allowed_actions"],
-        serde_json::json!([])
-    );
+    assert!(success_json["data"]["data_dir"].as_str().is_some());
+    assert!(success_json["data"]["node"]["node_id"].as_str().is_some());
 
     let failure = stumble()
         .arg("retired-command")
@@ -200,8 +223,8 @@ fn text_format_renders_the_same_result_data() {
         .expect("run text output");
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).expect("text should be UTF-8");
-    assert!(text.contains("command: node show"));
-    assert!(text.contains("allowed_actions: []"));
+    assert!(text.contains("data_dir:"));
+    assert!(text.contains("node_id:"));
 }
 
 #[test]

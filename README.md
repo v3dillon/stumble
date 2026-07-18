@@ -8,16 +8,22 @@ Install [Rust](https://rustup.rs), clone this repository, then run:
 
 ```bash
 cargo install --path crates/stumble-cli --locked
-podctl --data-dir ~/.stumble/nodes/default init-node
+stumble node init
+stumble node show
 ```
+
+`stumble` uses `~/.stumble/nodes/home` by default. Set `STUMBLE_DATA_DIR`
+or pass `--data-dir` to select another Home Node. Only `node init` creates
+state; it stores the Home Node Owner Credential in the operating-system
+credential store, and later local commands retrieve it automatically.
 
 For agent-assisted setup, ask your agent to read [llms.txt](llms.txt) and install Stumble.
 
 To start the optional local HTTP API, run `podctl --data-dir ~/.stumble/nodes/default serve`.
 
-## CLI
+## Legacy CLI
 
-`podctl` currently has **46 public commands**; another 10 hidden commands preserve retired pre-release contracts. Every command supports `-h, --help`, while the global flags are `--api <URL>`, `--token <TOKEN>`, and `--data-dir <PATH>`.
+The pre-release `podctl` executable remains temporarily as an expand-phase bridge while repository callers move to `stumble`. It currently has **46 public commands**; another 10 hidden commands preserve retired pre-release contracts. Every command supports `-h, --help`, while the global flags are `--api <URL>`, `--token <TOKEN>`, and `--data-dir <PATH>`.
 
 ### Node
 
