@@ -2717,6 +2717,12 @@ pub enum CandidateAllowedAction {
     InspectCandidate,
     /// Submit another independently provenance-bearing evidence record.
     SubmitCandidateEvidence,
+    /// Evaluate every proposed placement under its current Pod policy.
+    EvaluateCandidate,
+    /// Propose another evidence-backed placement within local Pod scope.
+    RouteCandidatePlacement,
+    /// Decide one pending placement without changing other placements.
+    ReviewCandidatePlacement,
 }
 
 /// Result of an idempotent Candidate Submission operation.
@@ -2737,6 +2743,8 @@ pub struct CandidateInspection {
     pub candidate: Candidate,
     /// Independent submissions retained for this canonical identity.
     pub submissions: Vec<CandidateSubmission>,
+    /// Independently governed placement states and retained evidence.
+    pub placements: Vec<PodPlacement>,
     /// Permission-derived operations the harness can perform next.
     pub allowed_actions: Vec<CandidateAllowedAction>,
 }

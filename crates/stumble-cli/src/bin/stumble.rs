@@ -14,11 +14,13 @@ use stumble_core::{
     new_plaintext_api_token, pod_package_contents_from_files, seed_store,
     validate_pod_package_contents, validate_portable_package_files, AddContentItemToPodRequest,
     AgentHarnessId, AgentHarnessKind, AgentTools, AgentToolsError, AuthContext,
-    CandidateConfidence, ContentItemId, CreatePodLifecycleRequest, CreatePodOutcome,
-    CreatePodRequest, CurationPolicy, CurationRationale, DiscoveryLeaseSeconds, DiscoveryTask,
-    DiscoveryTaskId, DiscoveryTaskState, ExploreRequest, HarnessCapability, PackageVersion,
-    PendingProposalId, Pod, PodCreationPackage, PodPackageRevisionOutcome, PodRole,
-    RegisterAgentHarnessRequest, SensitiveChange, StoreError, Visibility, PORTABLE_PACKAGE_FILES,
+    CandidateConfidence, CandidateId, CandidateReviewState, CandidateSubmissionRequest,
+    ContentItemId, CreatePodLifecycleRequest, CreatePodOutcome, CreatePodRequest, CurationPolicy,
+    CurationRationale, DiscoveryLeaseSeconds, DiscoveryTask, DiscoveryTaskId, DiscoveryTaskState,
+    ExploreRequest, HarnessCapability, PackageVersion, PendingProposalId, PlacementReviewDecision,
+    Pod, PodCreationPackage, PodPackageRevisionOutcome, PodRole, RegisterAgentHarnessRequest,
+    RouteCandidatePlacementRequest, SensitiveChange, StoreError, Visibility,
+    PORTABLE_PACKAGE_FILES,
 };
 
 fn main() -> ExitCode {
@@ -579,6 +581,108 @@ fn dispatch(
                 .map_err(agent_tools_error)?;
             return discovery_task_mutation_result(&actor, task, now);
         }
+        "discover candidate list" => {
+            let status = leaf.get_one::<String>("status").map(String::as_str);
+            let mut items = tools.list_candidates(&actor).map_err(agent_tools_error)?;
+            items.retain(|candidate| match status {
+                None => true,
+                Some("pending") => candidate.review_state == CandidateReviewState::Pending,
+                Some("accepted") => candidate.review_state == CandidateReviewState::Accepted,
+                Some(_) => false,
+            });
+            items.sort_by_key(|candidate| (candidate.created_at, candidate.id));
+            return serde_json::to_value(page(items, leaf)?).map_err(internal_error);
+        }
+        "discover candidate submit" => {
+            let input = leaf.get_one::<PathBuf>("input").expect("required by clap");
+            let idempotency_key = required_string(leaf, "idempotency-key")?;
+            let mut input = read_json_input(input)
+                .map_err(|error| (error, ExitStatusCategory::ValidationOrConflict))?;
+            let input_object = input.as_object_mut().ok_or_else(|| {
+                (
+                    ErrorBody::new("invalid_input", "Candidate input must be a JSON object"),
+                    ExitStatusCategory::ValidationOrConflict,
+                )
+            })?;
+            input_object.insert("harness_idempotency_key".into(), json!(idempotency_key));
+            input_object.insert("client_idempotency_key".into(), json!(idempotency_key));
+            let request: CandidateSubmissionRequest =
+                serde_json::from_value(input).map_err(|error| {
+                    (
+                        ErrorBody::new("invalid_input", error.to_string()),
+                        ExitStatusCategory::ValidationOrConflict,
+                    )
+                })?;
+            return serde_json::to_value(
+                tools
+                    .submit_candidate(&actor, request)
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error);
+        }
+        "discover candidate show" => {
+            let candidate_id = required_id::<CandidateId>(leaf, "candidate-id")?;
+            let inspection = tools
+                .inspect_candidate(&actor, candidate_id)
+                .map_err(agent_tools_error)?;
+            return candidate_inspection_result(&tools, &actor, inspection);
+        }
+        "discover candidate evaluate" => {
+            let candidate_id = required_id::<CandidateId>(leaf, "candidate-id")?;
+            let result = tools
+                .curate_candidate(&actor, candidate_id, chrono::Utc::now())
+                .map_err(agent_tools_error)?;
+            let placements = pod_placement_results(&tools, &actor, result.placements)?;
+            return Ok(json!({
+                "candidate": result.candidate,
+                "content_item": result.content_item,
+                "placements": placements,
+            }));
+        }
+        "discover candidate route" => {
+            let candidate_id = required_id::<CandidateId>(leaf, "candidate-id")?;
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let confidence = CandidateConfidence::new(
+                *leaf.get_one::<f32>("confidence").expect("required by clap"),
+            )
+            .map_err(|error| agent_tools_error(StoreError::Validation(error.to_string()).into()))?;
+            let request = RouteCandidatePlacementRequest::new(
+                pod.id,
+                required_string(leaf, "reason")?,
+                confidence,
+            )
+            .map_err(|error| agent_tools_error(error.into()))?;
+            let placement = tools
+                .route_candidate_placement(&actor, candidate_id, request, chrono::Utc::now())
+                .map_err(agent_tools_error)?;
+            return Ok(json!({ "pod_id": pod.id, "slug": pod.slug, "placement": placement }));
+        }
+        "discover candidate review" => {
+            let candidate_id = required_id::<CandidateId>(leaf, "candidate-id")?;
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let decision = match required_string(leaf, "decision")? {
+                "accept" => PlacementReviewDecision::Accept,
+                "reject" => PlacementReviewDecision::Reject,
+                _ => unreachable!("constrained by clap"),
+            };
+            let note = leaf
+                .get_one::<String>("note")
+                .cloned()
+                .map(CurationRationale::new)
+                .transpose()
+                .map_err(|error| agent_tools_error(error.into()))?;
+            let placement = tools
+                .review_candidate_placement(
+                    &actor,
+                    candidate_id,
+                    pod.id,
+                    decision,
+                    note,
+                    chrono::Utc::now(),
+                )
+                .map_err(agent_tools_error)?;
+            return Ok(json!({ "pod_id": pod.id, "slug": pod.slug, "placement": placement }));
+        }
         "node harness list" => {
             let items = tools
                 .list_agent_harnesses(&actor)
@@ -861,6 +965,36 @@ fn discovery_task_mutation_result(
     Ok(json!({ "task": task, "allowed_actions": allowed_actions }))
 }
 
+fn candidate_inspection_result(
+    tools: &AgentTools,
+    actor: &AuthContext,
+    inspection: stumble_core::CandidateInspection,
+) -> Result<Value, (ErrorBody, ExitStatusCategory)> {
+    let placements = pod_placement_results(tools, actor, inspection.placements)?;
+    Ok(json!({
+        "candidate": inspection.candidate,
+        "submissions": inspection.submissions,
+        "placements": placements,
+        "allowed_actions": inspection.allowed_actions,
+    }))
+}
+
+fn pod_placement_results(
+    tools: &AgentTools,
+    actor: &AuthContext,
+    placements: Vec<stumble_core::PodPlacement>,
+) -> Result<Vec<Value>, (ErrorBody, ExitStatusCategory)> {
+    placements
+        .into_iter()
+        .map(|placement| {
+            let pod = resolve_pod(tools, actor, &placement.pod_id.to_string())?;
+            let mut value = serde_json::to_value(placement).map_err(internal_error)?;
+            value["slug"] = json!(pod.slug);
+            Ok(value)
+        })
+        .collect()
+}
+
 fn discovery_lease(
     matches: &ArgMatches,
 ) -> Result<DiscoveryLeaseSeconds, (ErrorBody, ExitStatusCategory)> {
@@ -983,6 +1117,17 @@ fn agent_tools_error(error: AgentToolsError) -> (ErrorBody, ExitStatusCategory) 
         ),
         AgentToolsError::TaskTerminal => (
             ErrorBody::new("task_terminal", error.to_string()),
+            ExitStatusCategory::ValidationOrConflict,
+        ),
+        AgentToolsError::CandidateIdempotencyConflict => (
+            ErrorBody::new("idempotency_conflict", error.to_string()),
+            ExitStatusCategory::ValidationOrConflict,
+        ),
+        AgentToolsError::CandidateHarnessRequired
+        | AgentToolsError::CandidateTaskRequired
+        | AgentToolsError::CandidateTaskLeaseRequired
+        | AgentToolsError::CandidatePackageVersionMismatch => (
+            ErrorBody::new("validation_error", error.to_string()),
             ExitStatusCategory::ValidationOrConflict,
         ),
         error => internal_error(error),
@@ -1319,20 +1464,60 @@ fn discover() -> Command {
     Command::new("discover")
         .subcommand_required(true)
         .subcommand(discovery_task())
+        .subcommand(candidate())
+}
+
+fn candidate() -> Command {
+    let candidate_id = || Arg::new("candidate-id").required(true);
+    Command::new("candidate")
+        .subcommand_required(true)
         .subcommand(
-            resource(
-                "candidate",
-                &["list", "submit", "show", "evaluate", "route", "review"],
-            )
-            .mut_subcommand("submit", |command| {
-                command.arg(
+            list_leaf("list").arg(
+                Arg::new("status")
+                    .long("status")
+                    .value_parser(["pending", "accepted"]),
+            ),
+        )
+        .subcommand(
+            Command::new("submit")
+                .arg(
                     Arg::new("input")
                         .long("input")
                         .required(true)
                         .value_parser(clap::value_parser!(PathBuf))
                         .value_hint(ValueHint::FilePath),
                 )
-            }),
+                .arg(
+                    Arg::new("idempotency-key")
+                        .long("idempotency-key")
+                        .required(true),
+                ),
+        )
+        .subcommand(Command::new("show").arg(candidate_id()))
+        .subcommand(Command::new("evaluate").arg(candidate_id()))
+        .subcommand(
+            Command::new("route")
+                .arg(candidate_id())
+                .arg(Arg::new("pod").required(true))
+                .arg(Arg::new("reason").long("reason").required(true))
+                .arg(
+                    Arg::new("confidence")
+                        .long("confidence")
+                        .required(true)
+                        .value_parser(clap::value_parser!(f32)),
+                ),
+        )
+        .subcommand(
+            Command::new("review")
+                .arg(candidate_id())
+                .arg(Arg::new("pod").required(true))
+                .arg(
+                    Arg::new("decision")
+                        .long("decision")
+                        .required(true)
+                        .value_parser(["accept", "reject"]),
+                )
+                .arg(Arg::new("note").long("note")),
         )
 }
 

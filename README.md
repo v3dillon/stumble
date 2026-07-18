@@ -85,6 +85,12 @@ Manual task creation and materialization are not public commands. Scheduler
 Adapters wake workers through the same filtered list surface and never control
 a browser.
 
+### Candidate curation
+
+- `stumble discover candidate submit --input <FILE|-> --idempotency-key <KEY>` records structured source metadata, provenance, and proposed Pod Placements. Retrying identical input with the same key returns the original result; changed input conflicts.
+- `stumble discover candidate list [--status <pending|accepted>]` returns the scoped, cursor-paginated Candidate collection. `candidate show <ID>` includes submissions, placement evidence and state, and allowed actions.
+- `stumble discover candidate evaluate <ID>` applies each target Pod's current Curation Policy independently. Curators can add an evidence-backed local proposal with `candidate route <ID> <POD> --reason <TEXT> --confidence <0..1>` and decide exactly one pending placement with `candidate review <ID> <POD> --decision <accept|reject> [--note <TEXT>]`.
+
 ### Administration and synchronization
 
 - `create-tenant <SLUG> <NAME>` — Creates a tenant. Flags: none.

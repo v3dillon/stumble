@@ -3448,6 +3448,35 @@ impl AgentTools {
         })
     }
 
+    /// Lists private Candidates visible within the active Harness Grant.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when authorization state cannot be read.
+    pub fn list_candidates(&self, ctx: &AuthContext) -> Result<Vec<Candidate>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let mut candidates = Vec::new();
+        for candidate in store
+            .candidates
+            .values()
+            .filter(|candidate| candidate.tenant_id == ctx.tenant_id)
+        {
+            let visible = store
+                .candidate_submissions
+                .values()
+                .filter(|submission| submission.candidate_id == candidate.id)
+                .flat_map(|submission| &submission.evidence.proposed_placements)
+                .all(|placement| candidate_placement_is_visible(&store, ctx, placement.pod_id));
+            if visible {
+                candidates.push(candidate.clone());
+            }
+        }
+        Ok(candidates)
+    }
+
     /// Inspects a private Candidate and all independently retained evidence.
     ///
     /// # Errors
@@ -3477,23 +3506,70 @@ impl AgentTools {
             .collect();
         for submission in &submissions {
             for placement in &submission.evidence.proposed_placements {
-                authorize_harness(
-                    &store,
-                    ctx,
-                    HarnessCapability::CandidateSubmission,
-                    Some(placement.pod_id),
-                )?;
+                if !candidate_placement_is_visible(&store, ctx, placement.pod_id) {
+                    return Err(AgentToolsError::Forbidden {
+                        reason: format!(
+                            "harness grant cannot inspect Candidate evidence for Pod {}",
+                            placement.pod_id
+                        ),
+                    });
+                }
             }
         }
         submissions.sort_by_key(|submission| (submission.created_at, submission.id));
-        let allowed_actions = if harness_for_context(&store, ctx)?.is_some() {
-            vec![CandidateAllowedAction::SubmitCandidateEvidence]
-        } else {
-            Vec::new()
-        };
+        let mut placements: Vec<_> = store
+            .pod_placements
+            .values()
+            .filter(|placement| placement.candidate_id == candidate_id)
+            .cloned()
+            .collect();
+        placements.sort_by_key(|placement| placement.pod_id);
+        let proposal_pod_ids: HashSet<_> = submissions
+            .iter()
+            .flat_map(|submission| &submission.evidence.proposed_placements)
+            .map(|placement| placement.pod_id)
+            .collect();
+        let harness = harness_for_context(&store, ctx)?;
+        let can_curate_all = harness.is_some()
+            && proposal_pod_ids
+                .iter()
+                .all(|pod_id| authorize_local_pod_curation(&store, ctx, *pod_id).is_ok());
+        let mut allowed_actions = Vec::new();
+        let can_submit_evidence = proposal_pod_ids.iter().all(|pod_id| {
+            authorize_harness(
+                &store,
+                ctx,
+                HarnessCapability::CandidateSubmission,
+                Some(*pod_id),
+            )
+            .is_ok()
+        });
+        if harness.is_some() && can_submit_evidence {
+            allowed_actions.push(CandidateAllowedAction::SubmitCandidateEvidence);
+        }
+        if can_curate_all && !proposal_pod_ids.is_empty() {
+            allowed_actions.push(CandidateAllowedAction::EvaluateCandidate);
+        }
+        if harness.is_some()
+            && store
+                .pods
+                .values()
+                .any(|pod| authorize_local_pod_curation(&store, ctx, pod.id).is_ok())
+        {
+            allowed_actions.push(CandidateAllowedAction::RouteCandidatePlacement);
+        }
+        if harness.is_some()
+            && placements.iter().any(|placement| {
+                placement.status == PodPlacementStatus::Pending
+                    && authorize_local_pod_curation(&store, ctx, placement.pod_id).is_ok()
+            })
+        {
+            allowed_actions.push(CandidateAllowedAction::ReviewCandidatePlacement);
+        }
         Ok(CandidateInspection {
             candidate,
             submissions,
+            placements,
             allowed_actions,
         })
     }
@@ -8035,6 +8111,17 @@ fn authorize_harness(
         }
     }
     Ok(())
+}
+
+fn candidate_placement_is_visible(store: &InMemoryStore, ctx: &AuthContext, pod_id: PodId) -> bool {
+    authorize_harness(
+        store,
+        ctx,
+        HarnessCapability::CandidateSubmission,
+        Some(pod_id),
+    )
+    .is_ok()
+        || authorize_local_pod_curation(store, ctx, pod_id).is_ok()
 }
 
 fn agent_harness_view(

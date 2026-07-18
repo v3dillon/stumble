@@ -185,48 +185,23 @@ fn list_results_use_the_shared_cursor_page_shape() {
 }
 
 #[test]
-fn structured_input_reads_a_file_or_stdin_and_reports_validation_errors() {
-    let mut path = std::env::temp_dir();
-    path.push(format!("stumble-shell-input-{}.json", std::process::id()));
-    std::fs::write(&path, r#"{"url":"https://example.com"}"#).expect("write input");
-    let from_file = stumble()
-        .args(["discover", "candidate", "submit", "--input"])
-        .arg(&path)
+fn candidate_submission_requires_an_idempotency_key_and_reports_invalid_json() {
+    let missing_key = stumble()
+        .args(["discover", "candidate", "submit", "--input", "-"])
         .output()
-        .expect("run file input");
-    std::fs::remove_file(&path).expect("remove input");
-    assert!(
-        from_file.status.success(),
-        "{}",
-        String::from_utf8_lossy(&from_file.stderr)
-    );
-    assert_eq!(
-        json(&from_file.stdout)["data"]["input"]["url"],
-        "https://example.com"
-    );
-
-    let mut child = stumble()
-        .args(["discover", "candidate", "submit", "--input", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn stdin input");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(br#"{"url":"https://example.org"}"#)
-        .expect("write stdin");
-    let from_stdin = child.wait_with_output().expect("finish stdin input");
-    assert!(from_stdin.status.success());
-    assert_eq!(
-        json(&from_stdin.stdout)["data"]["input"]["url"],
-        "https://example.org"
-    );
-
+        .expect("require idempotency key");
+    assert_eq!(missing_key.status.code(), Some(2));
+    assert_eq!(json(&missing_key.stderr)["error"]["code"], "usage_error");
     let invalid = stumble()
-        .args(["discover", "candidate", "submit", "--input", "-"])
+        .args([
+            "discover",
+            "candidate",
+            "submit",
+            "--input",
+            "-",
+            "--idempotency-key",
+            "invalid-json",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
