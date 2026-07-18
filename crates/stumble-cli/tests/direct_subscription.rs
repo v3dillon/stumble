@@ -1,5 +1,5 @@
 use axum::{body::Body, http::Request};
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use stumble_api::{router, router_with_base_url};
 use stumble_core::*;
 use tower::ServiceExt;
@@ -61,16 +61,13 @@ fn accepted_public_item(origin: &AgentTools) -> Pod {
         )
         .unwrap();
     let now = Utc::now();
-    let proposal = origin
-        .create_pending_proposal(
-            &proposer,
-            SensitiveChange::PublishPod {
-                pod_id: private_pod.id,
-            },
-            now,
-            now + Duration::hours(1),
-        )
-        .unwrap();
+    let proposal = match origin
+        .request_set_pod_visibility(&proposer, private_pod.id, Visibility::Public, now)
+        .unwrap()
+    {
+        PodVisibilityOutcome::PendingApproval(proposal) => proposal,
+        PodVisibilityOutcome::Updated(_) => panic!("publication must require approval"),
+    };
     origin
         .approve_pending_proposal(&approver, proposal.id, now)
         .unwrap();

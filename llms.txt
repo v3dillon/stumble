@@ -11,14 +11,14 @@ cargo install --path crates/stumble-cli --locked
 Initialize a Home Node and verify the installation:
 
 ```bash
-podctl --data-dir ~/.stumble/nodes/default init-node
-podctl --data-dir ~/.stumble/nodes/default node-info
+stumble --data-dir ~/.stumble/nodes/home node init
+stumble --data-dir ~/.stumble/nodes/home node show
 ```
 
 Start the local HTTP API only when the User asks to run it:
 
 ```bash
-podctl --data-dir ~/.stumble/nodes/default serve
+stumble-api --data-dir ~/.stumble/nodes/home --bind 127.0.0.1:8787
 ```
 
-Keep the default loopback binding unless the user explicitly requests and understands public exposure. Use `podctl --help` and `podctl <command> --help` for the complete CLI contract.
+Keep the default loopback binding unless the user explicitly requests and understands public exposure. MCP clients launch `stumble-mcp` with either `--transport stdio` or `--transport http`; the one-shot `stumble` executable never launches a server. Use `stumble --help` and `stumble <family> --help` for the five workflow families.

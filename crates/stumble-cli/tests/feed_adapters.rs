@@ -115,28 +115,37 @@ async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
     let (pod_id, content_item_id) = accepted_item(&tools, &ctx);
     drop(tools);
 
-    let cli = Command::new(env!("CARGO_BIN_EXE_podctl"))
+    let feed_request = data_dir.0.join("feed-request.json");
+    std::fs::write(
+        &feed_request,
+        serde_json::to_vec(&json!({
+            "feed_mix": {
+                "high_value_percent": 70,
+                "exploration_percent": 20,
+                "old_gem_percent": 10,
+                "per_pod_cap": 4,
+                "per_source_cap": 3
+            },
+            "batch_intent": {
+                "focus_topics": ["adapters"],
+                "avoid_topics": ["politics"]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let cli = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args([
             "--data-dir",
             data_dir.0.to_str().unwrap(),
-            "--token",
-            &token,
             "feed",
-            "--high-value-percent",
-            "70",
-            "--exploration-percent",
-            "20",
-            "--old-gem-percent",
-            "10",
-            "--per-pod-cap",
-            "4",
-            "--per-source-cap",
-            "3",
-            "--focus",
-            "adapters",
-            "--avoid",
-            "politics",
+            "batch",
+            "get",
+            "--input",
+            feed_request.to_str().unwrap(),
         ])
+        .env("STUMBLE_HARNESS_CREDENTIAL", &token)
         .output()
         .unwrap();
     assert!(
@@ -144,7 +153,9 @@ async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
         "{}",
         String::from_utf8_lossy(&cli.stderr)
     );
-    let cli_batch: Value = serde_json::from_slice(&cli.stdout).unwrap();
+    let cli_envelope: Value = serde_json::from_slice(&cli.stdout).unwrap();
+    assert_eq!(cli_envelope["version"], 1);
+    let cli_batch = cli_envelope["data"].clone();
 
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
     let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
@@ -166,7 +177,17 @@ async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
             }),
         })
         .unwrap();
-    assert_eq!(mcp_batch, cli_batch);
+    assert_eq!(mcp_batch["id"], cli_batch["id"]);
+    assert_eq!(mcp_batch["state"], cli_batch["state"]);
+    assert_eq!(
+        mcp_batch["items"][0]["content_reference"]["content_item_id"],
+        cli_batch["items"][0]["content_reference"]["content_item_id"]
+    );
+    assert_eq!(cli_batch["allowed_actions"], json!(["complete"]));
+    assert_eq!(
+        cli_batch["items"][0]["allowed_actions"],
+        mcp_batch["items"][0]["allowed_actions"]
+    );
 
     let response = router(tools)
         .oneshot(
@@ -188,7 +209,12 @@ async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
         String::from_utf8_lossy(&response_body)
     );
     let http_batch: Value = serde_json::from_slice(&response_body).unwrap();
-    assert_eq!(http_batch, cli_batch);
+    assert_eq!(http_batch["id"], cli_batch["id"]);
+    assert_eq!(http_batch["state"], cli_batch["state"]);
+    assert_eq!(
+        http_batch["items"][0]["content_reference"]["content_item_id"],
+        cli_batch["items"][0]["content_reference"]["content_item_id"]
+    );
     assert_eq!(cli_batch["feed_mix"]["high_value_percent"], 70);
     assert_eq!(
         cli_batch["batch_intent"]["focus_topics"],
@@ -196,16 +222,18 @@ async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
     );
 
     let pod_id_string = pod_id.to_string();
-    let cli_priority = Command::new(env!("CARGO_BIN_EXE_podctl"))
+    let cli_priority = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args([
             "--data-dir",
             data_dir.0.to_str().unwrap(),
-            "--token",
-            &token,
-            "priority-subscription",
+            "pod",
+            "subscription",
+            "set",
             &pod_id_string,
+            "--priority",
             "true",
         ])
+        .env("STUMBLE_HARNESS_CREDENTIAL", &token)
         .output()
         .unwrap();
     assert!(
@@ -237,21 +265,24 @@ async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
     assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
 
     let content_item_id = content_item_id.to_string();
-    let cli_feedback = Command::new(env!("CARGO_BIN_EXE_podctl"))
+    let cli_feedback = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args([
             "--data-dir",
             data_dir.0.to_str().unwrap(),
-            "--token",
-            &token,
-            "feed-feedback",
+            "feed",
+            "feedback",
+            "record",
             &content_item_id,
             "--kind",
             "more-like-this",
         ])
+        .env("STUMBLE_HARNESS_CREDENTIAL", &token)
         .output()
         .unwrap();
     assert!(cli_feedback.status.success());
     let cli_feedback: Value = serde_json::from_slice(&cli_feedback.stdout).unwrap();
+    assert_eq!(cli_feedback["version"], 1);
+    let cli_feedback = cli_feedback["data"].clone();
 
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
     let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
@@ -264,7 +295,9 @@ async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
             }),
         })
         .unwrap();
-    assert_eq!(mcp_feedback, cli_feedback);
+    assert_eq!(mcp_feedback, cli_feedback["feedback_state"]);
+    assert_eq!(cli_feedback["content_item_id"], content_item_id);
+    assert!(cli_feedback["allowed_actions"].is_array());
 
     let response = router(tools)
         .oneshot(
@@ -283,7 +316,7 @@ async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(http_feedback, cli_feedback);
+    assert_eq!(http_feedback, cli_feedback["feedback_state"]);
 }
 
 #[tokio::test]
@@ -304,22 +337,34 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
     let token = issued.token.expose().to_string();
     drop(tools);
 
-    let cli_update = Command::new(env!("CARGO_BIN_EXE_podctl"))
+    let taste_request = data_dir.0.join("taste-request.json");
+    std::fs::write(
+        &taste_request,
+        serde_json::to_vec(&json!({
+            "interests": ["systems"],
+            "recurrence_penalty_days": 21
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let cli_update = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args([
             "--data-dir",
             data_dir.0.to_str().unwrap(),
-            "--token",
-            &token,
-            "update-taste-profile",
-            "--interests",
-            "systems",
-            "--recurrence-penalty-days",
-            "21",
+            "feed",
+            "taste",
+            "set",
+            "--input",
+            taste_request.to_str().unwrap(),
         ])
+        .env("STUMBLE_HARNESS_CREDENTIAL", &token)
         .output()
         .unwrap();
     assert!(cli_update.status.success());
     let cli_update: Value = serde_json::from_slice(&cli_update.stdout).unwrap();
+    assert_eq!(cli_update["version"], 1);
+    let cli_update = cli_update["data"].clone();
 
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
     let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
@@ -332,7 +377,9 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
             }),
         })
         .unwrap();
-    assert_eq!(mcp_update, cli_update);
+    assert_eq!(mcp_update["user_id"], cli_update["user_id"]);
+    assert_eq!(mcp_update["explicit"], cli_update["explicit"]);
+    assert_eq!(cli_update["allowed_actions"], json!(["set", "reset"]));
     let response = router(tools.clone())
         .oneshot(
             Request::patch("/taste-profile")
@@ -351,17 +398,19 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(http_update, cli_update);
+    assert_eq!(http_update["user_id"], cli_update["user_id"]);
+    assert_eq!(http_update["explicit"], cli_update["explicit"]);
     drop(tools);
 
-    let cli = Command::new(env!("CARGO_BIN_EXE_podctl"))
+    let cli = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args([
             "--data-dir",
             data_dir.0.to_str().unwrap(),
-            "--token",
-            &token,
-            "taste-profile",
+            "feed",
+            "taste",
+            "show",
         ])
+        .env("STUMBLE_HARNESS_CREDENTIAL", &token)
         .output()
         .unwrap();
     assert!(
@@ -370,6 +419,8 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
         String::from_utf8_lossy(&cli.stderr)
     );
     let cli_profile: Value = serde_json::from_slice(&cli.stdout).unwrap();
+    assert_eq!(cli_profile["version"], 1);
+    let cli_profile = cli_profile["data"].clone();
 
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
     let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
@@ -379,7 +430,10 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
             arguments: json!({}),
         })
         .unwrap();
-    assert_eq!(mcp_profile, cli_profile);
+    assert_eq!(mcp_profile["user_id"], cli_profile["user_id"]);
+    assert_eq!(mcp_profile["explicit"], cli_profile["explicit"]);
+    assert_eq!(mcp_profile["learned"], cli_profile["learned"]);
+    assert_eq!(cli_profile["allowed_actions"], json!(["set", "reset"]));
 
     let response = router(tools)
         .oneshot(
@@ -397,20 +451,25 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(http_profile, cli_profile);
+    assert_eq!(http_profile["user_id"], cli_profile["user_id"]);
+    assert_eq!(http_profile["explicit"], cli_profile["explicit"]);
+    assert_eq!(http_profile["learned"], cli_profile["learned"]);
 
-    let cli_reset = Command::new(env!("CARGO_BIN_EXE_podctl"))
+    let cli_reset = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args([
             "--data-dir",
             data_dir.0.to_str().unwrap(),
-            "--token",
-            &token,
-            "reset-learned-taste",
+            "feed",
+            "taste",
+            "reset",
         ])
+        .env("STUMBLE_HARNESS_CREDENTIAL", &token)
         .output()
         .unwrap();
     assert!(cli_reset.status.success());
     let cli_reset: Value = serde_json::from_slice(&cli_reset.stdout).unwrap();
+    assert_eq!(cli_reset["version"], 1);
+    let cli_reset = cli_reset["data"].clone();
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
     let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
     let mcp_reset = mcp
@@ -419,7 +478,9 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
             arguments: json!({}),
         })
         .unwrap();
-    assert_eq!(mcp_reset, cli_reset);
+    assert_eq!(mcp_reset["user_id"], cli_reset["user_id"]);
+    assert_eq!(mcp_reset["learned"], cli_reset["learned"]);
+    assert_eq!(cli_reset["allowed_actions"], json!(["set", "reset"]));
     let response = router(tools)
         .oneshot(
             Request::post("/taste-profile/learned/reset")
@@ -436,7 +497,8 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(http_reset, cli_reset);
+    assert_eq!(http_reset["user_id"], cli_reset["user_id"]);
+    assert_eq!(http_reset["learned"], cli_reset["learned"]);
 }
 
 #[tokio::test]

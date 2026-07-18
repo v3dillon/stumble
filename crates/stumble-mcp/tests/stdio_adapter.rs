@@ -27,7 +27,7 @@ impl Drop for TestDataDir {
 }
 
 #[test]
-fn podctl_mcp_serves_scoped_jsonrpc_over_stdio() {
+fn dedicated_mcp_serves_scoped_jsonrpc_over_stdio() {
     let data_dir = TestDataDir::new();
     let tools = AgentTools::open_home_node(data_dir.path(), seed_store).expect("open Home Node");
     let issued = tools
@@ -44,18 +44,19 @@ fn podctl_mcp_serves_scoped_jsonrpc_over_stdio() {
     let token = issued.token.expose().to_owned();
     drop(tools);
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_podctl"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stumble-mcp"))
         .args([
             "--data-dir",
             data_dir.path().to_str().expect("UTF-8 test path"),
-            "mcp",
+            "--transport",
+            "stdio",
         ])
         .env("STUMBLE_MCP_TOKEN", &token)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("start podctl mcp");
+        .expect("start dedicated MCP adapter");
     let mut stdin = child.stdin.take().expect("child stdin");
     writeln!(
         stdin,
@@ -97,14 +98,14 @@ fn podctl_mcp_serves_scoped_jsonrpc_over_stdio() {
     .expect("write list_pods tool call");
     drop(stdin);
 
-    let output = child.wait_with_output().expect("read podctl mcp output");
+    let output = child.wait_with_output().expect("read dedicated MCP output");
 
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stderr.is_empty());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("\"jsonrpc\""));
     let responses = String::from_utf8(output.stdout)
         .expect("UTF-8 MCP output")
         .lines()
@@ -132,27 +133,28 @@ fn podctl_mcp_serves_scoped_jsonrpc_over_stdio() {
 }
 
 #[test]
-fn podctl_mcp_requires_a_current_harness_token() {
+fn dedicated_mcp_requires_a_current_harness_token() {
     let data_dir = TestDataDir::new();
     AgentTools::open_home_node(data_dir.path(), seed_store).expect("initialize Home Node");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_podctl"))
+    let output = Command::new(env!("CARGO_BIN_EXE_stumble-mcp"))
         .args([
             "--data-dir",
             data_dir.path().to_str().expect("UTF-8 test path"),
-            "mcp",
+            "--transport",
+            "stdio",
         ])
         .env_remove("STUMBLE_MCP_TOKEN")
         .output()
-        .expect("run podctl mcp without a token");
+        .expect("run dedicated MCP adapter without a token");
 
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("requires --token"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires a Harness token"));
 }
 
 #[test]
-fn podctl_mcp_observes_harness_revocation_without_a_restart() {
+fn dedicated_mcp_observes_harness_revocation_without_a_restart() {
     let data_dir = TestDataDir::new();
     let tools = AgentTools::open_home_node(data_dir.path(), seed_store).expect("open Home Node");
     let issued = tools
@@ -170,18 +172,19 @@ fn podctl_mcp_observes_harness_revocation_without_a_restart() {
     let token = issued.token.expose().to_owned();
     drop(tools);
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_podctl"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stumble-mcp"))
         .args([
             "--data-dir",
             data_dir.path().to_str().expect("UTF-8 test path"),
-            "mcp",
+            "--transport",
+            "stdio",
         ])
         .env("STUMBLE_MCP_TOKEN", &token)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("start podctl mcp");
+        .expect("start dedicated MCP adapter");
     let mut stdin = child.stdin.take().expect("child stdin");
     let mut stdout = BufReader::new(child.stdout.take().expect("child stdout"));
     writeln!(
@@ -196,20 +199,14 @@ fn podctl_mcp_observes_harness_revocation_without_a_restart() {
         .expect("read initial tools/list response");
     assert!(initial_response.contains("submit_candidate"));
 
-    let revoke = Command::new(env!("CARGO_BIN_EXE_podctl"))
-        .args([
-            "--data-dir",
-            data_dir.path().to_str().expect("UTF-8 test path"),
-            "revoke-harness",
-            &harness_id.to_string(),
-        ])
-        .output()
-        .expect("revoke harness from a separate process");
-    assert!(
-        revoke.status.success(),
-        "{}",
-        String::from_utf8_lossy(&revoke.stderr)
-    );
+    let tools = AgentTools::open_home_node(data_dir.path(), seed_store).expect("reopen Home Node");
+    tools
+        .revoke_agent_harness(
+            &tools.default_auth_context().expect("owner context"),
+            harness_id,
+        )
+        .expect("revoke harness through the domain boundary");
+    drop(tools);
 
     writeln!(
         stdin,

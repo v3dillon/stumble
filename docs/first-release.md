@@ -12,8 +12,8 @@ a public Origin Node:
 
 ```bash
 cargo build --release --workspace
-target/release/podctl --data-dir ~/.stumble/nodes/home init-node
-target/release/podctl --data-dir ~/.stumble/nodes/origin init-node
+target/release/stumble --data-dir ~/.stumble/nodes/home node init
+target/release/stumble --data-dir ~/.stumble/nodes/origin node init
 target/release/stumble-api --data-dir ~/.stumble/nodes/origin \
   --bind 127.0.0.1:8788
 ```
@@ -33,16 +33,17 @@ that has `pod-curation` and `package-management`. Then register an unattended
 worker restricted to its Pod and discovery capabilities:
 
 ```bash
-target/release/podctl --data-dir ~/.stumble/nodes/home register-harness \
+target/release/stumble --data-dir ~/.stumble/nodes/home node harness register \
   --label "Nightly resilient-systems discovery" --kind unattended \
-  --capability discovery-tasks --capability candidate-submission \
+  --capability discovery_tasks --capability candidate_submission \
   --pod-id <pod-id>
 ```
 
-Capture the plaintext token when issued; it is shown once. Keep interactive
+Capture the plaintext credential when issued; it is shown once. Keep interactive
 approval, feedback, Subscription management, and administration on a separate
-grant. Revoke a lost or retired harness immediately with `revoke-harness`; the
-revocation is effective without a restart.
+grant. Revoke a lost or retired harness immediately with
+`stumble node harness revoke <harness-id>`; the revocation is effective without
+a restart.
 
 An Agent Harness follows this portable loop:
 
@@ -57,7 +58,7 @@ An Agent Harness follows this portable loop:
    provenance, exploration labels, and allowed actions; record only explicit
    Feedback Signals.
 
-HTTP, MCP, and `podctl` expose the same high-level contracts. Do not query or edit
+HTTP, MCP, and `stumble` expose the same domain contracts. Do not query or edit
 SQLite to complete any workflow.
 
 For a local MCP client on the same machine, configure it to launch the stdio
@@ -115,15 +116,16 @@ an authorized harness creates a Pending Proposal and a separate interactive
 approval harness accepts it. The Origin Node then serves the current
 `stumble/1.0` identity, manifest, signed Package, and append-only Pod Events.
 
-For an existing private Pod, create and independently approve its publication
-proposal through the CLI contract:
+For an existing private Pod, request publication and independently approve its
+Pending Proposal through the canonical Pod and Node workflows:
 
 ```bash
-printf '{"kind":"publish_pod","pod_id":"<pod-id>"}\n' > /tmp/publish-pod.json
-target/release/podctl --data-dir ~/.stumble/nodes/origin --token "$PROPOSER_TOKEN" \
-  propose-change --from /tmp/publish-pod.json
-target/release/podctl --data-dir ~/.stumble/nodes/origin --token "$APPROVER_TOKEN" \
-  approve-proposal <proposal-id>
+STUMBLE_HARNESS_CREDENTIAL="$PROPOSER_CREDENTIAL" \
+  target/release/stumble --data-dir ~/.stumble/nodes/origin \
+  pod visibility set <pod-id> --visibility public
+STUMBLE_HARNESS_CREDENTIAL="$APPROVER_CREDENTIAL" \
+  target/release/stumble --data-dir ~/.stumble/nodes/origin \
+  node proposal approve <proposal-id>
 ```
 
 The private Home Node subscribes outbound to the canonical URL

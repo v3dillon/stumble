@@ -88,21 +88,25 @@ fn create_public_pod(tools: &AgentTools, slug: &str) -> Pod {
         None,
     );
     let now = Utc.with_ymd_and_hms(2026, 7, 17, 9, 0, 0).unwrap();
-    let proposal = tools
-        .create_pending_proposal(
+    let proposal = match tools
+        .request_create_pod_lifecycle(
             &proposer,
-            SensitiveChange::CreatePublicPod {
-                request: CreatePodRequest {
+            CreatePodLifecycleRequest {
+                pod: CreatePodRequest {
                     name: "Origin operations".into(),
                     slug: slug.into(),
                     description: "Public production operations reports".into(),
                     visibility: Visibility::Public,
                 },
+                package: PodCreationPackage::Default,
             },
             now,
-            now + Duration::hours(1),
         )
-        .unwrap();
+        .unwrap()
+    {
+        CreatePodOutcome::PendingApproval(proposal) => proposal,
+        CreatePodOutcome::Created(_) => panic!("public Pod creation must require approval"),
+    };
     tools
         .approve_pending_proposal(&approver, proposal.id, now)
         .unwrap();
@@ -277,16 +281,7 @@ fn grant_alternate_curator(
         ),
     ] {
         let proposal = tools
-            .create_pending_proposal(
-                &administrator,
-                SensitiveChange::ExpandHarnessGrant {
-                    harness_id,
-                    capabilities,
-                    pod_ids: None,
-                },
-                now,
-                now + Duration::hours(1),
-            )
+            .request_harness_grant_expansion(&administrator, harness_id, capabilities, None, now)
             .unwrap();
         tools
             .approve_pending_proposal(&approver, proposal.id, now)
@@ -361,9 +356,13 @@ fn accept_local_candidate(
 }
 
 fn canonical_feed(mut value: Value) -> Value {
+    value.as_object_mut().unwrap().remove("allowed_actions");
     if let Some(items) = value["items"].as_array_mut() {
         for item in items.iter_mut() {
             if let Some(placements) = item["placements"].as_array_mut() {
+                for placement in placements.iter_mut() {
+                    placement.as_object_mut().unwrap().remove("slug");
+                }
                 placements
                     .sort_by(|left, right| left["pod_id"].as_str().cmp(&right["pod_id"].as_str()));
             }
@@ -464,24 +463,32 @@ fn materialize_and_wake_discovery(
 
 async fn assert_adapter_parity(home_dir: &TestDataDir, user_token: &str, expected: &Value) {
     let size = expected["requested_size"].as_u64().unwrap().to_string();
+    let request_path = home_dir.0.join("first-release-feed-request.json");
+    std::fs::write(
+        &request_path,
+        serde_json::to_vec(&json!({"size": size.parse::<usize>().unwrap()})).unwrap(),
+    )
+    .unwrap();
     // Arrange and Act: release each SQLite handle before the next real adapter.
-    let cli = Command::new(env!("CARGO_BIN_EXE_podctl"))
+    let cli = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args([
             "--data-dir",
             home_dir.0.to_str().unwrap(),
-            "--token",
-            user_token,
             "feed",
-            "--size",
-            &size,
+            "batch",
+            "get",
+            "--input",
+            request_path.to_str().unwrap(),
         ])
+        .env("STUMBLE_HARNESS_CREDENTIAL", user_token)
         .output()
         .unwrap();
     assert!(cli.status.success());
-    assert_eq!(
-        canonical_feed(serde_json::from_slice::<Value>(&cli.stdout).unwrap()),
-        *expected
-    );
+    let cli_envelope = serde_json::from_slice::<Value>(&cli.stdout).unwrap();
+    assert_eq!(cli_envelope["version"], 1);
+    assert_eq!(cli_envelope["data"]["id"], expected["id"]);
+    assert_eq!(cli_envelope["data"]["allowed_actions"], json!(["complete"]));
+    assert_eq!(canonical_feed(cli_envelope["data"].clone()), *expected);
 
     let mcp_tools = AgentTools::open_home_node(&home_dir.0, seed_store).unwrap();
     let mcp = McpToolRouter::authenticated(mcp_tools.clone(), user_token).unwrap();
@@ -982,17 +989,19 @@ fn arrange_feed_mix_evidence(
         "exploration-release",
         now,
     );
-    let publication = scenario
+    let publication = match scenario
         .home
-        .create_pending_proposal(
+        .request_set_pod_visibility(
             &exploration_curator,
-            SensitiveChange::PublishPod {
-                pod_id: exploration_pod.id,
-            },
+            exploration_pod.id,
+            Visibility::Public,
             now,
-            now + Duration::hours(1),
         )
-        .unwrap();
+        .unwrap()
+    {
+        PodVisibilityOutcome::PendingApproval(proposal) => proposal,
+        PodVisibilityOutcome::Updated(_) => panic!("publication must require approval"),
+    };
     scenario
         .home
         .approve_pending_proposal(&publication_approver, publication.id, now)

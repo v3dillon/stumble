@@ -43,22 +43,26 @@ async fn representative_adapters_return_equivalent_authorization_denials() {
     let token = issued.token.expose().to_string();
     drop(tools);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_podctl"))
+    let output = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args([
             "--data-dir",
             data_dir.path().to_str().unwrap(),
-            "--token",
-            &token,
-            "feed-feedback",
+            "feed",
+            "feedback",
+            "record",
             &Uuid::nil().to_string(),
             "--kind",
             "save",
         ])
+        .env("STUMBLE_HARNESS_CREDENTIAL", &token)
         .output()
         .unwrap();
     assert!(!output.status.success());
     let expected = "harness grant lacks feedback";
     assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["version"], 1);
+    assert_eq!(error["error"]["code"], "forbidden");
 
     let tools = AgentTools::open_home_node(data_dir.path(), seed_store).unwrap();
     let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
@@ -106,18 +110,22 @@ async fn discovery_task_adapters_return_equivalent_authorization_denials() {
     drop(tools);
     let expected = "harness grant lacks discovery_tasks";
 
-    let cli = Command::new(env!("CARGO_BIN_EXE_podctl"))
+    let cli = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args([
             "--data-dir",
             data_dir.path().to_str().unwrap(),
-            "--token",
-            &token,
-            "list-discovery-tasks",
+            "discover",
+            "task",
+            "list",
         ])
+        .env("STUMBLE_HARNESS_CREDENTIAL", &token)
         .output()
         .unwrap();
     assert!(!cli.status.success());
     assert!(String::from_utf8_lossy(&cli.stderr).contains(expected));
+    let cli_error: serde_json::Value = serde_json::from_slice(&cli.stderr).unwrap();
+    assert_eq!(cli_error["version"], 1);
+    assert_eq!(cli_error["error"]["code"], "forbidden");
 
     let tools = AgentTools::open_home_node(data_dir.path(), seed_store).unwrap();
     let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
@@ -339,39 +347,43 @@ fn cli_rejects_extra_files_then_round_trips_pod_package() {
     drop(tools);
     let unsupported = package_dir.join("harness-grants.json");
     std::fs::write(&unsupported, "[]").unwrap();
-    let rejected = Command::new(env!("CARGO_BIN_EXE_podctl"))
+    let rejected = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args([
             "--data-dir",
             data_dir.path().to_str().unwrap(),
-            "--token",
-            &token,
-            "create-pod-package",
+            "pod",
+            "create",
             "--name",
             "Rejected package",
             "--slug",
             "rejected-package",
-            "--from",
+            "--visibility",
+            "private",
+            "--package",
             package_dir.to_str().unwrap(),
         ])
+        .env("STUMBLE_HARNESS_CREDENTIAL", &token)
         .output()
         .unwrap();
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("unsupported"));
     std::fs::remove_file(unsupported).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_podctl"))
+    let output = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args([
             "--data-dir",
             data_dir.path().to_str().unwrap(),
-            "--token",
-            &token,
-            "create-pod-package",
+            "pod",
+            "create",
             "--name",
             "CLI package",
             "--slug",
             "cli-package",
-            "--from",
+            "--visibility",
+            "private",
+            "--package",
             package_dir.to_str().unwrap(),
         ])
+        .env("STUMBLE_HARNESS_CREDENTIAL", &token)
         .output()
         .unwrap();
     assert!(
@@ -380,39 +392,51 @@ fn cli_rejects_extra_files_then_round_trips_pod_package() {
         String::from_utf8_lossy(&output.stderr)
     );
     let cli_created: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(cli_created["pod"]["visibility"], "private");
-    assert_eq!(cli_created["package"]["version"], 1);
+    assert_eq!(cli_created["version"], 1);
+    assert_eq!(cli_created["data"]["status"], "created");
+    assert_eq!(cli_created["data"]["result"]["visibility"], "private");
 
     let run_cli = |arguments: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_podctl"))
-            .args([
-                "--data-dir",
-                data_dir.path().to_str().unwrap(),
-                "--token",
-                &token,
-            ])
+        Command::new(env!("CARGO_BIN_EXE_stumble"))
+            .args(["--data-dir", data_dir.path().to_str().unwrap()])
+            .env("STUMBLE_HARNESS_CREDENTIAL", &token)
             .args(arguments)
             .output()
             .unwrap()
     };
-    let read = run_cli(&["get-pod-package", "cli-package"]);
+    let read = run_cli(&["pod", "package", "show", "cli-package"]);
     assert!(read.status.success());
     let read: serde_json::Value = serde_json::from_slice(&read.stdout).unwrap();
     assert_eq!(read["version"], 1);
-    let validation = run_cli(&["validate-pod-package", "cli-package"]);
+    let validation = run_cli(&[
+        "pod",
+        "package",
+        "validate",
+        "--package",
+        package_dir.to_str().unwrap(),
+    ]);
     assert!(validation.status.success());
     let validation: serde_json::Value = serde_json::from_slice(&validation.stdout).unwrap();
-    assert_eq!(validation["valid"], true);
+    assert_eq!(validation["version"], 1);
+    assert_eq!(validation["data"]["valid"], true);
     let export_dir = data_dir.path().join("cli-export");
     let export = run_cli(&[
-        "export-pod-package",
+        "pod",
+        "package",
+        "export",
         "cli-package",
+        "--output",
         export_dir.to_str().unwrap(),
     ]);
     assert!(export.status.success());
     let import = run_cli(&[
-        "import-pod-package",
+        "pod",
+        "package",
+        "revise",
         "cli-package",
+        "--base-version",
+        "1",
+        "--package",
         export_dir.to_str().unwrap(),
     ]);
     assert!(
@@ -421,5 +445,7 @@ fn cli_rejects_extra_files_then_round_trips_pod_package() {
         String::from_utf8_lossy(&import.stderr)
     );
     let import: serde_json::Value = serde_json::from_slice(&import.stdout).unwrap();
-    assert_eq!(import["version"], 2);
+    assert_eq!(import["version"], 1);
+    assert_eq!(import["data"]["status"], "revised");
+    assert_eq!(import["data"]["package"]["version"], 2);
 }

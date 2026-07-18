@@ -274,14 +274,20 @@ fn public_remove_and_autonomous_policy_wait_for_approval() {
         .authenticate_token(issued.token.expose())
         .unwrap()
         .unwrap();
-    let publish = tools
-        .create_pending_proposal(
+    let publish = match tools
+        .request_set_pod_visibility(
             &proposer,
-            stumble_core::SensitiveChange::PublishPod { pod_id: pod.id },
+            pod.id,
+            stumble_core::Visibility::Public,
             Utc::now(),
-            Utc::now() + chrono::Duration::hours(1),
         )
-        .unwrap();
+        .unwrap()
+    {
+        stumble_core::PodVisibilityOutcome::PendingApproval(proposal) => proposal,
+        stumble_core::PodVisibilityOutcome::Updated(_) => {
+            panic!("publication must require approval")
+        }
+    };
     tools
         .approve_pending_proposal(&owner, publish.id, Utc::now())
         .unwrap();

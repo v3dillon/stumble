@@ -23,40 +23,9 @@ To start the optional local HTTP API, run
 `stumble-api --data-dir ~/.stumble/nodes/home`. Long-running HTTP and MCP
 transports are separate from the one-shot `stumble` workflow CLI.
 
-## Legacy CLI
+## Workflow CLI
 
-The pre-release `podctl` executable remains temporarily as an expand-phase bridge while repository callers move to `stumble`. It currently has **46 public commands**; another 10 hidden commands preserve retired pre-release contracts. Every command supports `-h, --help`, while the global flags are `--api <URL>`, `--token <TOKEN>`, and `--data-dir <PATH>`.
-
-### Node
-
-- `init-node` — Initializes the Home Node database. Flags: none.
-- `mcp` — Serves authenticated MCP messages over standard input and output. Flags: none.
-- `serve` — Starts the Home Node HTTP API. Flags: `--mode <local|hosted>`, `--bind <ADDRESS>`, `--port <PORT>`, and `--allow-public-dev-tokens`.
-- `node-info` — Prints node information as JSON. Flags: none.
-
-### Pods and packages
-
-- `create-pod` — Creates a Pod. Flags: `--name`, `--slug`, and optional `--description`.
-- `create-pod-package` — Creates a Pod and imports its Pod Package from a directory. Flags: `--name`, `--slug`, `--from`, and optional `--description`.
-- `list-pods` — Lists Pods available to the current User or Agent Harness. Flags: none.
-- `join-pod <POD>` — Creates a Subscription to a Pod. Flags: none.
-- `priority-subscription <POD_ID> <true|false>` — Enables or disables a Priority Subscription. Flags: none.
-- `get-pod-package <POD>` — Prints a Pod Package as JSON. Flags: none.
-- `export-pod-package <POD> <OUT>` — Exports a Pod Package to a directory. Flags: none.
-- `import-pod-package <POD> <FROM>` — Imports a Pod Package directory into a Pod. Flags: none.
-- `fork-pod-package` — Forks a Pod Package into a new Pod. Flags: `--source-pod`, `--name`, and `--slug`.
-- `validate-pod-package <POD>` — Validates a Pod Package. Flags: none.
-
-### Candidates, feeds, and taste
-
-- `submit-candidate` — Submits a Candidate from a JSON file. Flags: `--from <FILE>`.
-- `inspect-candidate <ID>` — Prints a Candidate and its review state. Flags: none.
-- `feed` — Creates a finite Feed Batch. Flags: `--size`, `--recurrence-penalty-days`, `--high-value-percent`, `--exploration-percent`, `--old-gem-percent`, `--per-pod-cap`, `--per-source-cap`, `--focus`, and `--avoid`.
-- `complete-feed <ID>` — Marks a Feed Batch complete. Flags: none.
-- `feed-feedback <CONTENT_ITEM_ID>` — Records a Feedback Signal for a Content Item. Flags: `--kind`, optional `--topic`, and optional `--reason`.
-- `taste-profile` — Prints the local Taste Profile. Flags: none.
-- `update-taste-profile` — Updates explicit Taste Profile settings. Flags: `--interests`, `--blocked-topics`, `--blocked-sources`, and `--recurrence-penalty-days`.
-- `reset-learned-taste` — Clears learned Taste Profile weights globally or for one topic or source. Flags: mutually exclusive `--topic` and `--source`.
+`stumble` is a local, JSON-first workflow CLI with exactly five top-level families: `node`, `pod`, `discover`, `feed`, and `sync`. Success writes one `{ "version": 1, "data": ... }` document to standard output; failures write one versioned error document to standard error. Scoped automation supplies `STUMBLE_HARNESS_CREDENTIAL`; local User commands retrieve the Home Node Owner Credential automatically.
 
 ### Harnesses and approvals
 
@@ -99,11 +68,7 @@ a browser.
 
 Drip remains conversational Agent Harness language rather than a command. Source and topic blocks are item-driven feedback; deliberate bulk blocks belong in `feed taste set` input.
 
-### Administration and synchronization
-
-- `create-tenant <SLUG> <NAME>` — Creates a tenant. Flags: none.
-- `create-api-token` — Creates an API token. Flags: optional `--user`, optional `--tenant`, and optional `--label`.
-- `list-api-tokens` — Lists API tokens. Flags: none.
+### Synchronization
 
 Trusted peers are local Trust Policy entries. `stumble sync peer add --node-id
 <NODE_ID> --display-name <NAME> --base-url <URL> --public-key <KEY>` and
@@ -119,4 +84,4 @@ pinned Origin Node and applies the next signed event segment. `sync pod status
 run, and the latest actionable failure. Signed-event file export, import, and
 verification are internal protocol tools and are not CLI commands.
 
-Run `podctl <command> --help` for accepted values and defaults.
+Run `stumble --help` or `stumble <family> --help` for accepted workflows and defaults.

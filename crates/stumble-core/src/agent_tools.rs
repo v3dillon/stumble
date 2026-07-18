@@ -10096,8 +10096,25 @@ fn apply_sensitive_change(
                 .into());
             }
             pod.visibility = visibility.clone();
+            let pod = pod.clone();
             if let Some(rules) = store.pod_rules.get_mut(pod_id) {
                 rules.federate_sources = *visibility == Visibility::Public;
+            }
+            if *visibility == Visibility::Public {
+                let node = store.node_for_tenant(ctx.tenant_id)?;
+                let package = store
+                    .pod_skill_packs
+                    .get(pod_id)
+                    .cloned()
+                    .ok_or_else(|| StoreError::NotFound("Pod Package".to_string()))?;
+                let event = sign_public_event(
+                    &node,
+                    "pod_published",
+                    &pod.slug,
+                    json!({"pod": pod, "package": package}),
+                    store.latest_event_hash(&pod.slug),
+                )?;
+                store.event_log.push(event);
             }
         }
         SensitiveChange::ExpandHarnessGrant {

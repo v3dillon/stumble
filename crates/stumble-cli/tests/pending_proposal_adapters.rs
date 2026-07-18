@@ -29,7 +29,6 @@ impl Drop for TestDataDir {
 async fn http_mcp_and_cli_share_pending_proposal_behavior() {
     // Arrange
     let data_dir = TestDataDir::new();
-    let change_path = data_dir.0.join("change.json");
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
     let owner = tools.default_auth_context().unwrap();
     let pod = tools
@@ -65,26 +64,23 @@ async fn http_mcp_and_cli_share_pending_proposal_behavior() {
             },
         )
         .unwrap();
-    std::fs::write(
-        &change_path,
-        serde_json::to_vec_pretty(&SensitiveChange::PublishPod { pod_id: pod.id }).unwrap(),
-    )
-    .unwrap();
     let proposer_token = proposer.token.expose().to_string();
     let approver_token = approver.token.expose().to_string();
     drop(tools);
 
-    // Act: create through CLI.
-    let cli = Command::new(env!("CARGO_BIN_EXE_podctl"))
+    // Act: request the sensitive domain workflow through the canonical CLI.
+    let cli = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args([
             "--data-dir",
             data_dir.0.to_str().unwrap(),
-            "--token",
-            &proposer_token,
-            "propose-change",
-            "--from",
-            change_path.to_str().unwrap(),
+            "pod",
+            "visibility",
+            "set",
+            "adapter-approval",
+            "--visibility",
+            "public",
         ])
+        .env("STUMBLE_HARNESS_CREDENTIAL", &proposer_token)
         .output()
         .unwrap();
     assert!(
@@ -93,7 +89,9 @@ async fn http_mcp_and_cli_share_pending_proposal_behavior() {
         String::from_utf8_lossy(&cli.stderr)
     );
     let created: Value = serde_json::from_slice(&cli.stdout).unwrap();
-    let proposal_id = created["id"].as_str().unwrap();
+    assert_eq!(created["version"], 1);
+    assert_eq!(created["data"]["outcome"]["status"], "pending_approval");
+    let proposal_id = created["data"]["outcome"]["result"]["id"].as_str().unwrap();
 
     // Act: inspect through MCP.
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
@@ -104,9 +102,33 @@ async fn http_mcp_and_cli_share_pending_proposal_behavior() {
             arguments: json!({"proposal_id": proposal_id}),
         })
         .unwrap();
-    assert_eq!(inspected, created);
+    assert_eq!(inspected["id"], proposal_id);
+    assert_eq!(inspected["status"], "pending");
+    drop(mcp);
+    drop(tools);
+
+    let shown = Command::new(env!("CARGO_BIN_EXE_stumble"))
+        .args([
+            "--data-dir",
+            data_dir.0.to_str().unwrap(),
+            "node",
+            "proposal",
+            "show",
+            proposal_id,
+        ])
+        .env("STUMBLE_HARNESS_CREDENTIAL", &approver_token)
+        .output()
+        .unwrap();
+    assert!(shown.status.success());
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(shown["data"]["id"], proposal_id);
+    assert_eq!(
+        shown["data"]["allowed_actions"],
+        json!(["approve", "reject"])
+    );
 
     // Act: approve through HTTP.
+    let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
     let response = router(tools.clone())
         .oneshot(
             Request::post(format!("/pending-proposals/{proposal_id}/approve"))
@@ -118,13 +140,17 @@ async fn http_mcp_and_cli_share_pending_proposal_behavior() {
         .unwrap();
 
     // Assert
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
-    let accepted: Value = serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let status = response.status();
+    let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        axum::http::StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&response_body)
+    );
+    let accepted: Value = serde_json::from_slice(&response_body).unwrap();
     assert_eq!(accepted["status"], "accepted");
     assert_eq!(
         tools

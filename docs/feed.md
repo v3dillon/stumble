@@ -63,13 +63,14 @@ Harness adapters expose the same contract:
 - HTTP: `GET /feed`, `POST /feed/:id/complete`, and
   `POST /feed/items/:id/feedback`.
 - MCP: `get_feed_batch`, `complete_feed_batch`, and `record_feed_feedback`.
-- CLI: `podctl feed`, `podctl complete-feed`, and `podctl feed-feedback`.
+- CLI: `stumble feed batch get`, `stumble feed batch complete`, and
+  `stumble feed feedback record`.
 
 Taste Profile inspection, explicit updates, and selective/all learned reset are
 available through HTTP (`GET/PATCH /taste-profile` and
 `POST /taste-profile/learned/reset`), MCP (`get_taste_profile`,
 `update_taste_profile`, and `reset_learned_taste`), and CLI
-(`podctl taste-profile`, `podctl update-taste-profile`, and
-`podctl reset-learned-taste`). Whole-profile operations require an unscoped
+(`stumble feed taste show`, `stumble feed taste set`, and
+`stumble feed taste reset`). Whole-profile operations require an unscoped
 Feedback grant; Pod-scoped harnesses continue to use item-scoped feedback without
 receiving access to the User's complete private profile.

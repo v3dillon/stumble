@@ -50,7 +50,7 @@ fn request(pod_id: PodId) -> CandidateSubmissionRequest {
                 confidence: CandidateConfidence::new(0.75).unwrap(),
             }],
             task_context: None,
-            harness_idempotency_key: "adapter-harness-key".into(),
+            harness_idempotency_key: "adapter-client-key".into(),
             client_idempotency_key: "adapter-client-key".into(),
         },
     }
@@ -87,21 +87,24 @@ async fn http_mcp_and_cli_submit_and_inspect_equivalent_candidates() {
     let candidate_request = request(pod.id);
     std::fs::write(
         &request_path,
-        serde_json::to_vec_pretty(&candidate_request).unwrap(),
+        serde_json::to_vec_pretty(&candidate_request.evidence).unwrap(),
     )
     .unwrap();
     drop(tools);
 
-    let cli = Command::new(env!("CARGO_BIN_EXE_podctl"))
+    let cli = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args([
             "--data-dir",
             data_dir.0.to_str().unwrap(),
-            "--token",
-            &token,
-            "submit-candidate",
-            "--from",
+            "discover",
+            "candidate",
+            "submit",
+            "--input",
             request_path.to_str().unwrap(),
+            "--idempotency-key",
+            "adapter-client-key",
         ])
+        .env("STUMBLE_HARNESS_CREDENTIAL", &token)
         .output()
         .unwrap();
     assert!(
@@ -110,7 +113,8 @@ async fn http_mcp_and_cli_submit_and_inspect_equivalent_candidates() {
         String::from_utf8_lossy(&cli.stderr)
     );
     let cli_submission: Value = serde_json::from_slice(&cli.stdout).unwrap();
-    let candidate_id = cli_submission["candidate"]["id"].as_str().unwrap();
+    assert_eq!(cli_submission["version"], 1);
+    let candidate_id = cli_submission["data"]["candidate"]["id"].as_str().unwrap();
 
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
     let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
@@ -165,18 +169,29 @@ async fn http_mcp_and_cli_submit_and_inspect_equivalent_candidates() {
     .unwrap();
     assert_eq!(http_inspection, mcp_inspection);
 
-    let cli_inspection = Command::new(env!("CARGO_BIN_EXE_podctl"))
+    let cli_inspection = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args([
             "--data-dir",
             data_dir.0.to_str().unwrap(),
-            "--token",
-            &token,
-            "inspect-candidate",
+            "discover",
+            "candidate",
+            "show",
             candidate_id,
         ])
+        .env("STUMBLE_HARNESS_CREDENTIAL", &token)
         .output()
         .unwrap();
     assert!(cli_inspection.status.success());
     let cli_inspection: Value = serde_json::from_slice(&cli_inspection.stdout).unwrap();
-    assert_eq!(cli_inspection, mcp_inspection);
+    assert_eq!(cli_inspection["version"], 1);
+    assert_eq!(cli_inspection["data"]["candidate"]["id"], candidate_id);
+    assert_eq!(
+        cli_inspection["data"]["candidate"]["id"],
+        mcp_inspection["candidate"]["id"]
+    );
+    assert_eq!(
+        cli_inspection["data"]["allowed_actions"],
+        mcp_inspection["allowed_actions"]
+    );
+    assert_eq!(http_inspection["candidate"]["id"], candidate_id);
 }
