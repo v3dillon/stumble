@@ -3,10 +3,15 @@ name = "stumble-cli"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+default-run = "podctl"
 
 [[bin]]
 name = "podctl"
 path = "src/main.rs"
+
+[[bin]]
+name = "stumble"
+path = "src/bin/stumble.rs"
 
 [dependencies]
 anyhow.workspace = true
