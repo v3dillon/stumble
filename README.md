@@ -1,6 +1,6 @@
 # Stumble
 
-Stumble is a decentralized personal discovery system that assembles a User's Feed from independently curated Pods on their Home Node. Agent Harnesses operate it through the CLI, HTTP, or MCP.
+Stumble is a decentralized personal discovery system. It builds a personal Feed from independently curated Pods on a local Home Node.
 
 ## Get started
 
@@ -12,78 +12,95 @@ stumble node init
 stumble node show
 ```
 
-`stumble` uses `~/.stumble/nodes/home` by default. Set `STUMBLE_DATA_DIR`
-or pass `--data-dir` to select another Home Node. Only `node init` creates
-state; its Home Node Owner Credential is an operating-system credential-store
-entry that later local commands detect automatically. It contains no secret
-value that Stumble reads or emits; unrestricted shell access as the same
-operating-system User is the authority boundary.
+Stumble stores its Home Node under `~/.stumble/nodes/home` by default. Set `STUMBLE_DATA_DIR` or pass `--data-dir` to use another directory. `node init` also records the local Owner credential in the operating system's credential store; later local commands detect its presence automatically.
 
-For agent-assisted setup, ask your agent to read [llms.txt](llms.txt) and install Stumble.
+The CLI is JSON-first and organized into five workflow families. Add `--help` at any command level for arguments and defaults.
 
-To start the optional local HTTP API, run
-`stumble-api --data-dir ~/.stumble/nodes/home`. Long-running HTTP and MCP
-transports are separate from the one-shot `stumble` workflow CLI.
+## `node`
 
-## Workflow CLI
+Manage the Home Node, Agent Harnesses, and approval proposals.
 
-`stumble` is a local, JSON-first workflow CLI with exactly five top-level families: `node`, `pod`, `discover`, `feed`, and `sync`. Success writes one `{ "version": 1, "data": ... }` document to standard output; failures write one versioned error document to standard error. Scoped automation supplies `STUMBLE_HARNESS_CREDENTIAL`; local User commands detect their Home Node Owner Credential automatically.
+| Command | Description |
+| --- | --- |
+| `stumble node init` | Initialize the Home Node. |
+| `stumble node show` | Show Home Node identity and status. |
+| `stumble node harness list` | List registered Agent Harnesses. |
+| `stumble node harness show` | Show one Agent Harness. |
+| `stumble node harness register` | Register an Agent Harness. |
+| `stumble node harness revoke` | Revoke an Agent Harness. |
+| `stumble node proposal list` | List pending approval proposals. |
+| `stumble node proposal show` | Show one proposal. |
+| `stumble node proposal approve` | Approve a proposal. |
+| `stumble node proposal reject` | Reject a proposal. |
 
-### Harnesses and approvals
+## `pod`
 
-- `stumble node harness register` — Owner-only bootstrap that activates a scoped Harness Grant and returns its credential once. Flags: `--label`, `--kind <interactive|unattended>`, repeatable `--capability`, and repeatable `--pod-id`.
-- `stumble node harness list|show|revoke` — Inspects credential fingerprints and metadata or immediately revokes a Harness. Plaintext credentials are never returned by reads.
-- `stumble node proposal list|show|approve|reject` — Reviews expiring Pending Proposals. Approval and rejection require either the automatically authenticated Owner or an independent interactive Harness with approval capability and matching User and Pod scope.
+Find, subscribe to, curate, and govern Pods.
 
-Local Owner commands authenticate from Home Node Owner Credential entry presence automatically. Scoped automation supplies `STUMBLE_HARNESS_CREDENTIAL`; authority expansion creates a Pending Proposal and never changes the Harness Grant before approval. Generic proposal creation and tenant or raw-token administration are not CLI workflows.
+| Command | Description |
+| --- | --- |
+| `stumble pod list` | List local Pods. |
+| `stumble pod show` | Show one Pod. |
+| `stumble pod create` | Create a Pod. |
+| `stumble pod explore` | Explore public Pods. |
+| `stumble pod subscribe` | Subscribe to a Pod. |
+| `stumble pod unsubscribe` | Unsubscribe from a Pod. |
+| `stumble pod subscription set` | Set subscription priority. |
+| `stumble pod visibility set` | Change Pod visibility. |
+| `stumble pod role list` | List Pod roles. |
+| `stumble pod role grant` | Grant a Pod role. |
+| `stumble pod role revoke` | Revoke a Pod role. |
+| `stumble pod content list` | List accepted Pod content. |
+| `stumble pod content show` | Show one content item. |
+| `stumble pod content add` | Add content to a Pod. |
+| `stumble pod content remove` | Remove content from a Pod. |
+| `stumble pod policy show` | Show the Pod curation policy. |
+| `stumble pod policy set` | Set the Pod curation policy. |
+| `stumble pod package show` | Show a Pod Package. |
+| `stumble pod package export` | Export a Pod Package. |
+| `stumble pod package validate` | Validate a Pod Package directory. |
+| `stumble pod package revise` | Revise a Pod Package. |
 
-Subscription and Pod authority are separate workflows. Use an exact local slug or immutable Pod ID with `stumble pod subscribe`, `pod unsubscribe`, and `pod subscription set --priority <true|false>`; `pod subscribe` also accepts a canonical public URL of the form `https://origin.example/federation/pods/<slug>`. Pod governance uses only `owner` and `curator`: `pod role list`, `pod role grant --user-id <id> --role <owner|curator>`, and `pod role revoke ...`. Grants and revocations return Pending Proposals and do not take effect until an independent Owner or scoped interactive approval Harness approves them.
+## `discover`
 
-Create Pods with `stumble pod create --name <name> --slug <slug> --visibility <private|invite-only|public>`. Add either `--package <directory>` for a complete initial Pod Package or `--from-pod <slug-or-id>` to derive one with source-package provenance; the two options are mutually exclusive. Public creation and visibility expansion return Pending Proposals, while visibility restrictions apply directly. `stumble pod explore --query <subject>` returns Trust Policy-filtered public Pods and bounded sample Content Items without creating a Subscription.
+Run discovery work and curate submitted candidates.
 
-Read a Pod's complete accepted stream with `stumble pod content list <slug-or-id>` and inspect its Content Item and Accepted Placement evidence with `pod content show <pod> <content-item-id>`. Authorized curators can use `pod content add <pod> <content-item-id> [--note ...]` or `pod content remove <pod> <content-item-id> --reason ...`; private removal is immediate, while public removal returns a Pending Proposal and publishes a Placement Tombstone only after approval. `pod policy show <pod>` reports Manual, Assisted, or Autonomous Curation. `pod policy set <pod> --mode <manual|assisted|autonomous>` applies Manual and Assisted directly, requires `--confidence-threshold` for Assisted and Autonomous, and routes Autonomous enablement through approval.
+| Command | Description |
+| --- | --- |
+| `stumble discover task list` | List discovery tasks. |
+| `stumble discover task show` | Show one discovery task. |
+| `stumble discover task claim` | Claim a task lease. |
+| `stumble discover task renew` | Renew a task lease. |
+| `stumble discover task complete` | Complete a task. |
+| `stumble discover task fail` | Record a failed task attempt. |
+| `stumble discover candidate list` | List discovery candidates. |
+| `stumble discover candidate submit` | Submit candidate input. |
+| `stumble discover candidate show` | Show one candidate. |
+| `stumble discover candidate evaluate` | Evaluate a candidate against Pod policies. |
+| `stumble discover candidate route` | Route a candidate to a Pod. |
+| `stumble discover candidate review` | Accept or reject a candidate placement. |
 
-Inspect the current immutable Pod Package with `stumble pod package show <pod>` or add `--version <number>` for a historical version. `pod package export <pod> --output <directory>` writes the complete portable artifact and signed provenance history; check an edited artifact without changing state with `pod package validate --package <directory>`. Apply it with `pod package revise <pod> --base-version <number> --package <directory>`: stale bases fail, non-public origin packages revise directly, and public revisions wait for Pending Proposal approval.
+## `feed`
 
-### Discovery tasks
+Read Feed batches, record feedback, and manage taste settings.
 
-- `stumble discover task list` — Automatically materializes due work from current Source Rules, then returns the scoped task collection. Use `--state <ready|pending|leased|completed|terminal-failure>`, `--pod <slug-or-id>`, `--limit`, and `--cursor`.
-- `stumble discover task show <ID>` — Inspects current state, attempt history, and allowed actions.
-- `stumble discover task claim|renew <ID> --lease-seconds <SECONDS>` — Acquires or extends an exclusive Harness-owned lease.
-- `stumble discover task complete <ID>` and `stumble discover task fail <ID> --reason <REASON>` — Finish the current owned attempt. Failures remain retryable until the attempt limit is reached.
+| Command | Description |
+| --- | --- |
+| `stumble feed batch get` | Get the current Feed batch. |
+| `stumble feed batch complete` | Complete a Feed batch. |
+| `stumble feed feedback record` | Record feedback on delivered content. |
+| `stumble feed taste show` | Show taste settings and learned weights. |
+| `stumble feed taste set` | Set explicit taste preferences. |
+| `stumble feed taste reset` | Reset learned taste weights. |
 
-Manual task creation and materialization are not public commands. Scheduler
-Adapters wake workers through the same filtered list surface and never control
-a browser.
+## `sync`
 
-### Candidate curation
+Manage trusted peers and synchronize Pod state.
 
-- `stumble discover candidate submit --input <FILE|-> --idempotency-key <KEY>` records structured source metadata, provenance, and proposed Pod Placements. Retrying identical input with the same key returns the original result; changed input conflicts.
-- `stumble discover candidate list [--status <pending|accepted>]` returns the scoped, cursor-paginated Candidate collection. `candidate show <ID>` includes submissions, placement evidence and state, and allowed actions.
-- `stumble discover candidate evaluate <ID>` applies each target Pod's current Curation Policy independently. Curators can add an evidence-backed local proposal with `candidate route <ID> <POD> --reason <TEXT> --confidence <0..1>` and decide exactly one pending placement with `candidate review <ID> <POD> --decision <accept|reject> [--note <TEXT>]`.
-
-### Feed workflows
-
-- `stumble feed batch get [--input <FILE|->]` returns the current stable Feed Batch. Structured input can set `size`, `recurrence_penalty_days`, `feed_mix`, and temporary `batch_intent`; repeated reads return the same batch until `feed batch complete <ID>` explicitly reaches Caught Up.
-- `stumble feed feedback record <CONTENT_ITEM_ID> --kind <save|more-like-this|less-like-this|dismiss|block-source|block-topic>` records a private Feedback Signal for a Delivered Item. Topic blocks also require `--topic <ITEM_TOPIC>`; use `--reason` for optional context.
-- `stumble feed taste show` inspects explicit preferences and learned weights. `feed taste set --input <FILE|->` replaces supplied explicit fields, while `feed taste reset [--input <FILE|->]` clears all learned weights or the structured `signal` selection without changing explicit preferences.
-
-Drip remains conversational Agent Harness language rather than a command. Source and topic blocks are item-driven feedback; deliberate bulk blocks belong in `feed taste set` input.
-
-### Synchronization
-
-Trusted peers are local Trust Policy entries. `stumble sync peer add --node-id
-<NODE_ID> --display-name <NAME> --base-url <URL> --public-key <KEY>` and
-`sync peer remove <PEER_ID>` create Pending Proposals; approval is required
-before either trust change takes effect. `sync peer list [--limit N] [--cursor
-CURSOR]` returns only enabled peers and their canonical Node identities.
-
-Subscription synchronization normally runs through the Node Agent without a
-manual command. For diagnosis or recovery, `stumble sync pod run <POD>
---peer <PEER_ID>` verifies the selected trusted peer against the Subscription's
-pinned Origin Node and applies the next signed event segment. `sync pod status
-<POD>` reports the cursor, verification state, latest event, last successful
-run, and the latest actionable failure. Signed-event file export, import, and
-verification are internal protocol tools and are not CLI commands.
-
-Run `stumble --help` or `stumble <family> --help` for accepted workflows and defaults.
+| Command | Description |
+| --- | --- |
+| `stumble sync peer list` | List trusted peers. |
+| `stumble sync peer add` | Propose adding a trusted peer. |
+| `stumble sync peer remove` | Propose removing a trusted peer. |
+| `stumble sync pod run` | Synchronize a Pod from a peer. |
+| `stumble sync pod status` | Show Pod synchronization status. |
