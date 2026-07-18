@@ -72,6 +72,8 @@ Create Pods with `stumble pod create --name <name> --slug <slug> --visibility <p
 
 Read a Pod's complete accepted stream with `stumble pod content list <slug-or-id>` and inspect its Content Item and Accepted Placement evidence with `pod content show <pod> <content-item-id>`. Authorized curators can use `pod content add <pod> <content-item-id> [--note ...]` or `pod content remove <pod> <content-item-id> --reason ...`; private removal is immediate, while public removal returns a Pending Proposal and publishes a Placement Tombstone only after approval. `pod policy show <pod>` reports Manual, Assisted, or Autonomous Curation. `pod policy set <pod> --mode <manual|assisted|autonomous>` applies Manual and Assisted directly, requires `--confidence-threshold` for Assisted and Autonomous, and routes Autonomous enablement through approval.
 
+Inspect the current immutable Pod Package with `stumble pod package show <pod>` or add `--version <number>` for a historical version. `pod package export <pod> --output <directory>` writes the complete portable artifact and signed provenance history; check an edited artifact without changing state with `pod package validate --package <directory>`. Apply it with `pod package revise <pod> --base-version <number> --package <directory>`: stale bases fail, non-public origin packages revise directly, and public revisions wait for Pending Proposal approval.
+
 ### Discovery tasks
 
 - `materialize-discovery-tasks` — Creates due Discovery Tasks from Pod schedules. Flags: none.

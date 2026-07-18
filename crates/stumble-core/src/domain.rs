@@ -1969,6 +1969,16 @@ pub struct PodSkillPack {
 /// `PodSkillPack`. The legacy name remains for wire and source compatibility.
 pub type PodPackage = PodSkillPack;
 
+/// Result of requesting one version-aware Pod Package Revision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", content = "result", rename_all = "snake_case")]
+pub enum PodPackageRevisionOutcome {
+    /// A non-public origin package was revised immediately.
+    Revised(PodPackage),
+    /// A public origin package is unchanged until this proposal is approved.
+    PendingApproval(PendingProposal),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FederatedPodEventType {
     PodCreated,

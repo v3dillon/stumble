@@ -12,11 +12,12 @@ use stumble_cli::{
 };
 use stumble_core::{
     new_plaintext_api_token, pod_package_contents_from_files, seed_store,
-    AddContentItemToPodRequest, AgentHarnessId, AgentHarnessKind, AgentTools, AgentToolsError,
-    AuthContext, CandidateConfidence, ContentItemId, CreatePodLifecycleRequest, CreatePodOutcome,
+    validate_pod_package_contents, validate_portable_package_files, AddContentItemToPodRequest,
+    AgentHarnessId, AgentHarnessKind, AgentTools, AgentToolsError, AuthContext,
+    CandidateConfidence, ContentItemId, CreatePodLifecycleRequest, CreatePodOutcome,
     CreatePodRequest, CurationPolicy, CurationRationale, ExploreRequest, HarnessCapability,
-    PendingProposalId, Pod, PodCreationPackage, PodRole, RegisterAgentHarnessRequest,
-    SensitiveChange, StoreError, Visibility, PORTABLE_PACKAGE_FILES,
+    PackageVersion, PendingProposalId, Pod, PodCreationPackage, PodPackageRevisionOutcome, PodRole,
+    RegisterAgentHarnessRequest, SensitiveChange, StoreError, Visibility, PORTABLE_PACKAGE_FILES,
 };
 
 fn main() -> ExitCode {
@@ -404,6 +405,116 @@ fn dispatch(
                 "policy": policy,
             }));
         }
+        "pod package show" => {
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let current = tools
+                .get_skill_pack(&actor, &pod.slug)
+                .map_err(agent_tools_error)?;
+            let requested = leaf
+                .get_one::<i32>("version")
+                .copied()
+                .map(PackageVersion::new)
+                .transpose()
+                .map_err(|error| {
+                    agent_tools_error(StoreError::Validation(error.to_string()).into())
+                })?;
+            let package = if let Some(version) = requested {
+                tools
+                    .get_pod_package_version(&actor, &pod.slug, version)
+                    .map_err(agent_tools_error)?
+            } else {
+                current.clone()
+            };
+            let mut allowed_actions = Vec::new();
+            if package.version == current.version {
+                allowed_actions.push("export");
+                if tools
+                    .require_harness_capability(&actor, HarnessCapability::PackageManagement)
+                    .is_ok()
+                {
+                    allowed_actions.push("revise");
+                }
+            }
+            return Ok(json!({
+                "pod_id": pod.id,
+                "slug": pod.slug,
+                "package": package,
+                "allowed_actions": allowed_actions,
+            }));
+        }
+        "pod package export" => {
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let output = leaf.get_one::<PathBuf>("output").expect("required by clap");
+            let export = tools
+                .export_skill_pack(&actor, &pod.slug)
+                .map_err(agent_tools_error)?;
+            std::fs::create_dir_all(output).map_err(|error| {
+                (
+                    ErrorBody::new("package_export_failed", error.to_string()),
+                    ExitStatusCategory::Internal,
+                )
+            })?;
+            for (name, contents) in export.files {
+                std::fs::write(output.join(name), contents).map_err(|error| {
+                    (
+                        ErrorBody::new("package_export_failed", error.to_string()),
+                        ExitStatusCategory::Internal,
+                    )
+                })?;
+            }
+            let package = tools
+                .get_skill_pack(&actor, &pod.slug)
+                .map_err(agent_tools_error)?;
+            return Ok(json!({
+                "pod_id": pod.id,
+                "slug": pod.slug,
+                "version": package.version,
+                "output": output,
+            }));
+        }
+        "pod package validate" => {
+            let directory = leaf
+                .get_one::<PathBuf>("package")
+                .expect("required by clap");
+            let files = read_portable_package_directory(directory)
+                .map_err(|error| (error, ExitStatusCategory::ValidationOrConflict))?;
+            validate_portable_package_files(&files).map_err(agent_tools_error_from_store)?;
+            let contents =
+                pod_package_contents_from_files(&files).map_err(agent_tools_error_from_store)?;
+            let report = validate_pod_package_contents(&contents);
+            return serde_json::to_value(report).map_err(internal_error);
+        }
+        "pod package revise" => {
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let directory = leaf
+                .get_one::<PathBuf>("package")
+                .expect("required by clap");
+            let files = read_portable_package_directory(directory)
+                .map_err(|error| (error, ExitStatusCategory::ValidationOrConflict))?;
+            let base_version = PackageVersion::new(
+                *leaf
+                    .get_one::<i32>("base-version")
+                    .expect("required by clap"),
+            )
+            .map_err(|error| agent_tools_error(StoreError::Validation(error.to_string()).into()))?;
+            let outcome = tools
+                .request_revise_pod_package(&actor, pod.id, base_version, files, chrono::Utc::now())
+                .map_err(agent_tools_error)?;
+            return Ok(match outcome {
+                PodPackageRevisionOutcome::Revised(package) => json!({
+                    "pod_id": pod.id,
+                    "slug": pod.slug,
+                    "status": "revised",
+                    "package": package,
+                }),
+                PodPackageRevisionOutcome::PendingApproval(proposal) => json!({
+                    "pod_id": pod.id,
+                    "slug": pod.slug,
+                    "status": "pending_approval",
+                    "proposal": proposal,
+                }),
+            });
+        }
         "node harness list" => {
             let items = tools
                 .list_agent_harnesses(&actor)
@@ -723,6 +834,10 @@ fn agent_tools_error(error: AgentToolsError) -> (ErrorBody, ExitStatusCategory) 
             ErrorBody::new("validation_error", error.to_string()),
             ExitStatusCategory::ValidationOrConflict,
         ),
+        AgentToolsError::Store(StoreError::InvalidSignature) => (
+            ErrorBody::new("invalid_signature", error.to_string()),
+            ExitStatusCategory::ValidationOrConflict,
+        ),
         error => internal_error(error),
     }
 }
@@ -937,10 +1052,7 @@ fn pod() -> Command {
         )
         .subcommand(content())
         .subcommand(policy())
-        .subcommand(resource(
-            "package",
-            &["show", "export", "validate", "revise"],
-        ))
+        .subcommand(package())
 }
 
 fn visibility_arg() -> Arg {
@@ -1009,6 +1121,50 @@ fn policy() -> Command {
                         .value_parser(clap::value_parser!(f32))
                         .required_if_eq_any([("mode", "assisted"), ("mode", "autonomous")]),
                 ),
+        )
+}
+
+fn package() -> Command {
+    let directory = || {
+        Arg::new("package")
+            .long("package")
+            .required(true)
+            .value_parser(clap::value_parser!(PathBuf))
+            .value_hint(ValueHint::DirPath)
+    };
+    Command::new("package")
+        .subcommand_required(true)
+        .subcommand(
+            Command::new("show")
+                .arg(Arg::new("pod").required(true))
+                .arg(
+                    Arg::new("version")
+                        .long("version")
+                        .value_parser(clap::value_parser!(i32).range(1..)),
+                ),
+        )
+        .subcommand(
+            Command::new("export")
+                .arg(Arg::new("pod").required(true))
+                .arg(
+                    Arg::new("output")
+                        .long("output")
+                        .required(true)
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .value_hint(ValueHint::DirPath),
+                ),
+        )
+        .subcommand(Command::new("validate").arg(directory()))
+        .subcommand(
+            Command::new("revise")
+                .arg(Arg::new("pod").required(true))
+                .arg(
+                    Arg::new("base-version")
+                        .long("base-version")
+                        .required(true)
+                        .value_parser(clap::value_parser!(i32).range(1..)),
+                )
+                .arg(directory()),
         )
 }
 

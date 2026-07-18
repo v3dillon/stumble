@@ -4741,6 +4741,118 @@ impl AgentTools {
             })
     }
 
+    /// Requests a complete, version-aware revision from a portable Pod Package.
+    ///
+    /// Non-public origin packages are revised immediately. Public package
+    /// revisions become Pending Proposals and do not alter authoritative state
+    /// before approval.
+    pub fn request_revise_pod_package(
+        &self,
+        ctx: &AuthContext,
+        pod_id: PodId,
+        base_version: PackageVersion,
+        files: BTreeMap<String, String>,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PodPackageRevisionOutcome, AgentToolsError> {
+        validate_portable_package_files(&files)?;
+        let contents = pod_package_contents_from_files(&files)?;
+        let validation = validate_pod_package_contents(&contents);
+        if !validation.valid {
+            return Err(StoreError::Validation(validation.errors.join(", ")).into());
+        }
+
+        let patch = complete_package_patch(&contents);
+        let is_public = {
+            let store = self
+                .store
+                .read()
+                .map_err(|_| AgentToolsError::LockPoisoned)?;
+            let pod = store
+                .pods
+                .get(&pod_id)
+                .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+            store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+            authorize_harness(
+                &store,
+                ctx,
+                HarnessCapability::PackageManagement,
+                Some(pod.id),
+            )?;
+            ensure_direct_package_revision_allowed_for_origin(&store, ctx, pod)?;
+            let existing = store
+                .pod_skill_packs
+                .get(&pod.id)
+                .ok_or_else(|| StoreError::NotFound("skill pack".to_string()))?;
+            ensure_package_base_version(existing, base_version)?;
+            verify_portable_package_history_for_base(&store, &files, existing)?;
+            pod.visibility == Visibility::Public
+        };
+
+        if is_public {
+            let proposal = self.create_pending_proposal(
+                ctx,
+                SensitiveChange::RevisePublicPodPackage {
+                    pod_id,
+                    base_version,
+                    patch,
+                },
+                now,
+                now + Duration::hours(24),
+            )?;
+            return Ok(PodPackageRevisionOutcome::PendingApproval(proposal));
+        }
+
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store
+            .pods
+            .get(&pod_id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+        store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+        authorize_harness(
+            &store,
+            ctx,
+            HarnessCapability::PackageManagement,
+            Some(pod.id),
+        )?;
+        ensure_direct_package_revision_allowed(&store, ctx, &pod)?;
+        let existing = store
+            .pod_skill_packs
+            .get(&pod.id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("skill pack".to_string()))?;
+        ensure_package_base_version(&existing, base_version)?;
+        verify_portable_package_history_for_base(&store, &files, &existing)?;
+
+        let mut package = patch_skill_pack(&existing, patch);
+        let created_at = now;
+        package.created_at = created_at;
+        package.updated_at = created_at;
+        package.proposer_harness_id = ctx.harness_id;
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        let event = sign_public_event(
+            &node,
+            "pod_skill_pack_updated",
+            &pod.slug,
+            json!({"package": package}),
+            store.latest_event_hash(&pod.slug),
+        )?;
+        store.insert_pod_package_version(package.clone())?;
+        store.pod_skill_packs.insert(pod.id, package.clone());
+        store.event_log.push(event);
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::PatchSkillPack,
+            Some(pod.id),
+        );
+        self.persist_locked(&mut store)?;
+        Ok(PodPackageRevisionOutcome::Revised(package))
+    }
+
     pub fn pod_agent_context(
         &self,
         ctx: &AuthContext,
@@ -8526,6 +8638,50 @@ fn verify_portable_package_history(
     store: &InMemoryStore,
     files: &BTreeMap<String, String>,
 ) -> Result<(), AgentToolsError> {
+    let events = verified_portable_package_events(store, files)?;
+    let requested = pod_package_contents_from_files(files)?;
+    let has_signed_contents = events.iter().any(|event| {
+        event
+            .payload_json
+            .get("package")
+            .and_then(|value| serde_json::from_value::<PodSkillPack>(value.clone()).ok())
+            .is_some_and(|package| package_contents_match(&package, &requested))
+    });
+    if !has_signed_contents {
+        return Err(StoreError::Validation(
+            "events.jsonl does not contain the signed package contents".to_string(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn verify_portable_package_history_for_base(
+    store: &InMemoryStore,
+    files: &BTreeMap<String, String>,
+    base: &PodPackage,
+) -> Result<(), AgentToolsError> {
+    let events = verified_portable_package_events(store, files)?;
+    let has_signed_base = events.iter().any(|event| {
+        event
+            .payload_json
+            .get("package")
+            .and_then(|value| serde_json::from_value::<PodPackage>(value.clone()).ok())
+            .is_some_and(|package| package == *base)
+    });
+    if !has_signed_base {
+        return Err(StoreError::Validation(
+            "events.jsonl does not contain the signed base Package version".to_string(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn verified_portable_package_events(
+    store: &InMemoryStore,
+    files: &BTreeMap<String, String>,
+) -> Result<Vec<EventLog>, AgentToolsError> {
     let events_text = files.get("events.jsonl").ok_or_else(|| {
         StoreError::Validation("portable Pod Package is missing events.jsonl".into())
     })?;
@@ -8541,11 +8697,7 @@ fn verify_portable_package_history(
         )
         .into());
     }
-    let mut previous_hash: Option<&str> = None;
     for event in &events {
-        if event.previous_event_hash.as_deref() != previous_hash {
-            return Err(StoreError::InvalidSignature.into());
-        }
         let public_key = store
             .node_identities
             .get(&event.author_node_id)
@@ -8565,26 +8717,36 @@ fn verify_portable_package_history(
                     .map(|peer| peer.public_key.as_str())
             })
             .ok_or(StoreError::UntrustedPeer)?;
-        if !verify_event(event, public_key)? {
+        if !verify_event(event, public_key).map_err(|_| StoreError::InvalidSignature)? {
             return Err(StoreError::InvalidSignature.into());
         }
-        previous_hash = Some(&event.content_hash);
     }
-    let requested = pod_package_contents_from_files(files)?;
-    let has_signed_contents = events.iter().any(|event| {
-        event
-            .payload_json
-            .get("package")
-            .and_then(|value| serde_json::from_value::<PodSkillPack>(value.clone()).ok())
-            .is_some_and(|package| package_contents_match(&package, &requested))
-    });
-    if !has_signed_contents {
-        return Err(StoreError::Validation(
-            "events.jsonl does not contain the signed package contents".to_string(),
-        )
-        .into());
+    Ok(events)
+}
+
+fn ensure_package_base_version(
+    existing: &PodPackage,
+    base_version: PackageVersion,
+) -> Result<(), AgentToolsError> {
+    if PackageVersion::new(existing.version)
+        .map_err(|error| StoreError::Validation(error.to_string()))?
+        != base_version
+    {
+        return Err(StoreError::Validation("Package Revision base version is stale".into()).into());
     }
     Ok(())
+}
+
+fn complete_package_patch(contents: &PodPackageContents) -> SkillPackPatch {
+    SkillPackPatch {
+        context_md: Some(contents.context_md.clone()),
+        pod_yaml: None,
+        skill_md: Some(contents.skill_md.clone()),
+        sources_yaml: Some(contents.sources_yaml.clone()),
+        filters_yaml: Some(contents.filters_yaml.clone()),
+        examples_good_md: Some(contents.examples_good_md.clone()),
+        examples_bad_md: Some(contents.examples_bad_md.clone()),
+    }
 }
 
 fn ensure_direct_package_revision_allowed(
