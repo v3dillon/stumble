@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::process::Command;
 use stumble_api::{router, router_with_base_url, router_with_options, RouterOptions};
 use stumble_core::*;
-use stumble_mcp::{McpToolCall, McpToolRouter};
+use stumble_mcp::{streamable_http_router, McpToolCall, McpToolRouter};
 use tower::ServiceExt;
 
 struct TestDataDir(std::path::PathBuf);
@@ -17,6 +17,50 @@ impl TestDataDir {
         ));
         std::fs::create_dir_all(&path).unwrap();
         Self(path)
+    }
+
+    fn initialize_with_stumble(label: &str) -> Self {
+        let directory = Self::new(label);
+        let credential_store = directory.0.join("owner-credentials");
+        let command = |arguments: &[&str]| {
+            Command::new(env!("CARGO_BIN_EXE_stumble"))
+                .env("STUMBLE_CREDENTIAL_STORE_DIR", &credential_store)
+                .args(["--data-dir", directory.0.to_str().unwrap()])
+                .args(arguments)
+                .output()
+                .unwrap()
+        };
+
+        let initialized = command(&["node", "init"]);
+        assert!(
+            initialized.status.success(),
+            "{}",
+            String::from_utf8_lossy(&initialized.stderr)
+        );
+        let initialized: Value = serde_json::from_slice(&initialized.stdout).unwrap();
+        assert_eq!(initialized["version"], 1);
+        assert!(initialized["data"]["node"]["node_id"].as_str().is_some());
+
+        let credential_files = std::fs::read_dir(&credential_store)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(credential_files.len(), 1);
+        let owner_credential = std::fs::read_to_string(credential_files[0].path()).unwrap();
+        assert!(!owner_credential.trim().is_empty());
+
+        let authenticated = command(&["node", "show"]);
+        assert!(
+            authenticated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&authenticated.stderr)
+        );
+        let authenticated: Value = serde_json::from_slice(&authenticated.stdout).unwrap();
+        assert_eq!(
+            authenticated["data"]["node"]["node_id"],
+            initialized["data"]["node"]["node_id"]
+        );
+        directory
     }
 }
 
@@ -505,6 +549,42 @@ async fn assert_adapter_parity(home_dir: &TestDataDir, user_token: &str, expecte
     drop(mcp);
     drop(mcp_tools);
 
+    let streamable_mcp_tools = AgentTools::open_initialized_home_node(&home_dir.0).unwrap();
+    let streamable_mcp = streamable_http_router(streamable_mcp_tools);
+    let response = streamable_mcp
+        .oneshot(
+            Request::post("/mcp")
+                .header("authorization", format!("Bearer {user_token}"))
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("mcp-protocol-version", "2025-06-18")
+                .body(Body::from(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": "first-release-feed",
+                        "method": "tools/call",
+                        "params": {
+                            "name": "get_feed_batch",
+                            "arguments": {"size": size.parse::<usize>().unwrap()}
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let response: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        canonical_feed(response["result"]["structuredContent"]["value"].clone()),
+        *expected
+    );
     let http_tools = AgentTools::open_home_node(&home_dir.0, seed_store).unwrap();
     let response = router(http_tools)
         .oneshot(
@@ -616,10 +696,10 @@ struct CompositionEvidence {
 
 fn arrange_two_node_scenario() -> TwoNodeScenario {
     // Arrange: two independent real SQLite nodes and capability-scoped harnesses.
-    let home_dir = TestDataDir::new("home");
-    let origin_dir = TestDataDir::new("origin");
-    let home = AgentTools::open_home_node(&home_dir.0, seed_store).unwrap();
-    let origin = AgentTools::open_home_node(&origin_dir.0, seed_store).unwrap();
+    let home_dir = TestDataDir::initialize_with_stumble("home");
+    let origin_dir = TestDataDir::initialize_with_stumble("origin");
+    let home = AgentTools::open_initialized_home_node(&home_dir.0).unwrap();
+    let origin = AgentTools::open_initialized_home_node(&origin_dir.0).unwrap();
     let (bootstrap, _) = harness(
         &home,
         "Interactive Pod bootstrap",
