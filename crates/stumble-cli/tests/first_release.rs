@@ -21,7 +21,7 @@ impl TestDataDir {
 
     fn initialize_with_stumble(label: &str) -> Self {
         let directory = Self::new(label);
-        let credential_store = directory.0.join("owner-credentials");
+        let credential_store = directory.0.join("owner-authority-entries");
         let command = |arguments: &[&str]| {
             Command::new(env!("CARGO_BIN_EXE_stumble"))
                 .env("STUMBLE_CREDENTIAL_STORE_DIR", &credential_store)
@@ -41,13 +41,17 @@ impl TestDataDir {
         assert_eq!(initialized["version"], 1);
         assert!(initialized["data"]["node"]["node_id"].as_str().is_some());
 
-        let credential_files = std::fs::read_dir(&credential_store)
+        let authority_entries = std::fs::read_dir(&credential_store)
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(credential_files.len(), 1);
-        let owner_credential = std::fs::read_to_string(credential_files[0].path()).unwrap();
-        assert!(!owner_credential.trim().is_empty());
+        assert_eq!(authority_entries.len(), 1);
+        assert_eq!(
+            std::fs::metadata(authority_entries[0].path())
+                .unwrap()
+                .len(),
+            0
+        );
 
         let authenticated = command(&["node", "show"]);
         assert!(

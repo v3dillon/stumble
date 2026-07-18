@@ -6,14 +6,13 @@ use std::{
     process::ExitCode,
 };
 use stumble_cli::{
-    owner_credential_store, paginate, render_text, resolve_existing_data_dir,
+    owner_authority_store, paginate, render_text, resolve_existing_data_dir,
     resolve_initialized_data_dir, selected_data_dir, CursorPage, ErrorBody, ErrorEnvelope,
-    ExitStatusCategory, OwnerCredentialStore, ResourceDetail, SuccessEnvelope,
+    ExitStatusCategory, OwnerAuthorityStore, ResourceDetail, SuccessEnvelope,
 };
 use stumble_core::{
-    new_plaintext_api_token, seed_store, AgentTools, AgentToolsError, AuthContext,
-    DiscoveryLeaseSeconds, DiscoveryTask, DiscoveryTaskState, FeedBatch, Pod, StoreError,
-    TasteProfile, PORTABLE_PACKAGE_FILES,
+    seed_store, AgentTools, AgentToolsError, AuthContext, DiscoveryLeaseSeconds, DiscoveryTask,
+    DiscoveryTaskState, FeedBatch, Pod, StoreError, TasteProfile, PORTABLE_PACKAGE_FILES,
 };
 
 #[path = "stumble/discover.rs"]
@@ -52,8 +51,8 @@ fn main() -> ExitCode {
         Ok(data_dir) => data_dir,
         Err(error) => return fail(error, ExitStatusCategory::Internal),
     };
-    let credentials = owner_credential_store();
-    match dispatch(cli.workflow, &data_dir, credentials.as_ref()) {
+    let owner_authority = owner_authority_store();
+    match dispatch(cli.workflow, &data_dir, owner_authority.as_ref()) {
         Ok(data) => succeed(data, &format),
         Err((error, category)) => fail(error, category),
     }
@@ -62,26 +61,26 @@ fn main() -> ExitCode {
 fn dispatch(
     workflow: Workflow,
     selected_data_dir: &Path,
-    credentials: &dyn OwnerCredentialStore,
+    owner_authority: &dyn OwnerAuthorityStore,
 ) -> CliResult {
     match workflow {
         Workflow::Node { command } => {
-            node_workflow::execute(command, selected_data_dir, credentials)
+            node_workflow::execute(command, selected_data_dir, owner_authority)
         }
         Workflow::Pod { command } => {
-            let (_, tools, actor) = open_home_node(selected_data_dir, credentials)?;
+            let (_, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
             pod_workflow::execute(command, &tools, &actor)
         }
         Workflow::Discover { command } => {
-            let (_, tools, actor) = open_home_node(selected_data_dir, credentials)?;
+            let (_, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
             discover_workflow::execute(command, &tools, &actor)
         }
         Workflow::Feed { command } => {
-            let (_, tools, actor) = open_home_node(selected_data_dir, credentials)?;
+            let (_, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
             feed_workflow::execute(command, &tools, &actor)
         }
         Workflow::Sync { command } => {
-            let (_, tools, actor) = open_home_node(selected_data_dir, credentials)?;
+            let (_, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
             sync_workflow::execute(command, &tools, &actor)
         }
     }
@@ -89,7 +88,7 @@ fn dispatch(
 
 fn open_home_node(
     selected_data_dir: &Path,
-    credentials: &dyn OwnerCredentialStore,
+    owner_authority: &dyn OwnerAuthorityStore,
 ) -> Result<(PathBuf, AgentTools, AuthContext), (ErrorBody, ExitStatusCategory)> {
     let data_dir = resolve_existing_data_dir(selected_data_dir)
         .map_err(|error| (error, ExitStatusCategory::ValidationOrConflict))?;
@@ -103,14 +102,14 @@ fn open_home_node(
         ));
     }
     let tools = AgentTools::open_initialized_home_node(&data_dir).map_err(agent_tools_error)?;
-    let actor = authenticate_actor(&tools, &data_dir, credentials)?;
+    let actor = authenticate_actor(&tools, &data_dir, owner_authority)?;
     Ok((data_dir, tools, actor))
 }
 
 fn authenticate_actor(
     tools: &AgentTools,
     data_dir: &std::path::Path,
-    credentials: &dyn OwnerCredentialStore,
+    owner_authority: &dyn OwnerAuthorityStore,
 ) -> Result<AuthContext, (ErrorBody, ExitStatusCategory)> {
     if let Ok(credential) = std::env::var("STUMBLE_HARNESS_CREDENTIAL") {
         return tools
@@ -126,18 +125,18 @@ fn authenticate_actor(
                 )
             });
     }
-    credentials
-        .load(data_dir)
+    if !owner_authority
+        .is_registered(data_dir)
         .map_err(credential_error)?
-        .ok_or_else(|| {
-            (
-                ErrorBody::new(
-                    "owner_credential_not_found",
-                    "Home Node Owner credential was not found in the credential store",
-                ),
-                ExitStatusCategory::Authorization,
-            )
-        })?;
+    {
+        return Err((
+            ErrorBody::new(
+                "owner_credential_not_found",
+                "Home Node Owner Credential entry was not found in the credential store",
+            ),
+            ExitStatusCategory::Authorization,
+        ));
+    }
     tools.local_owner_auth_context().map_err(agent_tools_error)
 }
 
@@ -344,7 +343,7 @@ fn page<T>(
 
 fn initialize_node(
     selected_data_dir: &std::path::Path,
-    credentials: &dyn OwnerCredentialStore,
+    owner_authority: &dyn OwnerAuthorityStore,
 ) -> Result<Value, (ErrorBody, ExitStatusCategory)> {
     let data_dir = resolve_initialized_data_dir(selected_data_dir)
         .map_err(|error| (error, ExitStatusCategory::ValidationOrConflict))?;
@@ -358,14 +357,32 @@ fn initialize_node(
         ));
     }
 
-    let credential = new_plaintext_api_token();
-    credentials
-        .store(&data_dir, &credential)
+    let authority_was_registered = owner_authority
+        .is_registered(&data_dir)
         .map_err(credential_error)?;
+    if !authority_was_registered {
+        owner_authority
+            .register(&data_dir)
+            .map_err(credential_error)?;
+    }
     let tools = match AgentTools::initialize_home_node(&data_dir, seed_store) {
         Ok(tools) => tools,
         Err(error) => {
-            let _ = credentials.remove(&data_dir);
+            if !authority_was_registered {
+                if let Err(cleanup_error) = owner_authority.remove(&data_dir) {
+                    let (primary, _) = agent_tools_error(error);
+                    return Err((
+                        ErrorBody::new(
+                            "node_initialization_failed",
+                            format!(
+                                "{}; additionally failed to remove the Home Node Owner Credential: {cleanup_error}",
+                                primary.message
+                            ),
+                        ),
+                        ExitStatusCategory::Internal,
+                    ));
+                }
+            }
             return Err(agent_tools_error(error));
         }
     };
@@ -451,6 +468,50 @@ fn agent_tools_error(error: AgentToolsError) -> (ErrorBody, ExitStatusCategory) 
             ExitStatusCategory::ValidationOrConflict,
         ),
         error => internal_error(error),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod owner_authority_initialization_tests {
+    use super::initialize_node;
+    use std::{os::unix::fs::PermissionsExt, path::Path};
+    use stumble_cli::{CredentialStoreError, OwnerAuthorityStore};
+
+    struct RemovalFailureStore;
+
+    impl OwnerAuthorityStore for RemovalFailureStore {
+        fn register(&self, _data_dir: &Path) -> Result<(), CredentialStoreError> {
+            Ok(())
+        }
+
+        fn is_registered(&self, _data_dir: &Path) -> Result<bool, CredentialStoreError> {
+            Ok(false)
+        }
+
+        fn remove(&self, _data_dir: &Path) -> Result<(), CredentialStoreError> {
+            Err(CredentialStoreError::Backend(
+                "simulated cleanup failure".into(),
+            ))
+        }
+    }
+
+    #[test]
+    fn initialization_reports_both_database_and_authority_cleanup_failures() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "stumble-owner-cleanup-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let (error, _) = initialize_node(&data_dir, &RemovalFailureStore).unwrap_err();
+
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
+        assert_eq!(error.code, "node_initialization_failed");
+        assert!(error.message.contains("storage sqlite failed"));
+        assert!(error.message.contains("simulated cleanup failure"));
     }
 }
 

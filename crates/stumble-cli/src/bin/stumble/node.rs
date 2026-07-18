@@ -4,7 +4,7 @@ use super::{
 use crate::parser::{HarnessWorkflow, NodeWorkflow, ProposalWorkflow};
 use serde_json::json;
 use std::path::Path;
-use stumble_cli::{ErrorBody, ExitStatusCategory, OwnerCredentialStore, ResourceDetail};
+use stumble_cli::{ErrorBody, ExitStatusCategory, OwnerAuthorityStore, ResourceDetail};
 use stumble_core::{
     AgentHarnessId, AgentTools, AuthContext, PendingProposalId, RegisterAgentHarnessRequest,
 };
@@ -12,21 +12,21 @@ use stumble_core::{
 pub(super) fn execute(
     command: NodeWorkflow,
     selected_data_dir: &Path,
-    credentials: &dyn OwnerCredentialStore,
+    owner_authority: &dyn OwnerAuthorityStore,
 ) -> CliResult {
     match command {
-        NodeWorkflow::Init => initialize_node(selected_data_dir, credentials),
+        NodeWorkflow::Init => initialize_node(selected_data_dir, owner_authority),
         NodeWorkflow::Show => {
-            let (data_dir, tools, actor) = open_home_node(selected_data_dir, credentials)?;
+            let (data_dir, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
             let node = tools.node_info(&actor).map_err(agent_tools_error)?;
             Ok(json!({ "data_dir": data_dir, "node": node, "allowed_actions": [] }))
         }
         NodeWorkflow::Harness { command } => {
-            let (_, tools, actor) = open_home_node(selected_data_dir, credentials)?;
+            let (_, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
             execute_harness(command, &tools, &actor)
         }
         NodeWorkflow::Proposal { command } => {
-            let (_, tools, actor) = open_home_node(selected_data_dir, credentials)?;
+            let (_, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
             execute_proposal(command, &tools, &actor)
         }
     }

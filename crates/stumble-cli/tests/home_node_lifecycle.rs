@@ -184,8 +184,8 @@ fn node_show_resolves_flag_environment_and_default_paths() {
 }
 
 #[test]
-fn owner_credential_is_external_to_the_node_and_loaded_automatically() {
-    let environment = TestEnvironment::new("owner-credential");
+fn owner_authority_is_external_to_the_node_and_detected_automatically() {
+    let environment = TestEnvironment::new("owner-authority");
     let data_dir = environment.data_dir("home");
 
     let initialized = environment
@@ -195,17 +195,15 @@ fn owner_credential_is_external_to_the_node_and_loaded_automatically() {
         .expect("initialize node");
     assert!(initialized.status.success());
 
-    let credential_files = fs::read_dir(environment.root.join("credentials"))
-        .expect("isolated credential store exists")
+    let authority_entries = fs::read_dir(environment.root.join("credentials"))
+        .expect("isolated Owner authority store exists")
         .collect::<Result<Vec<_>, _>>()
-        .expect("read isolated credentials");
-    assert_eq!(credential_files.len(), 1);
-    let credential = fs::read_to_string(credential_files[0].path()).expect("read credential");
-    assert!(!credential.trim().is_empty());
+        .expect("read isolated Owner authority entries");
+    assert_eq!(authority_entries.len(), 1);
+    let authority_marker = authority_entries[0].path();
+    assert_eq!(fs::metadata(&authority_marker).unwrap().len(), 0);
     let database = fs::read(data_dir.join("stumble.sqlite3")).expect("read database");
-    assert!(!database
-        .windows(credential.trim().len())
-        .any(|bytes| bytes == credential.trim().as_bytes()));
+    assert!(!database.is_empty());
 
     let shown = environment
         .command()
@@ -219,7 +217,29 @@ fn owner_credential_is_external_to_the_node_and_loaded_automatically() {
     );
     assert_eq!(json(&shown.stdout)["data"]["data_dir"], resolved(&data_dir));
 
-    fs::remove_file(credential_files[0].path()).expect("remove isolated credential");
+    let wrong_harness_credential = environment
+        .command()
+        .env("STUMBLE_HARNESS_CREDENTIAL", "wrong-credential")
+        .args(["--data-dir", data_dir.to_str().unwrap(), "node", "show"])
+        .output()
+        .expect("reject wrong Harness credential");
+    assert_eq!(wrong_harness_credential.status.code(), Some(3));
+    assert_eq!(
+        json(&wrong_harness_credential.stderr)["error"]["code"],
+        "invalid_harness_credential"
+    );
+
+    // Presence is the authority boundary. Contents are not credential material and
+    // cannot be "wrong"; even a legacy value is treated only as an existing entry.
+    fs::write(&authority_marker, "not-a-secret").expect("write legacy marker contents");
+    let with_nonempty_marker = environment
+        .command()
+        .args(["--data-dir", data_dir.to_str().unwrap(), "node", "show"])
+        .output()
+        .expect("show with nonempty authority marker");
+    assert!(with_nonempty_marker.status.success());
+
+    fs::remove_file(authority_marker).expect("remove isolated Owner authority");
     let without_credential = environment
         .command()
         .args(["--data-dir", data_dir.to_str().unwrap(), "node", "show"])
@@ -230,4 +250,32 @@ fn owner_credential_is_external_to_the_node_and_loaded_automatically() {
         json(&without_credential.stderr)["error"]["code"],
         "owner_credential_not_found"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_node_initialization_removes_owner_authority_registration() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let environment = TestEnvironment::new("failed-init-cleanup");
+    let data_dir = environment.data_dir("read-only-home");
+    fs::create_dir_all(&data_dir).expect("create Home Node directory");
+    fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o500))
+        .expect("make Home Node directory read-only");
+
+    let initialized = environment
+        .command()
+        .args(["--data-dir", data_dir.to_str().unwrap(), "node", "init"])
+        .output()
+        .expect("attempt initialization");
+
+    fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700))
+        .expect("restore Home Node directory permissions");
+    assert!(!initialized.status.success());
+    let authority_entries = fs::read_dir(environment.root.join("credentials"))
+        .expect("authority store was created")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read authority store");
+    assert!(authority_entries.is_empty());
+    assert!(!data_dir.join("stumble.sqlite3").exists());
 }

@@ -14,8 +14,10 @@ stumble node show
 
 `stumble` uses `~/.stumble/nodes/home` by default. Set `STUMBLE_DATA_DIR`
 or pass `--data-dir` to select another Home Node. Only `node init` creates
-state; it stores the Home Node Owner Credential in the operating-system
-credential store, and later local commands retrieve it automatically.
+state; its Home Node Owner Credential is an operating-system credential-store
+entry that later local commands detect automatically. It contains no secret
+value that Stumble reads or emits; unrestricted shell access as the same
+operating-system User is the authority boundary.
 
 For agent-assisted setup, ask your agent to read [llms.txt](llms.txt) and install Stumble.
 
@@ -25,7 +27,7 @@ transports are separate from the one-shot `stumble` workflow CLI.
 
 ## Workflow CLI
 
-`stumble` is a local, JSON-first workflow CLI with exactly five top-level families: `node`, `pod`, `discover`, `feed`, and `sync`. Success writes one `{ "version": 1, "data": ... }` document to standard output; failures write one versioned error document to standard error. Scoped automation supplies `STUMBLE_HARNESS_CREDENTIAL`; local User commands retrieve the Home Node Owner Credential automatically.
+`stumble` is a local, JSON-first workflow CLI with exactly five top-level families: `node`, `pod`, `discover`, `feed`, and `sync`. Success writes one `{ "version": 1, "data": ... }` document to standard output; failures write one versioned error document to standard error. Scoped automation supplies `STUMBLE_HARNESS_CREDENTIAL`; local User commands detect their Home Node Owner Credential automatically.
 
 ### Harnesses and approvals
 
@@ -33,7 +35,7 @@ transports are separate from the one-shot `stumble` workflow CLI.
 - `stumble node harness list|show|revoke` — Inspects credential fingerprints and metadata or immediately revokes a Harness. Plaintext credentials are never returned by reads.
 - `stumble node proposal list|show|approve|reject` — Reviews expiring Pending Proposals. Approval and rejection require either the automatically authenticated Owner or an independent interactive Harness with approval capability and matching User and Pod scope.
 
-Local Owner commands authenticate from the Home Node Owner Credential automatically. Scoped automation supplies `STUMBLE_HARNESS_CREDENTIAL`; authority expansion creates a Pending Proposal and never changes the Harness Grant before approval. Generic proposal creation and tenant or raw-token administration are not CLI workflows.
+Local Owner commands authenticate from Home Node Owner Credential entry presence automatically. Scoped automation supplies `STUMBLE_HARNESS_CREDENTIAL`; authority expansion creates a Pending Proposal and never changes the Harness Grant before approval. Generic proposal creation and tenant or raw-token administration are not CLI workflows.
 
 Subscription and Pod authority are separate workflows. Use an exact local slug or immutable Pod ID with `stumble pod subscribe`, `pod unsubscribe`, and `pod subscription set --priority <true|false>`; `pod subscribe` also accepts a canonical public URL of the form `https://origin.example/federation/pods/<slug>`. Pod governance uses only `owner` and `curator`: `pod role list`, `pod role grant --user-id <id> --role <owner|curator>`, and `pod role revoke ...`. Grants and revocations return Pending Proposals and do not take effect until an independent Owner or scoped interactive approval Harness approves them.
 
