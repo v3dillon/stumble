@@ -45,7 +45,10 @@ fn accepted_item(tools: &AgentTools, slug: &str, ordinal: usize) -> (Pod, Conten
     let curator = harness(
         tools,
         &format!("curator-{ordinal}"),
-        vec![HarnessCapability::PodCuration],
+        vec![
+            HarnessCapability::PodCuration,
+            HarnessCapability::SubscriptionManagement,
+        ],
         None,
     );
     let pod = tools
@@ -59,6 +62,7 @@ fn accepted_item(tools: &AgentTools, slug: &str, ordinal: usize) -> (Pod, Conten
             },
         )
         .unwrap();
+    tools.join_pod(&curator, &pod.slug).unwrap();
     tools
         .set_pod_curation_policy(&curator, pod.id, CurationPolicy::Manual, Utc::now())
         .unwrap();
@@ -183,8 +187,8 @@ fn make_unsubscribed_public(tools: &AgentTools, pod: &Pod) {
     let mut store = shared_store.write().unwrap();
     store.pods.get_mut(&pod.id).unwrap().visibility = Visibility::Public;
     store
-        .pod_memberships
-        .retain(|membership| membership.pod_id != pod.id);
+        .subscriptions
+        .retain(|_, subscription| subscription.local_pod_id != pod.id);
 }
 
 #[test]
@@ -720,6 +724,7 @@ fn shared_item_represents_both_priority_pods_without_skipping_a_third() {
             },
         )
         .unwrap();
+    tools.join_pod(&user, &priority_b.slug).unwrap();
     tools
         .add_content_item_to_pod(
             &user,

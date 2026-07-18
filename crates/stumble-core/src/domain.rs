@@ -390,8 +390,7 @@ pub enum TenantRole {
 #[serde(rename_all = "snake_case")]
 pub enum PodRole {
     Owner,
-    Moderator,
-    Member,
+    Curator,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1840,14 +1839,11 @@ pub struct Pod {
     pub origin_node_id: Option<NodeIdentityId>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PodMembership {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PodRoleAssignment {
     pub user_id: UserId,
     pub pod_id: PodId,
     pub role: PodRole,
-    /// Whether this Subscription receives bounded Feed representation.
-    #[serde(default)]
-    pub is_priority: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -3143,7 +3139,7 @@ impl FederationPodSnapshot {
     }
 }
 
-/// Local-only relationship making one remote public Pod Feed-eligible.
+/// Local-only relationship making one Pod Feed-eligible for one User.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Subscription {
@@ -3153,7 +3149,7 @@ pub struct Subscription {
     pub user_id: UserId,
     /// Optional hosted tenant boundary.
     pub tenant_id: Option<TenantId>,
-    /// Canonical direct address supplied by the User.
+    /// Canonical direct address; local Pods use the `stumble://local/pods/` scheme.
     pub public_pod_url: String,
     /// Authoritative Origin Node identity.
     pub origin_node_id: NodeIdentityId,
@@ -3163,12 +3159,42 @@ pub struct Subscription {
     pub pod_slug: String,
     /// Local projected Pod identity.
     pub local_pod_id: PodId,
+    /// Whether this Subscription receives bounded Feed representation.
+    #[serde(default)]
+    pub is_priority: bool,
     /// Last contiguous signed event projected by the Home Node.
     pub last_event_hash: Option<String>,
     /// Time at which the User subscribed.
     pub created_at: DateTime<Utc>,
     /// Time of the latest successful synchronization attempt.
     pub synchronized_at: DateTime<Utc>,
+}
+
+impl Subscription {
+    /// Creates Feed eligibility for a Pod hosted on this Home Node.
+    #[must_use]
+    pub fn new_local(
+        id: SubscriptionId,
+        user_id: UserId,
+        pod: &Pod,
+        node: &NodeIdentity,
+        created_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id,
+            user_id,
+            tenant_id: pod.tenant_id,
+            public_pod_url: format!("stumble://local/pods/{}", pod.id),
+            origin_node_id: node.id,
+            origin_public_key: node.public_key.clone(),
+            pod_slug: pod.slug.clone(),
+            local_pod_id: pod.id,
+            is_priority: false,
+            last_event_hash: None,
+            created_at,
+            synchronized_at: created_at,
+        }
+    }
 }
 
 /// Request to enable or disable one User's Priority Subscription.

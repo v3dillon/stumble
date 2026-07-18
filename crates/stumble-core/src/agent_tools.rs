@@ -227,8 +227,8 @@ impl AgentTools {
                     .iter()
                     .copied()
                     .filter(|pod_id| {
-                        store.pod_memberships.iter().any(|membership| {
-                            membership.user_id == user_id && membership.pod_id == *pod_id
+                        store.subscriptions.values().any(|subscription| {
+                            subscription.user_id == user_id && subscription.local_pod_id == *pod_id
                         })
                     })
                     .collect::<Vec<_>>();
@@ -236,10 +236,10 @@ impl AgentTools {
                     .iter()
                     .copied()
                     .filter(|pod_id| {
-                        store.pod_memberships.iter().any(|membership| {
-                            membership.user_id == user_id
-                                && membership.pod_id == *pod_id
-                                && membership.is_priority
+                        store.subscriptions.values().any(|subscription| {
+                            subscription.user_id == user_id
+                                && subscription.local_pod_id == *pod_id
+                                && subscription.is_priority
                         })
                     })
                     .collect::<Vec<_>>();
@@ -888,6 +888,7 @@ impl AgentTools {
             origin_public_key: request.snapshot.node.public_key,
             pod_slug: request.snapshot.manifest.pod.slug,
             local_pod_id: local_pod.id,
+            is_priority: false,
             last_event_hash: request.snapshot.manifest.latest_known_event_hash,
             created_at: now,
             synchronized_at: now,
@@ -895,19 +896,6 @@ impl AgentTools {
         projected
             .subscriptions
             .insert(subscription.id, subscription.clone());
-        if !projected
-            .pod_memberships
-            .iter()
-            .any(|membership| membership.user_id == user_id && membership.pod_id == local_pod.id)
-        {
-            projected.pod_memberships.push(PodMembership {
-                user_id,
-                pod_id: local_pod.id,
-                role: PodRole::Member,
-                is_priority: false,
-                created_at: now,
-            });
-        }
         record_harness_write_at(
             &mut projected,
             ctx,
@@ -2608,6 +2596,7 @@ impl AgentTools {
             return Err(StoreError::Duplicate(format!("pod {}", request.slug)).into());
         }
         let node = store.node_for_tenant(ctx.tenant_id)?;
+        let creator_user_id = ctx.user_id.or_else(|| store.users.keys().next().copied());
         let pod = Pod {
             id: Uuid::now_v7(),
             tenant_id: ctx.tenant_id,
@@ -2615,7 +2604,7 @@ impl AgentTools {
             slug: request.slug,
             description: request.description,
             visibility: request.visibility,
-            created_by: ctx.user_id,
+            created_by: creator_user_id,
             created_at: Utc::now(),
             origin_node_id: Some(node.id),
         };
@@ -2634,12 +2623,11 @@ impl AgentTools {
         package.proposer_harness_id = ctx.harness_id;
         store.insert_pod_package_version(package.clone())?;
         store.pod_skill_packs.insert(pod.id, package.clone());
-        if let Some(user_id) = ctx.user_id {
-            store.pod_memberships.push(PodMembership {
+        if let Some(user_id) = creator_user_id {
+            store.pod_roles.push(PodRoleAssignment {
                 user_id,
                 pod_id: pod.id,
                 role: PodRole::Owner,
-                is_priority: false,
                 created_at: Utc::now(),
             });
         }
@@ -2735,11 +2723,10 @@ impl AgentTools {
                 federate_sources: false,
             },
         );
-        store.pod_memberships.push(PodMembership {
+        store.pod_roles.push(PodRoleAssignment {
             user_id: owner_id,
             pod_id: pod.id,
             role: PodRole::Owner,
-            is_priority: false,
             created_at: now,
         });
         store.insert_pod_package_version(package.clone())?;
@@ -2778,18 +2765,14 @@ impl AgentTools {
         let Some(user_id) = ctx.user_id else {
             return Ok(());
         };
-        if !store
-            .pod_memberships
-            .iter()
-            .any(|m| m.user_id == user_id && m.pod_id == pod.id)
-        {
-            store.pod_memberships.push(PodMembership {
-                user_id,
-                pod_id: pod.id,
-                role: PodRole::Member,
-                is_priority: false,
-                created_at: Utc::now(),
-            });
+        if !store.subscriptions.values().any(|subscription| {
+            subscription.user_id == user_id && subscription.local_pod_id == pod.id
+        }) {
+            let node = store.node_for_tenant(ctx.tenant_id)?;
+            let now = Utc::now();
+            let subscription =
+                Subscription::new_local(Uuid::now_v7().into(), user_id, &pod, &node, now);
+            store.subscriptions.insert(subscription.id, subscription);
             record_harness_write(
                 &mut store,
                 ctx,
@@ -2826,12 +2809,14 @@ impl AgentTools {
         let user_id = ctx.user_id.ok_or_else(|| {
             StoreError::Validation("Priority Subscription requires an authenticated User".into())
         })?;
-        let membership = store
-            .pod_memberships
-            .iter_mut()
-            .find(|membership| membership.user_id == user_id && membership.pod_id == pod_id)
+        let subscription = store
+            .subscriptions
+            .values_mut()
+            .find(|subscription| {
+                subscription.user_id == user_id && subscription.local_pod_id == pod_id
+            })
             .ok_or_else(|| StoreError::NotFound("Subscription".into()))?;
-        membership.is_priority = is_priority;
+        subscription.is_priority = is_priority;
         record_harness_write(
             &mut store,
             ctx,
@@ -7366,6 +7351,19 @@ fn authorize_harness(
             });
         }
     }
+    if capability == HarnessCapability::PodCuration {
+        if let (Some(user_id), Some(pod_id)) = (ctx.user_id, pod_id) {
+            if !store.pod_roles.iter().any(|assignment| {
+                assignment.user_id == user_id
+                    && assignment.pod_id == pod_id
+                    && matches!(assignment.role, PodRole::Owner | PodRole::Curator)
+            }) {
+                return Err(AgentToolsError::Forbidden {
+                    reason: format!("User has no Pod Role for Pod {pod_id}"),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -8274,8 +8272,8 @@ fn feed_batch_item(
                 .pods
                 .get(&placement.pod_id)
                 .is_some_and(|pod| pod.visibility == Visibility::Public)
-                && !store.pod_memberships.iter().any(|membership| {
-                    membership.user_id == user_id && membership.pod_id == placement.pod_id
+                && !store.subscriptions.values().any(|subscription| {
+                    subscription.user_id == user_id && subscription.local_pod_id == placement.pod_id
                 })
         });
     const EXPLORATION_REASON: &str = "Clearly labeled exploration from an unsubscribed public Pod";
@@ -8899,11 +8897,10 @@ fn apply_sensitive_change(
             store.insert_pod_package_version(package.clone())?;
             store.pod_skill_packs.insert(pod.id, package.clone());
             if let Some(user_id) = created_by {
-                store.pod_memberships.push(PodMembership {
+                store.pod_roles.push(PodRoleAssignment {
                     user_id,
                     pod_id: pod.id,
                     role: PodRole::Owner,
-                    is_priority: false,
                     created_at: Utc::now(),
                 });
             }

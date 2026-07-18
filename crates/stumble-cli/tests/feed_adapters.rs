@@ -35,6 +35,7 @@ fn accepted_item(tools: &AgentTools, ctx: &AuthContext) -> (PodId, ContentItemId
             },
         )
         .unwrap();
+    tools.join_pod(ctx, &pod.slug).unwrap();
     tools
         .set_pod_curation_policy(ctx, pod.id, CurationPolicy::Manual, chrono::Utc::now())
         .unwrap();

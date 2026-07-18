@@ -669,7 +669,9 @@ fn arrange_two_node_scenario() -> TwoNodeScenario {
         ],
         None,
     );
-    for pod_id in [primary_pod.id, secondary_pod.id] {
+    for pod in [&primary_pod, &secondary_pod] {
+        home.join_pod(&user, &pod.slug).unwrap();
+        let pod_id = pod.id;
         home.set_pod_curation_policy(&user, pod_id, CurationPolicy::Manual, Utc::now())
             .unwrap();
     }

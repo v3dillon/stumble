@@ -1,6 +1,7 @@
 use crate::domain::*;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
@@ -95,7 +96,7 @@ pub struct InMemoryStore {
     pub pod_explore_sample_sets: HashMap<Uuid, PodExploreSamples>,
     pub subscriptions: HashMap<SubscriptionId, Subscription>,
     pub pods: HashMap<PodId, Pod>,
-    pub pod_memberships: Vec<PodMembership>,
+    pub pod_roles: Vec<PodRoleAssignment>,
     pub pod_rules: HashMap<PodId, PodRules>,
     pub pod_skill_packs: HashMap<PodId, PodSkillPack>,
     /// Immutable historical Pod Package versions.
@@ -160,7 +161,10 @@ struct PersistedStore {
     #[serde(default)]
     subscriptions: Vec<Subscription>,
     pods: Vec<Pod>,
-    pod_memberships: Vec<PodMembership>,
+    #[serde(default)]
+    pod_roles: Vec<PodRoleAssignment>,
+    #[serde(default)]
+    pod_memberships: Vec<LegacyPodMembership>,
     pod_rules: Vec<PodRules>,
     pod_skill_packs: Vec<PodSkillPack>,
     #[serde(default, alias = "pod_skill_pack_versions")]
@@ -205,6 +209,25 @@ struct PersistedPodCurationPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyPodMembership {
+    user_id: UserId,
+    pod_id: PodId,
+    role: LegacyPodRole,
+    #[serde(default)]
+    is_priority: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LegacyPodRole {
+    Owner,
+    Moderator,
+    Admin,
+    Member,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedFederatedContentItemId {
     #[serde(default)]
     tenant_id: Option<TenantId>,
@@ -232,6 +255,79 @@ impl FederatedContentItemKey {
             origin_content_item_id,
         }
     }
+}
+
+fn migrate_legacy_pod_memberships(
+    legacy_memberships: &[LegacyPodMembership],
+    pods: &[Pod],
+    node_identities: &[NodeIdentity],
+    subscriptions: &mut Vec<Subscription>,
+    pod_roles: &mut Vec<PodRoleAssignment>,
+) {
+    for membership in legacy_memberships {
+        let Some(pod) = pods.iter().find(|pod| pod.id == membership.pod_id) else {
+            continue;
+        };
+        if let Some(subscription) = subscriptions.iter_mut().find(|subscription| {
+            subscription.user_id == membership.user_id
+                && subscription.local_pod_id == membership.pod_id
+        }) {
+            subscription.is_priority |= membership.is_priority;
+        } else {
+            let origin = pod
+                .origin_node_id
+                .and_then(|node_id| node_identities.iter().find(|node| node.id == node_id))
+                .or_else(|| {
+                    node_identities
+                        .iter()
+                        .find(|node| node.tenant_id == pod.tenant_id)
+                });
+            if let Some(origin) = origin {
+                let mut subscription = Subscription::new_local(
+                    legacy_subscription_id(membership.user_id, membership.pod_id),
+                    membership.user_id,
+                    pod,
+                    origin,
+                    membership.created_at,
+                );
+                subscription.is_priority = membership.is_priority;
+                subscriptions.push(subscription);
+            }
+        }
+
+        let role = match membership.role {
+            LegacyPodRole::Owner => Some(PodRole::Owner),
+            LegacyPodRole::Moderator | LegacyPodRole::Admin => Some(PodRole::Curator),
+            LegacyPodRole::Member => None,
+        };
+        if let Some(role) = role {
+            if let Some(assignment) = pod_roles.iter_mut().find(|assignment| {
+                assignment.user_id == membership.user_id && assignment.pod_id == membership.pod_id
+            }) {
+                assignment.role = role;
+            } else {
+                pod_roles.push(PodRoleAssignment {
+                    user_id: membership.user_id,
+                    pod_id: membership.pod_id,
+                    role,
+                    created_at: membership.created_at,
+                });
+            }
+        }
+    }
+}
+
+fn legacy_subscription_id(user_id: UserId, pod_id: PodId) -> SubscriptionId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"stumble legacy Subscription\0");
+    hasher.update(user_id.as_bytes());
+    hasher.update(pod_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes).into()
 }
 
 impl From<&InMemoryStore> for PersistedStore {
@@ -283,7 +379,8 @@ impl From<&InMemoryStore> for PersistedStore {
             pod_explore_sample_sets: store.pod_explore_sample_sets.values().cloned().collect(),
             subscriptions: store.subscriptions.values().cloned().collect(),
             pods: store.pods.values().cloned().collect(),
-            pod_memberships: store.pod_memberships.clone(),
+            pod_roles: store.pod_roles.clone(),
+            pod_memberships: Vec::new(),
             pod_rules: store.pod_rules.values().cloned().collect(),
             pod_skill_packs: store.pod_skill_packs.values().cloned().collect(),
             pod_package_versions: store.pod_package_versions.values().cloned().collect(),
@@ -333,6 +430,15 @@ impl TryFrom<PersistedStore> for InMemoryStore {
     type Error = StorePersistenceError;
 
     fn try_from(snapshot: PersistedStore) -> Result<Self, Self::Error> {
+        let mut subscriptions = snapshot.subscriptions;
+        let mut pod_roles = snapshot.pod_roles;
+        migrate_legacy_pod_memberships(
+            &snapshot.pod_memberships,
+            &snapshot.pods,
+            &snapshot.node_identities,
+            &mut subscriptions,
+            &mut pod_roles,
+        );
         let current_skill_packs = snapshot.pod_skill_packs;
         let mut historical_skill_packs = snapshot
             .pod_package_versions
@@ -458,13 +564,12 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .into_iter()
                 .map(|samples| (samples.announcement_id, samples))
                 .collect(),
-            subscriptions: snapshot
-                .subscriptions
+            subscriptions: subscriptions
                 .into_iter()
                 .map(|subscription| (subscription.id, subscription))
                 .collect(),
             pods: snapshot.pods.into_iter().map(|pod| (pod.id, pod)).collect(),
-            pod_memberships: snapshot.pod_memberships,
+            pod_roles,
             pod_rules: snapshot
                 .pod_rules
                 .into_iter()
@@ -606,6 +711,7 @@ const STORE_COLLECTIONS: &[&str] = &[
     "pod_explore_sample_sets",
     "subscriptions",
     "pods",
+    "pod_roles",
     "pod_memberships",
     "pod_rules",
     "pod_skill_packs",
@@ -642,7 +748,7 @@ pub fn load_or_initialize_sqlite_store(
     }
     let mut connection = open_sqlite_store(database_path)?;
     match sqlite_store_state(&connection)? {
-        SqliteStoreState::Initialized => return load_sqlite_store_from_connection(&connection),
+        SqliteStoreState::Initialized => return load_sqlite_store_from_connection(&mut connection),
         SqliteStoreState::PopulatedWithoutMetadata => {
             return Err(StorePersistenceError::PopulatedUninitializedDatabase)
         }
@@ -664,8 +770,8 @@ pub fn load_or_initialize_sqlite_store(
 }
 
 pub fn load_sqlite_store(database_path: &Path) -> Result<InMemoryStore, StorePersistenceError> {
-    let connection = open_sqlite_store(database_path)?;
-    load_sqlite_store_from_connection(&connection)
+    let mut connection = open_sqlite_store(database_path)?;
+    load_sqlite_store_from_connection(&mut connection)
 }
 
 /// Applies only changed domain records in one SQLite transaction.
@@ -799,7 +905,7 @@ fn initialize_sqlite_store(
 }
 
 fn load_sqlite_store_from_connection(
-    connection: &rusqlite::Connection,
+    connection: &mut rusqlite::Connection,
 ) -> Result<InMemoryStore, StorePersistenceError> {
     let mut collections = serde_json::Map::new();
     for collection in STORE_COLLECTIONS {
@@ -823,11 +929,42 @@ fn load_sqlite_store_from_connection(
             values.push(value);
         }
     }
+    drop(statement);
     let snapshot: PersistedStore = serde_json::from_value(serde_json::Value::Object(collections))?;
     if snapshot.version != 1 {
         return Err(StorePersistenceError::UnsupportedVersion(snapshot.version));
     }
-    snapshot.try_into()
+    let had_legacy_pod_memberships = !snapshot.pod_memberships.is_empty();
+    let store = snapshot.try_into()?;
+    if had_legacy_pod_memberships {
+        persist_migrated_pod_relationships(connection, &store)?;
+    }
+    Ok(store)
+}
+
+fn persist_migrated_pod_relationships(
+    connection: &mut rusqlite::Connection,
+    store: &InMemoryStore,
+) -> Result<(), StorePersistenceError> {
+    let records = store_records(store)?;
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    transaction.execute(
+        "DELETE FROM stumble_store_records WHERE collection = 'pod_memberships'",
+        [],
+    )?;
+    for ((collection, record_key), value_json) in records
+        .into_iter()
+        .filter(|((collection, _), _)| collection == "subscriptions" || collection == "pod_roles")
+    {
+        transaction.execute(
+            "INSERT INTO stumble_store_records (collection, record_key, value_json) VALUES (?1, ?2, ?3)
+             ON CONFLICT (collection, record_key) DO UPDATE SET value_json = excluded.value_json",
+            rusqlite::params![collection, record_key, value_json],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
 }
 
 fn store_records(store: &InMemoryStore) -> Result<StoreRecords, StorePersistenceError> {
@@ -858,7 +995,7 @@ fn record_key(
 ) -> Result<String, StorePersistenceError> {
     let fields: &[&str] = match collection {
         "tenant_users" => &["tenant_id", "user_id"],
-        "pod_memberships" => &["user_id", "pod_id"],
+        "pod_roles" | "pod_memberships" => &["user_id", "pod_id"],
         "submission_pods" => &["submission_id", "pod_id"],
         "user_preferences" => &["user_id", "tenant_id"],
         "trust_policies" => &["user_id", "tenant_id"],
@@ -1327,6 +1464,76 @@ mod tests {
             store_records(&restarted).unwrap(),
             store_records(&original).unwrap()
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn legacy_sqlite_pod_memberships_rewrite_once_before_restart() {
+        let dir = temp_store_dir("sqlite-pod-relationship-migration");
+        let database_path = dir.join("stumble.sqlite3");
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = populated_legacy_store();
+        let user_id = *original.users.keys().next().unwrap();
+        let pod_id = original.pod_by_slug("legacy-pod", None).unwrap().id;
+        let created_at = original
+            .pod_roles
+            .iter()
+            .find(|assignment| assignment.user_id == user_id && assignment.pod_id == pod_id)
+            .unwrap()
+            .created_at;
+        let legacy_membership = LegacyPodMembership {
+            user_id,
+            pod_id,
+            role: LegacyPodRole::Moderator,
+            is_priority: true,
+            created_at,
+        };
+        let mut connection = open_sqlite_store(&database_path).unwrap();
+        initialize_sqlite_store(&mut connection, &original).unwrap();
+        connection
+            .execute(
+                "DELETE FROM stumble_store_records WHERE collection = 'pod_roles'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO stumble_store_records (collection, record_key, value_json)
+                 VALUES ('pod_memberships', ?1, ?2)",
+                rusqlite::params![
+                    serde_json::to_string(&[user_id, pod_id]).unwrap(),
+                    serde_json::to_string(&legacy_membership).unwrap()
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let migrated = load_sqlite_store(&database_path).unwrap();
+        assert!(migrated.pod_roles.iter().any(|assignment| {
+            assignment.user_id == user_id
+                && assignment.pod_id == pod_id
+                && assignment.role == PodRole::Curator
+        }));
+        assert!(migrated.subscriptions.values().any(|subscription| {
+            subscription.user_id == user_id
+                && subscription.local_pod_id == pod_id
+                && subscription.is_priority
+        }));
+        let connection = open_sqlite_store(&database_path).unwrap();
+        let legacy_rows: usize = connection
+            .query_row(
+                "SELECT COUNT(*) FROM stumble_store_records WHERE collection = 'pod_memberships'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_rows, 0);
+        drop(connection);
+
+        let restarted = load_sqlite_store(&database_path).unwrap();
+        assert_eq!(restarted.pod_roles, migrated.pod_roles);
+        assert_eq!(restarted.subscriptions, migrated.subscriptions);
 
         let _ = std::fs::remove_dir_all(dir);
     }

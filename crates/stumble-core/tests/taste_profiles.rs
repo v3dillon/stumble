@@ -65,7 +65,10 @@ fn accepted_item(
     let curator = harness(
         tools,
         &format!("curator-{ordinal}"),
-        vec![HarnessCapability::PodCuration],
+        vec![
+            HarnessCapability::PodCuration,
+            HarnessCapability::SubscriptionManagement,
+        ],
     );
     let pod = tools
         .create_pod(
@@ -78,6 +81,7 @@ fn accepted_item(
             },
         )
         .unwrap();
+    tools.join_pod(&curator, &pod.slug).unwrap();
     tools
         .set_pod_curation_policy(&curator, pod.id, CurationPolicy::Manual, Utc::now())
         .unwrap();

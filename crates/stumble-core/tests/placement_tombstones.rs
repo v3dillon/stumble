@@ -252,6 +252,7 @@ fn signed_tombstones_stop_origin_delivery_without_erasing_local_curation() {
             },
         )
         .unwrap();
+    home.join_pod(&subscriber, &local_pod.slug).unwrap();
     let local_placement = home
         .add_content_item_to_pod(
             &subscriber,
