@@ -6,24 +6,6 @@ use stumble_core::*;
 use stumble_mcp::{McpToolCall, McpToolRouter};
 use tower::ServiceExt;
 
-struct TestDataDir(std::path::PathBuf);
-
-impl TestDataDir {
-    fn new() -> Self {
-        let path =
-            std::env::temp_dir().join(format!("stumble-legacy-contracts-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TestDataDir {
-    fn drop(&mut self) {
-        // Best-effort test cleanup; a failure must not hide the assertion result.
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 #[tokio::test]
 async fn first_release_catalogs_do_not_advertise_retired_or_placeholder_operations() {
     let tools = AgentTools::new(seed_store());
@@ -71,7 +53,7 @@ async fn first_release_catalogs_do_not_advertise_retired_or_placeholder_operatio
         assert!(!McpToolRouter::tool_names().contains(&retired));
     }
 
-    let cli_help = Command::new(env!("CARGO_BIN_EXE_podctl"))
+    let cli_help = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .arg("--help")
         .output()
         .unwrap();
@@ -80,13 +62,13 @@ async fn first_release_catalogs_do_not_advertise_retired_or_placeholder_operatio
     for retired in ["crawl", "add-source", "submit ", "brief", "skill-pack"] {
         assert!(!cli_help.contains(retired), "{retired} was advertised");
     }
-    assert!(cli_help.contains("submit-candidate"));
-    assert!(cli_help.contains("get-pod-package"));
+    for family in ["node", "pod", "discover", "feed", "sync"] {
+        assert!(cli_help.contains(&format!("  {family}")));
+    }
 }
 
 #[tokio::test]
-async fn retired_crawler_contract_returns_the_same_versioned_error_across_transports() {
-    let data_dir = TestDataDir::new();
+async fn retired_crawler_contract_remains_versioned_only_on_compatible_transports() {
     let tools = AgentTools::new(seed_store());
     let ctx = tools.default_auth_context().unwrap();
     let mcp = McpToolRouter::new(tools.clone(), ctx);
@@ -112,20 +94,16 @@ async fn retired_crawler_contract_returns_the_same_versioned_error_across_transp
         .unwrap();
     let http_error: Value = serde_json::from_slice(&body).unwrap();
 
-    let cli = Command::new(env!("CARGO_BIN_EXE_podctl"))
-        .args([
-            "--data-dir",
-            data_dir.0.to_str().unwrap(),
-            "crawl",
-            "beautiful-interfaces",
-        ])
+    let cli = Command::new(env!("CARGO_BIN_EXE_stumble"))
+        .args(["crawl", "beautiful-interfaces"])
         .output()
         .unwrap();
     assert!(!cli.status.success());
     let cli_error: Value = serde_json::from_slice(&cli.stderr).unwrap();
 
     assert_eq!(http_error, mcp_error);
-    assert_eq!(cli_error, mcp_error);
+    assert_eq!(cli_error["version"], 1);
+    assert_eq!(cli_error["error"]["code"], "usage_error");
     assert_eq!(http_error["code"], "legacy_contract_retired");
     assert_eq!(http_error["protocol_version"], CURRENT_PROTOCOL_VERSION);
     assert_eq!(
@@ -136,7 +114,6 @@ async fn retired_crawler_contract_returns_the_same_versioned_error_across_transp
 
 #[tokio::test]
 async fn retired_submission_and_feedback_errors_are_transport_equivalent() {
-    let data_dir = TestDataDir::new();
     let tools = AgentTools::new(seed_store());
     let ctx = tools.default_auth_context().unwrap();
     let mcp = McpToolRouter::new(tools.clone(), ctx);
@@ -164,21 +141,14 @@ async fn retired_submission_and_feedback_errors_are_transport_equivalent() {
             .unwrap(),
     )
     .unwrap();
-    let cli_submission = Command::new(env!("CARGO_BIN_EXE_podctl"))
-        .args([
-            "--data-dir",
-            data_dir.0.to_str().unwrap(),
-            "submit",
-            "--pod",
-            "example",
-            "--url",
-            "https://example.com",
-        ])
+    let cli_submission = Command::new(env!("CARGO_BIN_EXE_stumble"))
+        .args(["submit", "--pod", "example", "--url", "https://example.com"])
         .output()
         .unwrap();
     let cli_submission: Value = serde_json::from_slice(&cli_submission.stderr).unwrap();
     assert_eq!(http_submission, mcp_submission);
-    assert_eq!(cli_submission, mcp_submission);
+    assert_eq!(cli_submission["version"], 1);
+    assert_eq!(cli_submission["error"]["code"], "usage_error");
 
     let mcp_feedback: Value = serde_json::from_str(
         &mcp.call(McpToolCall {
@@ -203,18 +173,14 @@ async fn retired_submission_and_feedback_errors_are_transport_equivalent() {
             .unwrap(),
     )
     .unwrap();
-    let cli_feedback = Command::new(env!("CARGO_BIN_EXE_podctl"))
-        .args([
-            "--data-dir",
-            data_dir.0.to_str().unwrap(),
-            "block-source",
-            "example.com",
-        ])
+    let cli_feedback = Command::new(env!("CARGO_BIN_EXE_stumble"))
+        .args(["block-source", "example.com"])
         .output()
         .unwrap();
     let cli_feedback: Value = serde_json::from_slice(&cli_feedback.stderr).unwrap();
     assert_eq!(http_feedback, mcp_feedback);
-    assert_eq!(cli_feedback, mcp_feedback);
+    assert_eq!(cli_feedback["version"], 1);
+    assert_eq!(cli_feedback["error"]["code"], "usage_error");
 }
 
 #[test]

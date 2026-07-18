@@ -1492,6 +1492,7 @@ fn fail(error: ErrorBody, category: ExitStatusCategory) -> ExitCode {
 fn cli() -> Command {
     Command::new("stumble")
         .about("Operate a local Stumble Home Node")
+        .disable_help_subcommand(true)
         .arg(
             Arg::new("format")
                 .long("format")

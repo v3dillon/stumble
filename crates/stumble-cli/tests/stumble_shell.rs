@@ -34,10 +34,6 @@ fn stumble() -> Command {
     command
 }
 
-fn podctl() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_podctl"))
-}
-
 fn json(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).expect("output should be one JSON document")
 }
@@ -48,12 +44,17 @@ fn exposes_only_the_five_workflow_families() {
 
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).expect("help should be UTF-8");
-    for family in ["node", "pod", "discover", "feed", "sync"] {
-        assert!(
-            help.contains(&format!("  {family}")),
-            "missing {family}: {help}"
-        );
-    }
+    let commands = help
+        .split("Commands:\n")
+        .nth(1)
+        .expect("help should contain a Commands section")
+        .split("\n\nOptions:")
+        .next()
+        .unwrap()
+        .lines()
+        .map(|line| line.split_whitespace().next().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(commands, ["node", "pod", "discover", "feed", "sync"]);
     for retired in [
         "serve",
         "mcp",
@@ -64,6 +65,43 @@ fn exposes_only_the_five_workflow_families() {
         assert!(
             !help.contains(&format!("  {retired}")),
             "retired command {retired} leaked: {help}"
+        );
+    }
+}
+
+#[test]
+fn removed_public_operations_are_ordinary_usage_errors() {
+    for arguments in [
+        &["serve"][..],
+        &["mcp"][..],
+        &["--api", "http://127.0.0.1:8787"][..],
+        &["create-tenant", "example", "example"][..],
+        &["create-dev-token", "owner"][..],
+        &["propose-change", "--input", "-"][..],
+        &["materialize-discovery-tasks"][..],
+        &["list-ready-discovery-tasks"][..],
+        &["export-events", "example"][..],
+        &["import-events", "events.jsonl"][..],
+        &["verify-events", "example"][..],
+        &["submit", "--pod", "example", "--url", "https://example.com"][..],
+        &["crawl", "example"][..],
+        &["discover", "example"][..],
+        &["stumble"][..],
+        &["brief"][..],
+        &["block-source", "example.com"][..],
+    ] {
+        let output = stumble()
+            .args(arguments)
+            .output()
+            .expect("run removed operation");
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        assert!(output.stdout.is_empty(), "{arguments:?}");
+        let error = json(&output.stderr);
+        assert_eq!(error["version"], 1, "{arguments:?}");
+        assert_eq!(error["error"]["code"], "usage_error", "{arguments:?}");
+        assert_ne!(
+            error["error"]["code"], "legacy_contract_retired",
+            "{arguments:?}"
         );
     }
 }
@@ -232,12 +270,10 @@ fn text_format_renders_the_same_result_data() {
 }
 
 #[test]
-fn legacy_executable_remains_the_unchanged_expand_phase_bridge() {
-    let output = podctl().arg("--help").output().expect("run podctl help");
+fn old_executable_is_absent_from_the_package_surface() {
+    let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = std::fs::read_to_string(package.join("Cargo.toml")).unwrap();
 
-    assert!(output.status.success());
-    let help = String::from_utf8(output.stdout).expect("help should be UTF-8");
-    assert!(help.starts_with("Stumble local/admin CLI"));
-    assert!(help.contains("  init-node"));
-    assert!(help.contains("  create-pod"));
+    assert!(!manifest.contains("name = \"podctl\""));
+    assert!(!package.join("src/main.rs").exists());
 }

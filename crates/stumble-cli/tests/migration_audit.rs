@@ -32,10 +32,7 @@ fn is_intentional_history_or_contraction_surface(path: &str) -> bool {
         || path.starts_with("docs/adr/")
         || matches!(
             path,
-            "crates/stumble-cli/Cargo.toml"
-                | "crates/stumble-cli/src/main.rs"
-                | "crates/stumble-cli/tests/legacy_contracts.rs"
-                | "crates/stumble-cli/tests/migration_audit.rs"
+            "crates/stumble-cli/tests/migration_audit.rs"
                 | "crates/stumble-cli/tests/stumble_shell.rs"
         )
 }
