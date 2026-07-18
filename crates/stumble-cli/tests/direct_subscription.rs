@@ -171,7 +171,7 @@ async fn private_home_node_subscribes_outbound_through_the_direct_pod_url() {
     );
     home.record_feed_feedback(
         &subscriber,
-        feed.items[0].content_reference.content_item_id.into(),
+        feed.items[0].content_reference.content_item_id,
         FeedbackKind::Interesting,
         None,
         Some("private-home-feedback".into()),

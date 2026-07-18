@@ -4147,7 +4147,9 @@ impl AgentTools {
             });
         }
         self.reverse_pod_placement(ctx, candidate_id, pod_id, reason, now)
-            .map(|placement| RemoveContentItemOutcome::Removed { placement })
+            .map(|placement| RemoveContentItemOutcome::Removed {
+                placement: Box::new(placement),
+            })
     }
 
     /// Lists canonical Content Items with an Accepted Placement in one Pod.
@@ -4843,7 +4845,9 @@ impl AgentTools {
                 now,
                 now + Duration::hours(24),
             )?;
-            return Ok(PodPackageRevisionOutcome::PendingApproval(proposal));
+            return Ok(PodPackageRevisionOutcome::PendingApproval(Box::new(
+                proposal,
+            )));
         }
 
         let mut store = self
@@ -4894,7 +4898,7 @@ impl AgentTools {
             Some(pod.id),
         );
         self.persist_locked(&mut store)?;
-        Ok(PodPackageRevisionOutcome::Revised(package))
+        Ok(PodPackageRevisionOutcome::Revised(Box::new(package)))
     }
 
     pub fn pod_agent_context(
@@ -9197,10 +9201,11 @@ fn feed_attention_value(
     let feedback =
         if state.saved { 2.0 } else { 0.0 } + if state.more_like_this { 1.0 } else { 0.0 };
     let quality = u16::try_from(placement_count).map_or(f32::from(u16::MAX), f32::from) * 0.25;
-    let learned = scoped_pod_ids
-        .is_none()
-        .then(|| learned_taste_weights(store, user_id, item.tenant_id))
-        .unwrap_or_default();
+    let learned = if scoped_pod_ids.is_none() {
+        learned_taste_weights(store, user_id, item.tenant_id)
+    } else {
+        Vec::new()
+    };
     let mut learned_value = 0.0;
     let mut learned_reasons = Vec::new();
     for weight in learned.iter().filter(|weight| weight.weight != 0.0) {

@@ -553,21 +553,16 @@ pub enum TrustPolicyChange {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiscoveryMode {
+    #[default]
     DeepMatch,
     Adjacent,
     OldGem,
     HumanPick,
     RabbitHole,
     Stumble,
-}
-
-impl Default for DiscoveryMode {
-    fn default() -> Self {
-        Self::DeepMatch
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1635,7 +1630,7 @@ pub enum RemoveSubmissionOutcome {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum RemoveContentItemOutcome {
     /// A private placement was reversed immediately while retaining the Content Item.
-    Removed { placement: PodPlacement },
+    Removed { placement: Box<PodPlacement> },
     /// A public placement awaits independent approval and a Placement Tombstone.
     PendingApproval { proposal: Box<PendingProposal> },
 }
@@ -1979,9 +1974,9 @@ pub type PodPackage = PodSkillPack;
 #[serde(tag = "status", content = "result", rename_all = "snake_case")]
 pub enum PodPackageRevisionOutcome {
     /// A non-public origin package was revised immediately.
-    Revised(PodPackage),
+    Revised(Box<PodPackage>),
     /// A public origin package is unchanged until this proposal is approved.
-    PendingApproval(PendingProposal),
+    PendingApproval(Box<PendingProposal>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

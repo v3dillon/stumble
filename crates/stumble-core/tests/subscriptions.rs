@@ -482,7 +482,7 @@ fn later_accepted_placement_syncs_from_cursor_without_exporting_home_feedback() 
     );
     home.record_feed_feedback(
         &user,
-        item.content_reference.content_item_id.into(),
+        item.content_reference.content_item_id,
         FeedbackKind::Interesting,
         None,
         Some("locally useful".into()),

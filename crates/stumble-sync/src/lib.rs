@@ -569,6 +569,22 @@ fn discovery_tags(pod: &Pod) -> Vec<String> {
     tags
 }
 
+pub fn export_events_jsonl(events: &[EventLog]) -> anyhow::Result<String> {
+    Ok(events
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n"))
+}
+
+pub fn import_events_jsonl(text: &str) -> anyhow::Result<Vec<EventLog>> {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,20 +680,4 @@ mod tests {
 
         assert!(matches!(result, Err(PeerSyncError::NodeIdentityMismatch)));
     }
-}
-
-pub fn export_events_jsonl(events: &[EventLog]) -> anyhow::Result<String> {
-    Ok(events
-        .iter()
-        .map(serde_json::to_string)
-        .collect::<Result<Vec<_>, _>>()?
-        .join("\n"))
-}
-
-pub fn import_events_jsonl(text: &str) -> anyhow::Result<Vec<EventLog>> {
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(serde_json::from_str)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(Into::into)
 }
