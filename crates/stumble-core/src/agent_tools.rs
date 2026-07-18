@@ -956,6 +956,7 @@ impl AgentTools {
             last_event_hash: request.snapshot.manifest.latest_known_event_hash,
             created_at: now,
             synchronized_at: now,
+            last_sync_failure: None,
         };
         projected
             .subscriptions
@@ -1029,6 +1030,7 @@ impl AgentTools {
             .ok_or_else(|| StoreError::NotFound(format!("Subscription {subscription_id}")))?;
         subscription.last_event_hash = snapshot.manifest.latest_known_event_hash;
         subscription.synchronized_at = synchronized_at;
+        subscription.last_sync_failure = None;
         let subscription = subscription.clone();
         record_harness_write_at(
             &mut projected,
@@ -1074,6 +1076,86 @@ impl AgentTools {
             HarnessCapability::SubscriptionManagement,
             Some(subscription.local_pod_id),
         )?;
+        Ok(subscription)
+    }
+
+    /// Resolves the authenticated User's Subscription for one local Pod projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Pod is not subscribed by this User or authorization is denied.
+    pub fn subscription_for_pod(
+        &self,
+        ctx: &AuthContext,
+        pod_id: PodId,
+    ) -> Result<Subscription, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let subscription = store
+            .subscriptions
+            .values()
+            .find(|subscription| {
+                subscription.local_pod_id == pod_id
+                    && Some(subscription.user_id) == ctx.user_id
+                    && subscription.tenant_id == ctx.tenant_id
+            })
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(format!("Subscription for Pod {pod_id}")))?;
+        authorize_harness(
+            &store,
+            ctx,
+            HarnessCapability::SubscriptionManagement,
+            Some(pod_id),
+        )?;
+        Ok(subscription)
+    }
+
+    /// Records an operator-visible failure without changing synchronized Pod state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Subscription is inaccessible or persistence fails.
+    pub fn record_subscription_sync_failure(
+        &self,
+        ctx: &AuthContext,
+        subscription_id: SubscriptionId,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        retryable: bool,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Subscription, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let existing = store
+            .subscriptions
+            .get(&subscription_id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(format!("Subscription {subscription_id}")))?;
+        authorize_harness(
+            &store,
+            ctx,
+            HarnessCapability::SubscriptionManagement,
+            Some(existing.local_pod_id),
+        )?;
+        if ctx.user_id != Some(existing.user_id) || ctx.tenant_id != existing.tenant_id {
+            return Err(StoreError::NotFound(format!("Subscription {subscription_id}")).into());
+        }
+        let subscription = store
+            .subscriptions
+            .get_mut(&subscription_id)
+            .expect("checked above");
+        subscription.last_sync_failure = Some(SynchronizationFailure {
+            code: code.into(),
+            message: message.into(),
+            retryable,
+            occurred_at: now,
+        });
+        let subscription = subscription.clone();
+        self.persist_locked(&mut store)?;
         Ok(subscription)
     }
 
@@ -1803,6 +1885,7 @@ impl AgentTools {
                 )
             }
             SensitiveChange::AddTrustedPeer {
+                node_id,
                 display_name,
                 base_url,
                 public_key,
@@ -1817,11 +1900,11 @@ impl AgentTools {
                     )
                     .into());
                 }
-                if store
-                    .trusted_peers
-                    .values()
-                    .any(|peer| peer.tenant_id == ctx.tenant_id && peer.base_url == *base_url)
-                {
+                if store.trusted_peers.values().any(|peer| {
+                    peer.tenant_id == ctx.tenant_id
+                        && (peer.base_url == *base_url
+                            || (!node_id.is_nil() && peer.node_id == *node_id))
+                }) {
                     return Err(StoreError::Duplicate(format!("trusted peer {base_url}")).into());
                 }
                 let resource = ProposalResource::TrustedPeerUrl(base_url.clone());
@@ -1832,6 +1915,7 @@ impl AgentTools {
                         resource,
                         before: serde_json::Value::Null,
                         after: json!({
+                            "node_id": node_id,
                             "display_name": display_name,
                             "base_url": base_url,
                             "public_key": public_key,
@@ -5608,9 +5692,47 @@ impl AgentTools {
             ctx,
             CreatePendingProposalRequest {
                 requested_change: SensitiveChange::AddTrustedPeer {
+                    node_id: Uuid::nil(),
                     display_name,
                     base_url,
                     public_key,
+                },
+                expires_in_seconds: DEFAULT_PENDING_PROPOSAL_SECONDS,
+            },
+            now,
+        )
+    }
+
+    /// Requests approval to trust one canonical remote Node identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when proposal authorization, identity validation, or persistence fails.
+    pub fn request_add_trusted_node(
+        &self,
+        ctx: &AuthContext,
+        node: NodeInfo,
+        base_url: String,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PendingProposal, AgentToolsError> {
+        if node.node_id.is_nil() {
+            return Err(StoreError::Validation("canonical Node ID must not be nil".into()).into());
+        }
+        if node.supported_protocol_version != CURRENT_PROTOCOL_VERSION {
+            return Err(StoreError::Validation(format!(
+                "unsupported Node protocol {}",
+                node.supported_protocol_version
+            ))
+            .into());
+        }
+        self.create_pending_proposal_from_request(
+            ctx,
+            CreatePendingProposalRequest {
+                requested_change: SensitiveChange::AddTrustedPeer {
+                    node_id: node.node_id,
+                    display_name: node.display_name,
+                    base_url,
+                    public_key: node.public_key,
                 },
                 expires_in_seconds: DEFAULT_PENDING_PROPOSAL_SECONDS,
             },
@@ -10007,19 +10129,21 @@ fn apply_sensitive_change(
             target.grant.pod_ids = pod_ids.clone().map(normalize_pod_ids);
         }
         SensitiveChange::AddTrustedPeer {
+            node_id,
             display_name,
             base_url,
             public_key,
         } => {
-            if store
-                .trusted_peers
-                .values()
-                .any(|peer| peer.tenant_id == ctx.tenant_id && peer.base_url == *base_url)
-            {
+            if store.trusted_peers.values().any(|peer| {
+                peer.tenant_id == ctx.tenant_id
+                    && (peer.base_url == *base_url
+                        || (!node_id.is_nil() && peer.node_id == *node_id))
+            }) {
                 return Err(StoreError::Duplicate(format!("trusted peer {base_url}")).into());
             }
             let peer = TrustedPeer {
                 id: Uuid::now_v7(),
+                node_id: *node_id,
                 tenant_id: ctx.tenant_id,
                 display_name: display_name.clone(),
                 base_url: base_url.clone(),

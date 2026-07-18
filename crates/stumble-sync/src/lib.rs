@@ -66,12 +66,21 @@ pub enum PeerSyncError {
     /// The peer presented a key different from the trusted record.
     #[error("remote public key does not match the trusted peer")]
     PublicKeyMismatch,
+    /// The peer presented a canonical Node ID different from the trusted record.
+    #[error("remote Node identity does not match the trusted peer")]
+    NodeIdentityMismatch,
+    /// The selected peer is not the Origin Node pinned by the Subscription.
+    #[error("selected peer does not match the Subscription Origin Node")]
+    SubscriptionPeerMismatch,
     /// The blocking event-import task failed before returning a result.
     #[error("trusted peer import task failed")]
     ImportTask(#[source] tokio::task::JoinError),
     /// Core authorization, verification, projection, or persistence failed.
     #[error(transparent)]
     Core(#[from] AgentToolsError),
+    /// Direct-address synchronization failed after the selected peer was verified.
+    #[error(transparent)]
+    DirectSubscription(#[from] DirectSubscriptionError),
 }
 
 trait PeerSyncTransport {
@@ -287,6 +296,40 @@ pub async fn sync_pod_from_peer(
     sync_pod_from_peer_with_transport(tools, ctx, peer, pod_slug, &transport).await
 }
 
+/// Verifies a selected trusted peer and refreshes one Subscription from its Origin Node.
+///
+/// # Errors
+///
+/// Returns an error when the peer does not match the pinned Subscription identity,
+/// peer verification fails, or signed incremental synchronization fails.
+pub async fn synchronize_subscription_from_peer(
+    tools: &AgentTools,
+    ctx: &AuthContext,
+    peer: &TrustedPeer,
+    subscription_id: SubscriptionId,
+) -> Result<SynchronizationResult, PeerSyncError> {
+    let subscription = tools.subscription(ctx, subscription_id)?;
+    if subscription.origin_node_id != peer.node_id
+        || subscription.origin_public_key != peer.public_key
+    {
+        return Err(PeerSyncError::SubscriptionPeerMismatch);
+    }
+    let public_pod_url = format!(
+        "{}/federation/pods/{}",
+        peer.base_url.trim_end_matches('/'),
+        subscription.pod_slug
+    );
+    let client = origin_client(&public_pod_url)?;
+    let snapshot = fetch_pod_snapshot(
+        &client,
+        &public_pod_url,
+        subscription.last_event_hash.as_deref(),
+    )
+    .await?;
+    validate_peer_identity(peer, &snapshot.node)?;
+    Ok(tools.synchronize_subscription(ctx, subscription_id, snapshot)?)
+}
+
 async fn sync_pod_from_peer_with_transport(
     tools: &AgentTools,
     ctx: &AuthContext,
@@ -312,6 +355,9 @@ async fn sync_pod_from_peer_with_transport(
 
 fn validate_peer_identity(peer: &TrustedPeer, remote: &NodeInfo) -> Result<(), PeerSyncError> {
     validate_peer_protocol(&remote.supported_protocol_version)?;
+    if !peer.node_id.is_nil() && remote.node_id != peer.node_id {
+        return Err(PeerSyncError::NodeIdentityMismatch);
+    }
     if remote.public_key != peer.public_key {
         return Err(PeerSyncError::PublicKeyMismatch);
     }
@@ -544,6 +590,7 @@ mod tests {
     fn peer(public_key: &str) -> TrustedPeer {
         TrustedPeer {
             id: Uuid::now_v7(),
+            node_id: Uuid::now_v7(),
             tenant_id: None,
             display_name: "peer".into(),
             base_url: "https://peer.example".into(),
@@ -585,7 +632,7 @@ mod tests {
         let peer = peer("trusted-key");
         let transport = FakePeerTransport {
             node: NodeInfo {
-                node_id: Uuid::now_v7(),
+                node_id: peer.node_id,
                 display_name: "impostor".into(),
                 public_key: "different-key".into(),
                 supported_protocol_version: CURRENT_PROTOCOL_VERSION.into(),
@@ -596,6 +643,26 @@ mod tests {
             sync_pod_from_peer_with_transport(&tools, &ctx, &peer, "example-pod", &transport).await;
 
         assert!(matches!(result, Err(PeerSyncError::PublicKeyMismatch)));
+    }
+
+    #[tokio::test]
+    async fn peer_node_identity_mismatch_stops_before_event_fetch() {
+        let tools = AgentTools::new(seed_store());
+        let ctx = tools.default_auth_context().unwrap();
+        let peer = peer("trusted-key");
+        let transport = FakePeerTransport {
+            node: NodeInfo {
+                node_id: Uuid::now_v7(),
+                display_name: "different node".into(),
+                public_key: "trusted-key".into(),
+                supported_protocol_version: CURRENT_PROTOCOL_VERSION.into(),
+            },
+        };
+
+        let result =
+            sync_pod_from_peer_with_transport(&tools, &ctx, &peer, "example-pod", &transport).await;
+
+        assert!(matches!(result, Err(PeerSyncError::NodeIdentityMismatch)));
     }
 }
 

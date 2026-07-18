@@ -20,6 +20,17 @@ complete update before projection. Retrying an already applied signed segment
 is an idempotent no-op. Package versions must be positive, monotonic, and
 immutable; the complete segment is preflighted and projected atomically.
 
+The Node Agent uses that high-level Origin workflow for normal automatic
+Subscription refreshes. Operators may recover one stalled Subscription with
+`stumble sync pod run <pod> --peer <peer-id>`. The selected peer must match the
+Subscription's pinned canonical Origin Node ID and public key before any event
+fetch is applied. `stumble sync pod status <pod>` exposes the stored cursor,
+verification result, latest event, last success, and the latest persisted
+failure with a retry action. Peer additions and removals are Trust Policy
+changes and therefore remain Pending Proposals until independently approved.
+The CLI deliberately has no signed-event file export, import, or verification
+commands.
+
 Only signed Pod metadata, signed Pod Package versions, and Accepted Placements
 with their reference-first Content Items are projected. Candidate state and
 unaccepted legacy submissions are not Feed-eligible. The synchronized SQLite

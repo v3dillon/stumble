@@ -75,6 +75,7 @@ pub fn seed_store() -> InMemoryStore {
         peer_one_id,
         TrustedPeer {
             id: peer_one_id,
+            node_id: peer_one.id,
             tenant_id: None,
             display_name: "Trusted Design Lab".to_string(),
             base_url: "https://design-lab.example".to_string(),
@@ -89,6 +90,7 @@ pub fn seed_store() -> InMemoryStore {
         peer_two_id,
         TrustedPeer {
             id: peer_two_id,
+            node_id: peer_two.id,
             tenant_id: Some(hosted_tenant.id),
             display_name: "Hosted Relay Example".to_string(),
             base_url: "https://relay.example".to_string(),
@@ -520,6 +522,7 @@ mod tests {
             peer_id,
             TrustedPeer {
                 id: peer_id,
+                node_id: peer_node.id,
                 tenant_id: None,
                 display_name: "peer".to_string(),
                 base_url: "https://peer.example".to_string(),

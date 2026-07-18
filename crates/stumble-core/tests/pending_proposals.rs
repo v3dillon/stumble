@@ -363,6 +363,7 @@ fn authority_trust_and_public_package_changes_apply_only_after_approval() {
         (
             &admin_proposer,
             SensitiveChange::AddTrustedPeer {
+                node_id: Uuid::now_v7(),
                 display_name: "Origin".into(),
                 base_url: "https://origin.example".into(),
                 public_key: "public-key".into(),
@@ -517,4 +518,20 @@ fn public_content_removal_requires_approval_and_foreign_tenant_cannot_decide() {
         .unwrap()
         .iter()
         .any(|event| event.event_type == "link_removed"));
+}
+
+#[test]
+fn legacy_add_peer_proposals_default_the_missing_canonical_node_id() {
+    let change: SensitiveChange = serde_json::from_value(serde_json::json!({
+        "kind": "add_trusted_peer",
+        "display_name": "Legacy peer",
+        "base_url": "https://peer.example",
+        "public_key": "legacy-key"
+    }))
+    .unwrap();
+
+    assert!(matches!(
+        change,
+        SensitiveChange::AddTrustedPeer { node_id, .. } if node_id.is_nil()
+    ));
 }

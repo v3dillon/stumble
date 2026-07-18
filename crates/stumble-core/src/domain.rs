@@ -1474,6 +1474,8 @@ pub enum SensitiveChange {
     },
     /// Add a node to the local Trust Policy.
     AddTrustedPeer {
+        #[serde(default)]
+        node_id: NodeIdentityId,
         display_name: String,
         base_url: String,
         public_key: String,
@@ -1889,6 +1891,9 @@ pub struct NodeIdentity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustedPeer {
     pub id: PeerId,
+    /// Canonical identity advertised and signed by the remote Node.
+    #[serde(default)]
+    pub node_id: NodeIdentityId,
     pub tenant_id: Option<TenantId>,
     pub display_name: String,
     pub base_url: String,
@@ -3283,6 +3288,9 @@ pub struct Subscription {
     pub created_at: DateTime<Utc>,
     /// Time of the latest successful synchronization attempt.
     pub synchronized_at: DateTime<Utc>,
+    /// Most recent failed refresh, cleared by the next successful synchronization.
+    #[serde(default)]
+    pub last_sync_failure: Option<SynchronizationFailure>,
 }
 
 impl Subscription {
@@ -3308,8 +3316,23 @@ impl Subscription {
             last_event_hash: None,
             created_at,
             synchronized_at: created_at,
+            last_sync_failure: None,
         }
     }
+}
+
+/// Persisted operator-facing failure from the latest Subscription refresh attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SynchronizationFailure {
+    /// Stable failure category suitable for recovery routing.
+    pub code: String,
+    /// Human-readable diagnostic without secret material.
+    pub message: String,
+    /// Whether retrying the high-level synchronization workflow may recover.
+    pub retryable: bool,
+    /// Time the failed attempt completed.
+    pub occurred_at: DateTime<Utc>,
 }
 
 /// Request to enable or disable one User's Priority Subscription.

@@ -104,11 +104,19 @@ Drip remains conversational Agent Harness language rather than a command. Source
 - `create-tenant <SLUG> <NAME>` — Creates a tenant. Flags: none.
 - `create-api-token` — Creates an API token. Flags: optional `--user`, optional `--tenant`, and optional `--label`.
 - `list-api-tokens` — Lists API tokens. Flags: none.
-- `add-peer` — Adds a trusted remote peer. Flags: `--display-name`, `--base-url`, and `--public-key`.
-- `list-peers` — Lists configured peers. Flags: none.
-- `sync-pod <POD> <PEER_ID>` — Synchronizes a subscribed Pod from a peer. Flags: none.
-- `export-events <POD>` — Prints a Pod's signed Pod Events. Flags: none.
-- `import-events <POD> <PEER_ID> <FILE>` — Imports signed Pod Events from a file. Flags: none.
-- `verify-events <POD>` — Verifies a Pod's signed event history. Flags: none.
+
+Trusted peers are local Trust Policy entries. `stumble sync peer add --node-id
+<NODE_ID> --display-name <NAME> --base-url <URL> --public-key <KEY>` and
+`sync peer remove <PEER_ID>` create Pending Proposals; approval is required
+before either trust change takes effect. `sync peer list [--limit N] [--cursor
+CURSOR]` returns only enabled peers and their canonical Node identities.
+
+Subscription synchronization normally runs through the Node Agent without a
+manual command. For diagnosis or recovery, `stumble sync pod run <POD>
+--peer <PEER_ID>` verifies the selected trusted peer against the Subscription's
+pinned Origin Node and applies the next signed event segment. `sync pod status
+<POD>` reports the cursor, verification state, latest event, last successful
+run, and the latest actionable failure. Signed-event file export, import, and
+verification are internal protocol tools and are not CLI commands.
 
 Run `podctl <command> --help` for accepted values and defaults.

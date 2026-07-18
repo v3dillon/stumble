@@ -17,11 +17,11 @@ use stumble_core::{
     CandidateConfidence, CandidateId, CandidateReviewState, CandidateSubmissionRequest,
     ContentItemId, CreatePodLifecycleRequest, CreatePodOutcome, CreatePodRequest, CurationPolicy,
     CurationRationale, DiscoveryLeaseSeconds, DiscoveryTask, DiscoveryTaskId, DiscoveryTaskState,
-    ExploreRequest, FeedBatch, FeedBatchRequest, FeedbackKind, HarnessCapability, PackageVersion,
-    PendingProposalId, PlacementReviewDecision, Pod, PodCreationPackage, PodPackageRevisionOutcome,
-    PodRole, RegisterAgentHarnessRequest, ResetLearnedTasteRequest, RouteCandidatePlacementRequest,
-    SensitiveChange, StoreError, TasteProfile, UpdateTasteProfileRequest, Visibility,
-    PORTABLE_PACKAGE_FILES,
+    ExploreRequest, FeedBatch, FeedBatchRequest, FeedbackKind, HarnessCapability, NodeInfo,
+    PackageVersion, PeerId, PendingProposalId, PlacementReviewDecision, Pod, PodCreationPackage,
+    PodPackageRevisionOutcome, PodRole, RegisterAgentHarnessRequest, ResetLearnedTasteRequest,
+    RouteCandidatePlacementRequest, SensitiveChange, StoreError, TasteProfile,
+    UpdateTasteProfileRequest, Visibility, CURRENT_PROTOCOL_VERSION, PORTABLE_PACKAGE_FILES,
 };
 
 fn main() -> ExitCode {
@@ -874,6 +874,142 @@ fn dispatch(
             )
             .map_err(internal_error);
         }
+        "sync peer list" => {
+            let peers = tools.trusted_peers(&actor).map_err(agent_tools_error)?;
+            return serde_json::to_value(page(peers, leaf)?).map_err(internal_error);
+        }
+        "sync peer add" => {
+            let node = NodeInfo {
+                node_id: required_id(leaf, "node-id")?,
+                display_name: required_string(leaf, "display-name")?.to_string(),
+                public_key: required_string(leaf, "public-key")?.to_string(),
+                supported_protocol_version: CURRENT_PROTOCOL_VERSION.to_string(),
+            };
+            let node_id = node.node_id;
+            let proposal = tools
+                .request_add_trusted_node(
+                    &actor,
+                    node,
+                    required_string(leaf, "base-url")?.to_string(),
+                    chrono::Utc::now(),
+                )
+                .map_err(agent_tools_error)?;
+            return Ok(json!({
+                "status": "pending_approval",
+                "node_id": node_id,
+                "proposal": proposal,
+            }));
+        }
+        "sync peer remove" => {
+            let peer_id = required_id::<PeerId>(leaf, "peer-id")?;
+            let peer = tools
+                .trusted_peer(&actor, peer_id)
+                .map_err(agent_tools_error)?;
+            let proposal = tools
+                .request_remove_trusted_peer(&actor, peer_id, chrono::Utc::now())
+                .map_err(agent_tools_error)?;
+            return Ok(json!({
+                "status": "pending_approval",
+                "peer_id": peer.id,
+                "node_id": peer.node_id,
+                "proposal": proposal,
+            }));
+        }
+        "sync pod run" => {
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let subscription = tools
+                .subscription_for_pod(&actor, pod.id)
+                .map_err(agent_tools_error)?;
+            let peer_id = required_id::<PeerId>(leaf, "peer")?;
+            let peer = tools
+                .trusted_peer(&actor, peer_id)
+                .map_err(agent_tools_error)?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(internal_error)?;
+            let result = match runtime.block_on(stumble_sync::synchronize_subscription_from_peer(
+                &tools,
+                &actor,
+                &peer,
+                subscription.id,
+            )) {
+                Ok(result) => result,
+                Err(error) => {
+                    let message = error.to_string();
+                    let retryable = peer_sync_failure_is_retryable(&error);
+                    let code = peer_sync_failure_code(&error);
+                    tools
+                        .record_subscription_sync_failure(
+                            &actor,
+                            subscription.id,
+                            code,
+                            message,
+                            retryable,
+                            chrono::Utc::now(),
+                        )
+                        .map_err(agent_tools_error)?;
+                    return Err(peer_sync_error(error));
+                }
+            };
+            return Ok(json!({
+                "pod_id": pod.id,
+                "slug": pod.slug,
+                "peer_id": peer.id,
+                "subscription_id": result.subscription.id,
+                "cursor": result.subscription.last_event_hash,
+                "verification": "verified",
+                "latest_event": result.subscription.last_event_hash,
+                "last_success": result.subscription.synchronized_at,
+                "failure": null,
+                "imported_events": result.imported_events,
+            }));
+        }
+        "sync pod status" => {
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let subscription = tools
+                .subscription_for_pod(&actor, pod.id)
+                .map_err(agent_tools_error)?;
+            let can_run = tools
+                .require_harness_capability(&actor, HarnessCapability::Administration)
+                .is_ok()
+                && tools.trusted_peers(&actor).is_ok_and(|peers| {
+                    peers.into_iter().any(|peer| {
+                        peer.node_id == subscription.origin_node_id
+                            && peer.public_key == subscription.origin_public_key
+                    })
+                });
+            let verification = if subscription
+                .last_sync_failure
+                .as_ref()
+                .is_some_and(|failure| !failure.retryable)
+            {
+                "failed"
+            } else {
+                "verified"
+            };
+            let failure = subscription.last_sync_failure.as_ref().map(|failure| {
+                json!({
+                    "code": failure.code,
+                    "message": failure.message,
+                    "retryable": failure.retryable,
+                    "occurred_at": failure.occurred_at,
+                    "action": if failure.retryable { "run" } else { "review_peer" },
+                })
+            });
+            return Ok(json!({
+                "pod_id": pod.id,
+                "slug": pod.slug,
+                "subscription_id": subscription.id,
+                "origin_node_id": subscription.origin_node_id,
+                "cursor": subscription.last_event_hash,
+                "verification": verification,
+                "latest_event": subscription.last_event_hash,
+                "last_success": subscription.synchronized_at,
+                "failure": failure,
+                "allowed_actions": if can_run { vec!["run"] } else { Vec::new() },
+            }));
+        }
         _ => {}
     }
     if let Some(input) = leaf.try_get_one::<PathBuf>("input").ok().flatten() {
@@ -1128,6 +1264,37 @@ fn direct_subscription_error(
         stumble_sync::DirectSubscriptionError::Core(error) => agent_tools_error(error),
         stumble_sync::DirectSubscriptionError::InvalidAddress(error) => agent_tools_error(error),
         error => internal_error(error),
+    }
+}
+
+fn peer_sync_error(error: stumble_sync::PeerSyncError) -> (ErrorBody, ExitStatusCategory) {
+    match error {
+        stumble_sync::PeerSyncError::Core(error) => agent_tools_error(error),
+        stumble_sync::PeerSyncError::DirectSubscription(error) => direct_subscription_error(error),
+        error => (
+            ErrorBody::new("synchronization_failed", error.to_string()),
+            ExitStatusCategory::ValidationOrConflict,
+        ),
+    }
+}
+
+fn peer_sync_failure_is_retryable(error: &stumble_sync::PeerSyncError) -> bool {
+    !matches!(
+        error,
+        stumble_sync::PeerSyncError::IncompatibleProtocol { .. }
+            | stumble_sync::PeerSyncError::PublicKeyMismatch
+            | stumble_sync::PeerSyncError::NodeIdentityMismatch
+            | stumble_sync::PeerSyncError::SubscriptionPeerMismatch
+    )
+}
+
+fn peer_sync_failure_code(error: &stumble_sync::PeerSyncError) -> &'static str {
+    match error {
+        stumble_sync::PeerSyncError::IncompatibleProtocol { .. } => "protocol_incompatible",
+        stumble_sync::PeerSyncError::PublicKeyMismatch => "public_key_mismatch",
+        stumble_sync::PeerSyncError::NodeIdentityMismatch => "node_identity_mismatch",
+        stumble_sync::PeerSyncError::SubscriptionPeerMismatch => "subscription_peer_mismatch",
+        _ => "synchronization_failed",
     }
 }
 
@@ -1722,21 +1889,29 @@ fn input_arg(required: bool) -> Arg {
 fn sync() -> Command {
     Command::new("sync")
         .subcommand_required(true)
-        .subcommand(resource("peer", &["list", "add", "remove"]))
-        .subcommand(resource("pod", &["run", "status"]))
-}
-
-fn resource(name: &'static str, operations: &[&'static str]) -> Command {
-    operations.iter().fold(
-        Command::new(name).subcommand_required(true),
-        |command, operation| {
-            command.subcommand(if *operation == "list" {
-                list_leaf(operation)
-            } else {
-                Command::new(operation)
-            })
-        },
-    )
+        .subcommand(
+            Command::new("peer")
+                .subcommand_required(true)
+                .subcommand(list_leaf("list"))
+                .subcommand(
+                    Command::new("add")
+                        .arg(Arg::new("node-id").long("node-id").required(true))
+                        .arg(Arg::new("display-name").long("display-name").required(true))
+                        .arg(Arg::new("base-url").long("base-url").required(true))
+                        .arg(Arg::new("public-key").long("public-key").required(true)),
+                )
+                .subcommand(Command::new("remove").arg(Arg::new("peer-id").required(true))),
+        )
+        .subcommand(
+            Command::new("pod")
+                .subcommand_required(true)
+                .subcommand(
+                    Command::new("run")
+                        .arg(Arg::new("pod").required(true))
+                        .arg(Arg::new("peer").long("peer").required(true)),
+                )
+                .subcommand(Command::new("status").arg(Arg::new("pod").required(true))),
+        )
 }
 
 fn list_leaf(name: &'static str) -> Command {
