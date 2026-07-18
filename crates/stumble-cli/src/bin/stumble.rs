@@ -11,11 +11,12 @@ use stumble_cli::{
     ExitStatusCategory, OwnerCredentialStore, ResourceDetail, SuccessEnvelope,
 };
 use stumble_core::{
-    new_plaintext_api_token, pod_package_contents_from_files, seed_store, AgentHarnessId,
-    AgentHarnessKind, AgentTools, AgentToolsError, AuthContext, CreatePodLifecycleRequest,
-    CreatePodOutcome, CreatePodRequest, ExploreRequest, HarnessCapability, PendingProposalId, Pod,
-    PodCreationPackage, PodRole, RegisterAgentHarnessRequest, StoreError, Visibility,
-    PORTABLE_PACKAGE_FILES,
+    new_plaintext_api_token, pod_package_contents_from_files, seed_store,
+    AddContentItemToPodRequest, AgentHarnessId, AgentHarnessKind, AgentTools, AgentToolsError,
+    AuthContext, CandidateConfidence, ContentItemId, CreatePodLifecycleRequest, CreatePodOutcome,
+    CreatePodRequest, CurationPolicy, CurationRationale, ExploreRequest, HarnessCapability,
+    PendingProposalId, Pod, PodCreationPackage, PodRole, RegisterAgentHarnessRequest,
+    SensitiveChange, StoreError, Visibility, PORTABLE_PACKAGE_FILES,
 };
 
 fn main() -> ExitCode {
@@ -267,6 +268,141 @@ fn dispatch(
             }
             .map_err(agent_tools_error)?;
             return Ok(json!({ "pod_id": pod.id, "slug": pod.slug, "proposal": proposal }));
+        }
+        "pod content list" => {
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let items = tools
+                .pod_content_stream(&actor, pod.id)
+                .map_err(agent_tools_error)?;
+            let page = page(items, leaf)?;
+            return Ok(json!({
+                "pod_id": pod.id,
+                "slug": pod.slug,
+                "items": page.items,
+                "next_cursor": page.next_cursor,
+            }));
+        }
+        "pod content show" => {
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let content_item_id = required_id::<ContentItemId>(leaf, "content-item-id")?;
+            let item = tools
+                .pod_content_stream(&actor, pod.id)
+                .map_err(agent_tools_error)?
+                .into_iter()
+                .find(|item| item.content_item.id() == content_item_id)
+                .ok_or_else(|| {
+                    (
+                        ErrorBody::new("not_found", "Accepted Pod Content Item was not found"),
+                        ExitStatusCategory::ValidationOrConflict,
+                    )
+                })?;
+            let allowed_actions = match tools.pod_curation_policy(&actor, pod.id) {
+                Ok(_) => vec!["remove"],
+                Err(AgentToolsError::Forbidden { .. }) => Vec::new(),
+                Err(error) => return Err(agent_tools_error(error)),
+            };
+            return Ok(json!({
+                "pod_id": pod.id,
+                "slug": pod.slug,
+                "content_item": item.content_item,
+                "accepted_placement": item.accepted_placement,
+                "allowed_actions": allowed_actions,
+            }));
+        }
+        "pod content add" => {
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let content_item_id = required_id::<ContentItemId>(leaf, "content-item-id")?;
+            let request = AddContentItemToPodRequest::new(
+                content_item_id,
+                pod.id,
+                leaf.get_one::<String>("note").cloned(),
+            )
+            .map_err(|error| agent_tools_error(StoreError::Validation(error.to_string()).into()))?;
+            let placement = tools
+                .add_content_item_to_pod(&actor, request, chrono::Utc::now())
+                .map_err(agent_tools_error)?;
+            return Ok(json!({
+                "pod_id": pod.id,
+                "slug": pod.slug,
+                "placement": placement,
+            }));
+        }
+        "pod content remove" => {
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let content_item_id = required_id::<ContentItemId>(leaf, "content-item-id")?;
+            let reason =
+                CurationRationale::new(required_string(leaf, "reason")?).map_err(|error| {
+                    agent_tools_error(StoreError::Validation(error.to_string()).into())
+                })?;
+            let outcome = tools
+                .request_remove_content_item_from_pod(
+                    &actor,
+                    pod.id,
+                    content_item_id,
+                    reason,
+                    chrono::Utc::now(),
+                )
+                .map_err(agent_tools_error)?;
+            let mut result = serde_json::to_value(outcome).map_err(internal_error)?;
+            result["pod_id"] = json!(pod.id);
+            result["slug"] = json!(pod.slug);
+            return Ok(result);
+        }
+        "pod policy show" => {
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let policy = tools
+                .pod_curation_policy(&actor, pod.id)
+                .map_err(agent_tools_error)?;
+            return Ok(
+                json!({ "pod_id": pod.id, "slug": pod.slug, "policy": policy, "allowed_actions": ["set"] }),
+            );
+        }
+        "pod policy set" => {
+            let pod = resolve_pod(&tools, &actor, required_string(leaf, "pod")?)?;
+            let mode = required_string(leaf, "mode")?;
+            let threshold = || -> Result<CandidateConfidence, (ErrorBody, ExitStatusCategory)> {
+                let value = *leaf
+                    .get_one::<f32>("confidence-threshold")
+                    .expect("required by clap for threshold policies");
+                CandidateConfidence::new(value).map_err(|error| {
+                    agent_tools_error(StoreError::Validation(error.to_string()).into())
+                })
+            };
+            if mode == "autonomous" {
+                let proposal = tools
+                    .create_pending_proposal(
+                        &actor,
+                        SensitiveChange::EnableAutonomousCuration {
+                            pod_id: pod.id,
+                            confidence_threshold: threshold()?,
+                        },
+                        chrono::Utc::now(),
+                        chrono::Utc::now() + chrono::Duration::hours(24),
+                    )
+                    .map_err(agent_tools_error)?;
+                return Ok(json!({
+                    "pod_id": pod.id,
+                    "slug": pod.slug,
+                    "status": "pending_approval",
+                    "proposal": proposal,
+                }));
+            }
+            let policy = if mode == "manual" {
+                CurationPolicy::Manual
+            } else {
+                CurationPolicy::Assisted {
+                    confidence_threshold: threshold()?,
+                }
+            };
+            let policy = tools
+                .set_pod_curation_policy(&actor, pod.id, policy, chrono::Utc::now())
+                .map_err(agent_tools_error)?;
+            return Ok(json!({
+                "pod_id": pod.id,
+                "slug": pod.slug,
+                "status": "updated",
+                "policy": policy,
+            }));
         }
         "node harness list" => {
             let items = tools
@@ -799,8 +935,8 @@ fn pod() -> Command {
                 .subcommand(role_change("grant"))
                 .subcommand(role_change("revoke")),
         )
-        .subcommand(resource("content", &["list", "show", "add", "remove"]))
-        .subcommand(resource("policy", &["show", "set"]))
+        .subcommand(content())
+        .subcommand(policy())
         .subcommand(resource(
             "package",
             &["show", "export", "validate", "revise"],
@@ -836,6 +972,44 @@ fn role_change(name: &'static str) -> Command {
                 },
             ),
         ))
+}
+
+fn content() -> Command {
+    Command::new("content")
+        .subcommand_required(true)
+        .subcommand(list_leaf("list").arg(Arg::new("pod").required(true)))
+        .subcommand(content_item_command("show"))
+        .subcommand(content_item_command("add").arg(Arg::new("note").long("note")))
+        .subcommand(
+            content_item_command("remove").arg(Arg::new("reason").long("reason").required(true)),
+        )
+}
+
+fn content_item_command(name: &'static str) -> Command {
+    Command::new(name)
+        .arg(Arg::new("pod").required(true))
+        .arg(Arg::new("content-item-id").required(true))
+}
+
+fn policy() -> Command {
+    Command::new("policy")
+        .subcommand_required(true)
+        .subcommand(Command::new("show").arg(Arg::new("pod").required(true)))
+        .subcommand(
+            Command::new("set")
+                .arg(Arg::new("pod").required(true))
+                .arg(Arg::new("mode").long("mode").required(true).value_parser([
+                    "manual",
+                    "assisted",
+                    "autonomous",
+                ]))
+                .arg(
+                    Arg::new("confidence-threshold")
+                        .long("confidence-threshold")
+                        .value_parser(clap::value_parser!(f32))
+                        .required_if_eq_any([("mode", "assisted"), ("mode", "autonomous")]),
+                ),
+        )
 }
 
 fn discover() -> Command {

@@ -1628,6 +1628,16 @@ pub enum RemoveSubmissionOutcome {
     PendingApproval(Box<PendingProposal>),
 }
 
+/// Outcome of removing one canonical Content Item placement from a Pod.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RemoveContentItemOutcome {
+    /// A private placement was reversed immediately while retaining the Content Item.
+    Removed { placement: PodPlacement },
+    /// A public placement awaits independent approval and a Placement Tombstone.
+    PendingApproval { proposal: Box<PendingProposal> },
+}
+
 /// Transport-neutral request to create a Pending Proposal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2316,6 +2326,15 @@ pub struct AcceptedPlacementProjection {
     pub accepted_at: DateTime<Utc>,
 }
 
+/// One entry in a Pod's complete accepted stream, independent of Feed selection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PodContentItem {
+    /// Canonical item shared across every independent Pod Placement.
+    pub content_item: ContentItem,
+    /// Synchronization-safe evidence for this Pod's Accepted Placement.
+    pub accepted_placement: AcceptedPlacementProjection,
+}
+
 /// Signed withdrawal of one Origin Pod's previously accepted placement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -2504,12 +2523,28 @@ pub enum CandidateContentType {
 }
 
 /// Harness confidence retained as bounded evidence, never authority.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CandidateConfidence(f32);
 
 // Construction and deserialization reject NaN, making equality reflexive.
 impl Eq for CandidateConfidence {}
+
+impl Serialize for CandidateConfidence {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Canonicalize through the shortest decimal that round-trips to this f32.
+        // This keeps nested proposal JSON stable across SQLite reloads while
+        // retaining a numeric wire value and the exact domain value.
+        let canonical = self
+            .0
+            .to_string()
+            .parse::<f64>()
+            .expect("a finite f32 always has a valid decimal representation");
+        serializer.serialize_f64(canonical)
+    }
+}
 
 impl CandidateConfidence {
     /// Creates finite confidence evidence in the inclusive range `0.0..=1.0`.

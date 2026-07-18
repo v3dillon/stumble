@@ -3533,6 +3533,24 @@ impl AgentTools {
         Ok(policy)
     }
 
+    /// Returns the Pod-owned Curation Policy, including its configured threshold.
+    pub fn pod_curation_policy(
+        &self,
+        ctx: &AuthContext,
+        pod_id: PodId,
+    ) -> Result<CurationPolicy, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_local_pod_curation(&store, ctx, pod_id)?;
+        Ok(store
+            .pod_curation_policies
+            .get(&pod_id)
+            .copied()
+            .unwrap_or_default())
+    }
+
     /// Evaluates every proposed Pod Placement for a private Candidate independently.
     ///
     /// # Errors
@@ -4032,6 +4050,62 @@ impl AgentTools {
         Ok(placement)
     }
 
+    /// Removes one accepted Content Item placement using the Pod's visibility policy.
+    ///
+    /// Private and invite-only placements reverse immediately without deleting the
+    /// Content Item. Public placements become Pending Proposals and emit their
+    /// Placement Tombstone only when independently approved.
+    pub fn request_remove_content_item_from_pod(
+        &self,
+        ctx: &AuthContext,
+        pod_id: PodId,
+        content_item_id: ContentItemId,
+        reason: CurationRationale,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<RemoveContentItemOutcome, AgentToolsError> {
+        let (pod, candidate_id) = {
+            let store = self
+                .store
+                .read()
+                .map_err(|_| AgentToolsError::LockPoisoned)?;
+            authorize_local_pod_curation(&store, ctx, pod_id)?;
+            let pod = store
+                .pods
+                .get(&pod_id)
+                .cloned()
+                .ok_or_else(|| StoreError::NotFound(format!("Pod {pod_id}")))?;
+            let candidate_id = store
+                .pod_placements
+                .values()
+                .find(|placement| {
+                    placement.pod_id == pod_id
+                        && placement.content_item_id == Some(content_item_id)
+                        && placement.status == PodPlacementStatus::Accepted
+                })
+                .map(|placement| placement.candidate_id)
+                .ok_or_else(|| StoreError::NotFound("Accepted Placement".into()))?;
+            (pod, candidate_id)
+        };
+        if pod.visibility == Visibility::Public {
+            let proposal = self.create_pending_proposal_from_request(
+                ctx,
+                CreatePendingProposalRequest {
+                    requested_change: SensitiveChange::RemovePublicSubmissionFromPod {
+                        pod_id,
+                        submission_id: content_item_id.into(),
+                    },
+                    expires_in_seconds: DEFAULT_PENDING_PROPOSAL_SECONDS,
+                },
+                now,
+            )?;
+            return Ok(RemoveContentItemOutcome::PendingApproval {
+                proposal: Box::new(proposal),
+            });
+        }
+        self.reverse_pod_placement(ctx, candidate_id, pod_id, reason, now)
+            .map(|placement| RemoveContentItemOutcome::Removed { placement })
+    }
+
     /// Lists canonical Content Items with an Accepted Placement in one Pod.
     ///
     /// # Errors
@@ -4063,6 +4137,49 @@ impl AgentTools {
             })
             .collect::<Vec<_>>();
         items.sort_by_key(ContentItem::id);
+        Ok(items)
+    }
+
+    /// Lists a Pod's complete accepted stream independently of Feed selection.
+    ///
+    /// This includes local and synchronized Accepted Placements visible through
+    /// the caller's Feed-read grant and never applies ranking or delivery state.
+    pub fn pod_content_stream(
+        &self,
+        ctx: &AuthContext,
+        pod_id: PodId,
+    ) -> Result<Vec<PodContentItem>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store
+            .pods
+            .get(&pod_id)
+            .ok_or_else(|| StoreError::NotFound(format!("Pod {pod_id}")))?;
+        store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+        authorize_harness(&store, ctx, HarnessCapability::FeedRead, Some(pod_id))?;
+        let mut items = store
+            .accepted_placement_projections
+            .values()
+            .filter(|placement| placement.pod_id == pod_id)
+            .map(|accepted_placement| {
+                let submission = store
+                    .submissions
+                    .get(&Uuid::from(accepted_placement.content_item_id))
+                    .ok_or_else(|| StoreError::NotFound("Content Item".into()))?;
+                Ok(PodContentItem {
+                    content_item: ContentItem::from(submission),
+                    accepted_placement: accepted_placement.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        items.sort_by_key(|item| {
+            (
+                item.accepted_placement.accepted_at,
+                item.accepted_placement.content_item_id,
+            )
+        });
         Ok(items)
     }
 

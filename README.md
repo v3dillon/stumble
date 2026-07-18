@@ -70,6 +70,8 @@ Subscription and Pod authority are separate workflows. Use an exact local slug o
 
 Create Pods with `stumble pod create --name <name> --slug <slug> --visibility <private|invite-only|public>`. Add either `--package <directory>` for a complete initial Pod Package or `--from-pod <slug-or-id>` to derive one with source-package provenance; the two options are mutually exclusive. Public creation and visibility expansion return Pending Proposals, while visibility restrictions apply directly. `stumble pod explore --query <subject>` returns Trust Policy-filtered public Pods and bounded sample Content Items without creating a Subscription.
 
+Read a Pod's complete accepted stream with `stumble pod content list <slug-or-id>` and inspect its Content Item and Accepted Placement evidence with `pod content show <pod> <content-item-id>`. Authorized curators can use `pod content add <pod> <content-item-id> [--note ...]` or `pod content remove <pod> <content-item-id> --reason ...`; private removal is immediate, while public removal returns a Pending Proposal and publishes a Placement Tombstone only after approval. `pod policy show <pod>` reports Manual, Assisted, or Autonomous Curation. `pod policy set <pod> --mode <manual|assisted|autonomous>` applies Manual and Assisted directly, requires `--confidence-threshold` for Assisted and Autonomous, and routes Autonomous enablement through approval.
+
 ### Discovery tasks
 
 - `materialize-discovery-tasks` — Creates due Discovery Tasks from Pod schedules. Flags: none.
