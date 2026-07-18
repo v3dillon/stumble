@@ -13,8 +13,20 @@ A subscribable, decentralized collection of thematically related content with it
 _Avoid_: Bucket, channel, community
 
 **Subscription**:
-The relationship through which a User makes a Pod's accepted content eligible for their Feed.
+The relationship through which a User makes a Pod's accepted content eligible for their Feed; it grants no authority to curate or administer that Pod.
 _Avoid_: Membership, follow
+
+**Pod Role**:
+An authority assignment connecting a User to a Pod as either its Owner or a Curator, independent of any Subscription.
+_Avoid_: Membership, admin role
+
+**Pod Owner**:
+A User with authority to govern a Pod and delegate its Pod Roles.
+_Avoid_: Pod admin, member
+
+**Pod Curator**:
+A User authorized to curate a Pod's content and package within the capabilities granted to the acting Agent Harness.
+_Avoid_: Pod member, moderator
 
 **User**:
 A person whose private preferences, Subscriptions, and feedback shape their Feed.
@@ -27,6 +39,10 @@ _Avoid_: Engagement profile, recommendation identity
 **Home Node**:
 The User-controlled Stumble node that synchronizes subscribed Pod content and assembles the User's Feed locally.
 _Avoid_: Client, central server
+
+**Home Node Owner Credential**:
+The keychain-backed local credential created when a Home Node is initialized, automatically authorizing its User to manage that node and its Agent Harnesses.
+_Avoid_: Root token, admin API key
 
 **Origin Node**:
 The Stumble node that publishes the authoritative public version of a Pod and its content.
@@ -73,7 +89,7 @@ The configurable composition constraints that balance highest-value subscribed c
 _Avoid_: Global sort, content quota
 
 **Drip**:
-A friendly Agent Harness command for retrieving the current or next Feed Batch from Stumble.
+A friendly conversational intent through which a User asks an Agent Harness to retrieve the current or next Feed Batch from Stumble; it is not a transport-level operation name.
 _Avoid_: Dopamine score, infinite feed
 
 **Caught Up**:
@@ -216,7 +232,7 @@ A validated proposed change to a Pod Package that becomes signed and authoritati
 _Avoid_: File edit, prompt update
 
 **Pending Proposal**:
-An expiring structured request for a sensitive change that cannot take effect until a separately authorized interactive Agent Harness confirms it for the User.
+An expiring structured request for a sensitive change that cannot take effect until the Home Node Owner or a separately authorized interactive Agent Harness confirms it for the User.
 _Avoid_: Confirmation prompt, queued action
 
 **Feedback Signal**:
