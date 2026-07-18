@@ -17,9 +17,10 @@ use stumble_core::{
     CandidateConfidence, CandidateId, CandidateReviewState, CandidateSubmissionRequest,
     ContentItemId, CreatePodLifecycleRequest, CreatePodOutcome, CreatePodRequest, CurationPolicy,
     CurationRationale, DiscoveryLeaseSeconds, DiscoveryTask, DiscoveryTaskId, DiscoveryTaskState,
-    ExploreRequest, HarnessCapability, PackageVersion, PendingProposalId, PlacementReviewDecision,
-    Pod, PodCreationPackage, PodPackageRevisionOutcome, PodRole, RegisterAgentHarnessRequest,
-    RouteCandidatePlacementRequest, SensitiveChange, StoreError, Visibility,
+    ExploreRequest, FeedBatch, FeedBatchRequest, FeedbackKind, HarnessCapability, PackageVersion,
+    PendingProposalId, PlacementReviewDecision, Pod, PodCreationPackage, PodPackageRevisionOutcome,
+    PodRole, RegisterAgentHarnessRequest, ResetLearnedTasteRequest, RouteCandidatePlacementRequest,
+    SensitiveChange, StoreError, TasteProfile, UpdateTasteProfileRequest, Visibility,
     PORTABLE_PACKAGE_FILES,
 };
 
@@ -683,6 +684,83 @@ fn dispatch(
                 .map_err(agent_tools_error)?;
             return Ok(json!({ "pod_id": pod.id, "slug": pod.slug, "placement": placement }));
         }
+        "feed batch get" => {
+            let request = if let Some(input) = leaf.get_one::<PathBuf>("input") {
+                let value = read_json_input(input)
+                    .map_err(|error| (error, ExitStatusCategory::ValidationOrConflict))?;
+                serde_json::from_value::<FeedBatchRequest>(value).map_err(json_input_error)?
+            } else {
+                FeedBatchRequest::new(7).expect("the default Feed Batch size is valid")
+            };
+            let batch = tools
+                .get_feed_batch(&actor, request, chrono::Utc::now())
+                .map_err(agent_tools_error)?;
+            return feed_batch_result(&tools, &actor, batch);
+        }
+        "feed batch complete" => {
+            let id = required_id::<uuid::Uuid>(leaf, "id")?;
+            let batch = tools
+                .complete_feed_batch(&actor, id, chrono::Utc::now())
+                .map_err(agent_tools_error)?;
+            return feed_batch_result(&tools, &actor, batch);
+        }
+        "feed feedback record" => {
+            let content_item_id = required_id::<ContentItemId>(leaf, "content-item-id")?;
+            let kind = *leaf
+                .get_one::<FeedbackKind>("kind")
+                .expect("required by clap");
+            let feedback_state = tools
+                .record_feed_feedback(
+                    &actor,
+                    content_item_id,
+                    kind,
+                    leaf.get_one::<String>("topic").cloned(),
+                    leaf.get_one::<String>("reason").cloned(),
+                    chrono::Utc::now(),
+                )
+                .map_err(agent_tools_error)?;
+            return Ok(json!({
+                "content_item_id": content_item_id,
+                "feedback_state": feedback_state,
+                "allowed_actions": [
+                    "save",
+                    "more_like_this",
+                    "less_like_this",
+                    "dismiss",
+                    "block_source",
+                    "block_topic",
+                ],
+            }));
+        }
+        "feed taste show" => {
+            let profile = tools.taste_profile(&actor).map_err(agent_tools_error)?;
+            return taste_profile_result(profile);
+        }
+        "feed taste set" => {
+            let input = leaf.get_one::<PathBuf>("input").expect("required by clap");
+            let value = read_json_input(input)
+                .map_err(|error| (error, ExitStatusCategory::ValidationOrConflict))?;
+            let request = serde_json::from_value::<UpdateTasteProfileRequest>(value)
+                .map_err(json_input_error)?;
+            let profile = tools
+                .update_taste_profile(&actor, request)
+                .map_err(agent_tools_error)?;
+            return taste_profile_result(profile);
+        }
+        "feed taste reset" => {
+            let request = if let Some(input) = leaf.get_one::<PathBuf>("input") {
+                let value = read_json_input(input)
+                    .map_err(|error| (error, ExitStatusCategory::ValidationOrConflict))?;
+                serde_json::from_value::<ResetLearnedTasteRequest>(value)
+                    .map_err(json_input_error)?
+            } else {
+                ResetLearnedTasteRequest::all()
+            };
+            let profile = tools
+                .reset_learned_taste(&actor, request)
+                .map_err(agent_tools_error)?;
+            return taste_profile_result(profile);
+        }
         "node harness list" => {
             let items = tools
                 .list_agent_harnesses(&actor)
@@ -995,6 +1073,40 @@ fn pod_placement_results(
         .collect()
 }
 
+fn feed_batch_result(
+    tools: &AgentTools,
+    actor: &AuthContext,
+    batch: FeedBatch,
+) -> Result<Value, (ErrorBody, ExitStatusCategory)> {
+    let can_complete = batch.completed_at.is_none();
+    let mut value = serde_json::to_value(batch).map_err(internal_error)?;
+    if let Some(items) = value["items"].as_array_mut() {
+        for item in items {
+            if let Some(placements) = item["placements"].as_array_mut() {
+                for placement in placements {
+                    let pod_id = placement["pod_id"]
+                        .as_str()
+                        .ok_or_else(|| internal_error("Feed placement did not contain a Pod ID"))?;
+                    let pod = resolve_pod(tools, actor, pod_id)?;
+                    placement["slug"] = json!(pod.slug);
+                }
+            }
+        }
+    }
+    value["allowed_actions"] = if can_complete {
+        json!(["complete"])
+    } else {
+        json!([])
+    };
+    Ok(value)
+}
+
+fn taste_profile_result(profile: TasteProfile) -> Result<Value, (ErrorBody, ExitStatusCategory)> {
+    let mut value = serde_json::to_value(profile).map_err(internal_error)?;
+    value["allowed_actions"] = json!(["set", "reset"]);
+    Ok(value)
+}
+
 fn discovery_lease(
     matches: &ArgMatches,
 ) -> Result<DiscoveryLeaseSeconds, (ErrorBody, ExitStatusCategory)> {
@@ -1074,6 +1186,13 @@ fn internal_error(error: impl std::fmt::Display) -> (ErrorBody, ExitStatusCatego
     (
         ErrorBody::new("internal_error", error.to_string()),
         ExitStatusCategory::Internal,
+    )
+}
+
+fn json_input_error(error: serde_json::Error) -> (ErrorBody, ExitStatusCategory) {
+    (
+        ErrorBody::new("validation_error", error.to_string()),
+        ExitStatusCategory::ValidationOrConflict,
     )
 }
 
@@ -1561,9 +1680,43 @@ fn discovery_task() -> Command {
 fn feed() -> Command {
     Command::new("feed")
         .subcommand_required(true)
-        .subcommand(resource("batch", &["get", "complete"]))
-        .subcommand(resource("feedback", &["record"]))
-        .subcommand(resource("taste", &["show", "set", "reset"]))
+        .subcommand(
+            Command::new("batch")
+                .subcommand_required(true)
+                .subcommand(Command::new("get").arg(input_arg(false)))
+                .subcommand(Command::new("complete").arg(Arg::new("id").required(true))),
+        )
+        .subcommand(
+            Command::new("feedback")
+                .subcommand_required(true)
+                .subcommand(
+                    Command::new("record")
+                        .arg(Arg::new("content-item-id").required(true))
+                        .arg(
+                            Arg::new("kind")
+                                .long("kind")
+                                .required(true)
+                                .value_parser(clap::value_parser!(FeedbackKind)),
+                        )
+                        .arg(Arg::new("topic").long("topic"))
+                        .arg(Arg::new("reason").long("reason")),
+                ),
+        )
+        .subcommand(
+            Command::new("taste")
+                .subcommand_required(true)
+                .subcommand(Command::new("show"))
+                .subcommand(Command::new("set").arg(input_arg(true)))
+                .subcommand(Command::new("reset").arg(input_arg(false))),
+        )
+}
+
+fn input_arg(required: bool) -> Arg {
+    Arg::new("input")
+        .long("input")
+        .required(required)
+        .value_parser(clap::value_parser!(PathBuf))
+        .value_hint(ValueHint::FilePath)
 }
 
 fn sync() -> Command {

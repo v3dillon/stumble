@@ -91,6 +91,14 @@ a browser.
 - `stumble discover candidate list [--status <pending|accepted>]` returns the scoped, cursor-paginated Candidate collection. `candidate show <ID>` includes submissions, placement evidence and state, and allowed actions.
 - `stumble discover candidate evaluate <ID>` applies each target Pod's current Curation Policy independently. Curators can add an evidence-backed local proposal with `candidate route <ID> <POD> --reason <TEXT> --confidence <0..1>` and decide exactly one pending placement with `candidate review <ID> <POD> --decision <accept|reject> [--note <TEXT>]`.
 
+### Feed workflows
+
+- `stumble feed batch get [--input <FILE|->]` returns the current stable Feed Batch. Structured input can set `size`, `recurrence_penalty_days`, `feed_mix`, and temporary `batch_intent`; repeated reads return the same batch until `feed batch complete <ID>` explicitly reaches Caught Up.
+- `stumble feed feedback record <CONTENT_ITEM_ID> --kind <save|more-like-this|less-like-this|dismiss|block-source|block-topic>` records a private Feedback Signal for a Delivered Item. Topic blocks also require `--topic <ITEM_TOPIC>`; use `--reason` for optional context.
+- `stumble feed taste show` inspects explicit preferences and learned weights. `feed taste set --input <FILE|->` replaces supplied explicit fields, while `feed taste reset [--input <FILE|->]` clears all learned weights or the structured `signal` selection without changing explicit preferences.
+
+Drip remains conversational Agent Harness language rather than a command. Source and topic blocks are item-driven feedback; deliberate bulk blocks belong in `feed taste set` input.
+
 ### Administration and synchronization
 
 - `create-tenant <SLUG> <NAME>` — Creates a tenant. Flags: none.

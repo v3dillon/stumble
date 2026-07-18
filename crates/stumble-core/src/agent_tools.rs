@@ -463,12 +463,19 @@ impl AgentTools {
             );
         }
         let blocked_topic = if kind == FeedbackKind::BlockTopic {
+            let requested = topic
+                .filter(|topic| !topic.trim().is_empty())
+                .ok_or_else(|| {
+                    StoreError::Validation("topic block requires a non-empty target topic".into())
+                })?;
             Some(
-                topic
-                    .filter(|topic| !topic.trim().is_empty())
+                item.tags
+                    .iter()
+                    .find(|tag| tag.eq_ignore_ascii_case(requested.trim()))
+                    .cloned()
                     .ok_or_else(|| {
                         StoreError::Validation(
-                            "topic block requires a non-empty target topic".into(),
+                            "topic block target must be one of the Delivered Item's topics".into(),
                         )
                     })?,
             )
