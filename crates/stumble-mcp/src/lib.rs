@@ -69,6 +69,9 @@ impl McpToolRouter {
             "approve_pending_proposal",
             "reject_pending_proposal",
             "create_pod",
+            "route_candidate",
+            "review_candidate_placement",
+            "list_pod_content",
             "create_private_pod_with_package",
             "join_pod",
             "submit_candidate",
@@ -202,6 +205,35 @@ impl McpToolRouter {
                     request,
                     chrono::Utc::now(),
                 )?))
+            }
+            "route_candidate" => {
+                let request: RouteCandidateArguments = serde_json::from_value(call.arguments)?;
+                Ok(json!(self.tools.route_candidate_placement(
+                    &self.ctx,
+                    request.candidate_id,
+                    RouteCandidatePlacementRequest::new(
+                        request.pod_id,
+                        request.reason,
+                        request.confidence,
+                    )?,
+                    chrono::Utc::now(),
+                )?))
+            }
+            "review_candidate_placement" => {
+                let request: ReviewCandidatePlacementArguments =
+                    serde_json::from_value(call.arguments)?;
+                Ok(json!(self.tools.review_candidate_placement(
+                    &self.ctx,
+                    request.candidate_id,
+                    request.pod_id,
+                    request.decision,
+                    request.note,
+                    chrono::Utc::now(),
+                )?))
+            }
+            "list_pod_content" => {
+                let pod_id = arg_string(&call.arguments, "pod_id")?.parse()?;
+                Ok(json!(self.tools.pod_content_stream(&self.ctx, pod_id)?))
             }
             "create_private_pod_with_package" => {
                 let request: CreatePrivatePodWithPackageRequest =
@@ -413,6 +445,25 @@ impl McpToolRouter {
             stumble_sync::sync_pod_from_peer(&self.tools, &self.ctx, &peer, &pod_slug,).await?
         ))
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RouteCandidateArguments {
+    candidate_id: CandidateId,
+    pod_id: PodId,
+    reason: String,
+    confidence: CandidateConfidence,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewCandidatePlacementArguments {
+    candidate_id: CandidateId,
+    pod_id: PodId,
+    decision: PlacementReviewDecision,
+    #[serde(default)]
+    note: Option<CurationRationale>,
 }
 
 fn arg_string(args: &Value, key: &str) -> anyhow::Result<String> {

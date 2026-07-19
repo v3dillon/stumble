@@ -119,6 +119,77 @@ async fn tool_catalog_is_annotated_and_scoped_to_the_harness_grant() {
 }
 
 #[tokio::test]
+async fn origin_curation_tools_are_advertised_only_for_their_harness_capability() {
+    let tools = AgentTools::new(seed_store());
+    let owner = tools.default_auth_context().expect("owner context");
+    let grants = [
+        (
+            HarnessCapability::PodCuration,
+            vec![
+                "create_pod",
+                "route_candidate",
+                "review_candidate_placement",
+            ],
+        ),
+        (
+            HarnessCapability::Approval,
+            vec!["get_pending_proposal", "approve_pending_proposal"],
+        ),
+        (HarnessCapability::FeedRead, vec!["list_pod_content"]),
+    ];
+
+    for (capability, expected_names) in grants {
+        let token = tools
+            .register_agent_harness(
+                &owner,
+                RegisterAgentHarnessRequest {
+                    label: format!("{capability} catalog"),
+                    kind: AgentHarnessKind::Interactive,
+                    capabilities: vec![capability],
+                    pod_ids: None,
+                },
+            )
+            .expect("register scoped harness");
+        let response = streamable_http_router(tools.clone())
+            .oneshot(mcp_request(
+                token.token.expose(),
+                json!({"jsonrpc": "2.0", "id": 11, "method": "tools/list", "params": {}}),
+            ))
+            .await
+            .expect("tools/list response");
+        let response = response_json(response).await;
+        let names = response["result"]["tools"]
+            .as_array()
+            .expect("tool descriptor array")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>();
+
+        for expected_name in &expected_names {
+            assert!(
+                names.contains(expected_name),
+                "{capability} catalog should contain {expected_name}: {names:?}"
+            );
+        }
+        for forbidden_name in [
+            "create_pod",
+            "route_candidate",
+            "review_candidate_placement",
+            "get_pending_proposal",
+            "approve_pending_proposal",
+            "list_pod_content",
+        ] {
+            let belongs_to_capability = expected_names.contains(&forbidden_name);
+            assert_eq!(
+                names.contains(&forbidden_name),
+                belongs_to_capability,
+                "unexpected {forbidden_name} visibility for {capability}: {names:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn tool_calls_return_structured_content() {
     let tools = AgentTools::new(seed_store());
     let owner = tools.default_auth_context().expect("owner context");
@@ -432,6 +503,264 @@ async fn chatgpt_can_submit_a_provenance_bearing_link_to_an_authorized_pod() {
     );
 }
 
+#[tokio::test]
+async fn harnesses_can_curate_an_origin_pod_without_bypassing_scope_or_approval() {
+    let tools = AgentTools::new(seed_store());
+    let owner = tools.default_auth_context().expect("owner context");
+    let curator = tools
+        .register_agent_harness(
+            &owner,
+            RegisterAgentHarnessRequest {
+                label: "interactive Origin curator".into(),
+                kind: AgentHarnessKind::Interactive,
+                capabilities: vec![
+                    HarnessCapability::PodCuration,
+                    HarnessCapability::CandidateSubmission,
+                ],
+                pod_ids: None,
+            },
+        )
+        .expect("register curator");
+    let approver = tools
+        .register_agent_harness(
+            &owner,
+            RegisterAgentHarnessRequest {
+                label: "independent public exposure approver".into(),
+                kind: AgentHarnessKind::Interactive,
+                capabilities: vec![HarnessCapability::Approval],
+                pod_ids: None,
+            },
+        )
+        .expect("register independent approver");
+    let app = streamable_http_router(tools.clone());
+
+    let inbox = call_mcp_tool(
+        app.clone(),
+        curator.token.expose(),
+        20,
+        "create_pod",
+        json!({
+            "name": "Federation Inbox",
+            "slug": "federation-inbox",
+            "description": "Private discovery intake",
+            "visibility": "private"
+        }),
+    )
+    .await;
+    assert_eq!(
+        inbox["result"]["structuredContent"]["value"]["status"],
+        "created"
+    );
+    let inbox_id = inbox["result"]["structuredContent"]["value"]["result"]["id"]
+        .as_str()
+        .expect("private Inbox Pod id");
+
+    let proposed = call_mcp_tool(
+        app.clone(),
+        curator.token.expose(),
+        21,
+        "create_pod",
+        json!({
+            "name": "Federated Finds",
+            "slug": "federated-finds",
+            "description": "Accepted public discoveries",
+            "visibility": "public"
+        }),
+    )
+    .await;
+    assert_eq!(
+        proposed["result"]["structuredContent"]["value"]["status"],
+        "pending_approval"
+    );
+    let proposal_id = proposed["result"]["structuredContent"]["value"]["result"]["id"]
+        .as_str()
+        .expect("Pending Proposal id");
+
+    let self_approval = call_mcp_tool(
+        app.clone(),
+        curator.token.expose(),
+        22,
+        "approve_pending_proposal",
+        json!({"proposal_id": proposal_id}),
+    )
+    .await;
+    assert_eq!(self_approval["error"]["code"], -32602);
+
+    let inspected = call_mcp_tool(
+        app.clone(),
+        approver.token.expose(),
+        23,
+        "get_pending_proposal",
+        json!({"proposal_id": proposal_id}),
+    )
+    .await;
+    assert_eq!(
+        inspected["result"]["structuredContent"]["value"]["status"],
+        "pending"
+    );
+    let approved = call_mcp_tool(
+        app.clone(),
+        approver.token.expose(),
+        24,
+        "approve_pending_proposal",
+        json!({"proposal_id": proposal_id}),
+    )
+    .await;
+    assert_eq!(
+        approved["result"]["structuredContent"]["value"]["status"],
+        "accepted"
+    );
+
+    let listed = call_mcp_tool(
+        app.clone(),
+        curator.token.expose(),
+        25,
+        "list_pods",
+        json!({}),
+    )
+    .await;
+    let public_pod_id = listed["result"]["structuredContent"]["value"]
+        .as_array()
+        .expect("visible Pods")
+        .iter()
+        .find(|pod| pod["slug"] == "federated-finds")
+        .and_then(|pod| pod["id"].as_str())
+        .expect("approved public Pod id");
+
+    let submitted = call_mcp_tool(
+        app.clone(),
+        curator.token.expose(),
+        26,
+        "submit_candidate",
+        json!({
+            "source_url": "https://example.com/origin-discovery?utm_source=harness",
+            "source_metadata": {"title": "Origin discovery"},
+            "summary": "One private Candidate routed through authorized curation.",
+            "content_type": "article",
+            "tags": ["federation"],
+            "provenance": {
+                "discovered_at": "2026-07-18T12:00:00Z",
+                "discovery_method": "interactive_browser"
+            },
+            "proposed_placements": [{
+                "pod_id": inbox_id,
+                "reason": "Initial private discovery intake.",
+                "confidence": 0.9
+            }],
+            "harness_idempotency_key": "origin-curation-1",
+            "client_idempotency_key": "origin-message-1"
+        }),
+    )
+    .await;
+    let candidate_id = submitted["result"]["structuredContent"]["value"]["candidate"]["id"]
+        .as_str()
+        .expect("Candidate id");
+
+    let scoped_curator = tools
+        .register_agent_harness(
+            &owner,
+            RegisterAgentHarnessRequest {
+                label: "Inbox-only curator".into(),
+                kind: AgentHarnessKind::Interactive,
+                capabilities: vec![HarnessCapability::PodCuration],
+                pod_ids: Some(vec![inbox_id.parse().expect("Inbox Pod id")]),
+            },
+        )
+        .expect("register scoped curator");
+    let denied_route = call_mcp_tool(
+        app.clone(),
+        scoped_curator.token.expose(),
+        27,
+        "route_candidate",
+        json!({
+            "candidate_id": candidate_id,
+            "pod_id": public_pod_id,
+            "reason": "This Harness lacks scope for the public Pod.",
+            "confidence": 0.95
+        }),
+    )
+    .await;
+    assert_eq!(denied_route["result"]["isError"], true);
+
+    let routed = call_mcp_tool(
+        app.clone(),
+        curator.token.expose(),
+        28,
+        "route_candidate",
+        json!({
+            "candidate_id": candidate_id,
+            "pod_id": public_pod_id,
+            "reason": "The discovery matches the public Pod's scope.",
+            "confidence": 0.95
+        }),
+    )
+    .await;
+    assert_eq!(
+        routed["result"]["structuredContent"]["value"]["status"],
+        "pending"
+    );
+    let denied_review = call_mcp_tool(
+        app.clone(),
+        scoped_curator.token.expose(),
+        29,
+        "review_candidate_placement",
+        json!({
+            "candidate_id": candidate_id,
+            "pod_id": public_pod_id,
+            "decision": "accept"
+        }),
+    )
+    .await;
+    assert_eq!(denied_review["result"]["isError"], true);
+    let reviewed = call_mcp_tool(
+        app.clone(),
+        curator.token.expose(),
+        30,
+        "review_candidate_placement",
+        json!({
+            "candidate_id": candidate_id,
+            "pod_id": public_pod_id,
+            "decision": "accept",
+            "note": "Reviewed through the interactive curation workflow."
+        }),
+    )
+    .await;
+    assert_eq!(
+        reviewed["result"]["structuredContent"]["value"]["status"],
+        "accepted"
+    );
+
+    let reader = tools
+        .register_agent_harness(
+            &owner,
+            RegisterAgentHarnessRequest {
+                label: "accepted content reader".into(),
+                kind: AgentHarnessKind::Interactive,
+                capabilities: vec![HarnessCapability::FeedRead],
+                pod_ids: Some(vec![public_pod_id.parse().expect("public Pod id")]),
+            },
+        )
+        .expect("register scoped reader");
+    let content = call_mcp_tool(
+        app,
+        reader.token.expose(),
+        31,
+        "list_pod_content",
+        json!({"pod_id": public_pod_id}),
+    )
+    .await;
+    let items = content["result"]["structuredContent"]["value"]
+        .as_array()
+        .expect("accepted Pod content");
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        items[0]["content_item"]["canonical_url"],
+        "https://example.com/origin-discovery"
+    );
+    assert!(items[0].get("candidate").is_none());
+    assert!(items[0].get("submissions").is_none());
+}
+
 fn complete_package() -> PodPackageContents {
     PodPackageContents {
         context_md: "# Interesting systems\n\nReliable systems material.\n".into(),
@@ -460,4 +789,27 @@ async fn response_json(response: axum::response::Response) -> Value {
         .await
         .expect("read response body");
     serde_json::from_slice(&bytes).expect("JSON response")
+}
+
+async fn call_mcp_tool(
+    app: axum::Router,
+    token: &str,
+    id: u64,
+    name: &str,
+    arguments: Value,
+) -> Value {
+    let response = app
+        .oneshot(mcp_request(
+            token,
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments}
+            }),
+        ))
+        .await
+        .expect("MCP tool response");
+    assert_eq!(response.status(), StatusCode::OK);
+    response_json(response).await
 }

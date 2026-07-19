@@ -380,6 +380,93 @@ fn tool_descriptors(tools: &AgentTools, context: &AuthContext) -> Vec<Value> {
             None,
         ),
         descriptor(
+            "create_pod",
+            "Create Pod",
+            "Create an isolated Pod. Public exposure returns a Pending Proposal and does not take effect until independently approved.",
+            object_schema(
+                json!({
+                    "name": {"type": "string"},
+                    "slug": {"type": "string"},
+                    "description": {"type": "string"},
+                    "visibility": {"type": "string", "enum": ["private", "invite_only", "public"]}
+                }),
+                &["name", "slug", "description", "visibility"],
+            ),
+            false,
+            false,
+            Some(HarnessCapability::PodCuration),
+        ),
+        descriptor(
+            "get_pending_proposal",
+            "Inspect Pending Proposal",
+            "Inspect a sensitive change before making an independent approval decision.",
+            object_schema(
+                json!({"proposal_id": {"type": "string", "format": "uuid"}}),
+                &["proposal_id"],
+            ),
+            true,
+            false,
+            Some(HarnessCapability::Approval),
+        ),
+        descriptor(
+            "approve_pending_proposal",
+            "Approve Pending Proposal",
+            "Approve a sensitive change as a separately authorized interactive Harness.",
+            object_schema(
+                json!({"proposal_id": {"type": "string", "format": "uuid"}}),
+                &["proposal_id"],
+            ),
+            false,
+            false,
+            Some(HarnessCapability::Approval),
+        ),
+        descriptor(
+            "route_candidate",
+            "Route Candidate",
+            "Propose an evidence-backed Pod Placement for a private Candidate in an authorized local Pod.",
+            object_schema(
+                json!({
+                    "candidate_id": {"type": "string", "format": "uuid"},
+                    "pod_id": {"type": "string", "format": "uuid"},
+                    "reason": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+                }),
+                &["candidate_id", "pod_id", "reason", "confidence"],
+            ),
+            false,
+            false,
+            Some(HarnessCapability::PodCuration),
+        ),
+        descriptor(
+            "review_candidate_placement",
+            "Review Candidate Placement",
+            "Accept or reject one pending Pod Placement under existing curation authority.",
+            object_schema(
+                json!({
+                    "candidate_id": {"type": "string", "format": "uuid"},
+                    "pod_id": {"type": "string", "format": "uuid"},
+                    "decision": {"type": "string", "enum": ["accept", "reject"]},
+                    "note": {"type": "string"}
+                }),
+                &["candidate_id", "pod_id", "decision"],
+            ),
+            false,
+            false,
+            Some(HarnessCapability::PodCuration),
+        ),
+        descriptor(
+            "list_pod_content",
+            "List Pod Content",
+            "List the complete accepted Content Item stream for one Pod without private Candidate data.",
+            object_schema(
+                json!({"pod_id": {"type": "string", "format": "uuid"}}),
+                &["pod_id"],
+            ),
+            true,
+            false,
+            Some(HarnessCapability::FeedRead),
+        ),
+        descriptor(
             "submit_candidate",
             "Save Discovered Link",
             "Submit one externally discovered link with source metadata, provenance, and proposed Pod placements. This creates a private Candidate, not an accepted placement.",
