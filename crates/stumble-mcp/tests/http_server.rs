@@ -133,7 +133,11 @@ async fn origin_curation_tools_are_advertised_only_for_their_harness_capability(
         ),
         (
             HarnessCapability::Approval,
-            vec!["get_pending_proposal", "approve_pending_proposal"],
+            vec![
+                "get_pending_proposal",
+                "approve_pending_proposal",
+                "reject_pending_proposal",
+            ],
         ),
         (HarnessCapability::FeedRead, vec!["list_pod_content"]),
     ];
@@ -177,6 +181,7 @@ async fn origin_curation_tools_are_advertised_only_for_their_harness_capability(
             "review_candidate_placement",
             "get_pending_proposal",
             "approve_pending_proposal",
+            "reject_pending_proposal",
             "list_pod_content",
         ] {
             let belongs_to_capability = expected_names.contains(&forbidden_name);
@@ -521,6 +526,17 @@ async fn harnesses_can_curate_an_origin_pod_without_bypassing_scope_or_approval(
             },
         )
         .expect("register curator");
+    let grant_admin = tools
+        .register_agent_harness(
+            &owner,
+            RegisterAgentHarnessRequest {
+                label: "interactive grant administrator".into(),
+                kind: AgentHarnessKind::Interactive,
+                capabilities: vec![HarnessCapability::Administration],
+                pod_ids: None,
+            },
+        )
+        .expect("register grant administrator");
     let approver = tools
         .register_agent_harness(
             &owner,
@@ -532,6 +548,31 @@ async fn harnesses_can_curate_an_origin_pod_without_bypassing_scope_or_approval(
             },
         )
         .expect("register independent approver");
+    let now = chrono::Utc::now();
+    let grant_admin_context = tools
+        .authenticate_token(grant_admin.token.expose())
+        .expect("authenticate grant administrator")
+        .expect("grant administrator context");
+    let approver_context = tools
+        .authenticate_token(approver.token.expose())
+        .expect("authenticate independent approver")
+        .expect("independent approver context");
+    let expansion = tools
+        .request_harness_grant_expansion(
+            &grant_admin_context,
+            curator.harness.id,
+            vec![
+                HarnessCapability::PodCuration,
+                HarnessCapability::CandidateSubmission,
+                HarnessCapability::Approval,
+            ],
+            None,
+            now,
+        )
+        .expect("request curator approval capability");
+    tools
+        .approve_pending_proposal(&approver_context, expansion.id, now)
+        .expect("independently approve curator grant expansion");
     let app = streamable_http_router(tools.clone());
 
     let inbox = call_mcp_tool(
@@ -584,7 +625,11 @@ async fn harnesses_can_curate_an_origin_pod_without_bypassing_scope_or_approval(
         json!({"proposal_id": proposal_id}),
     )
     .await;
-    assert_eq!(self_approval["error"]["code"], -32602);
+    assert_eq!(self_approval["result"]["isError"], true);
+    assert!(self_approval["result"]["content"][0]["text"]
+        .as_str()
+        .expect("core authorization error")
+        .contains("cannot approve its own Pending Proposal"));
 
     let inspected = call_mcp_tool(
         app.clone(),

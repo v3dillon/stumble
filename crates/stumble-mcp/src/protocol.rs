@@ -421,6 +421,21 @@ fn tool_descriptors(tools: &AgentTools, context: &AuthContext) -> Vec<Value> {
             Some(HarnessCapability::Approval),
         ),
         descriptor(
+            "reject_pending_proposal",
+            "Reject Pending Proposal",
+            "Reject a sensitive change as a separately authorized interactive Agent Harness.",
+            object_schema(
+                json!({
+                    "proposal_id": {"type": "string", "format": "uuid"},
+                    "reason": {"type": "string"}
+                }),
+                &["proposal_id", "reason"],
+            ),
+            false,
+            false,
+            Some(HarnessCapability::Approval),
+        ),
+        descriptor(
             "route_candidate",
             "Route Candidate",
             "Propose an evidence-backed Pod Placement for a private Candidate in an authorized local Pod.",
@@ -469,7 +484,7 @@ fn tool_descriptors(tools: &AgentTools, context: &AuthContext) -> Vec<Value> {
         descriptor(
             "submit_candidate",
             "Save Discovered Link",
-            "Submit one externally discovered link with source metadata, provenance, and proposed Pod placements. This creates a private Candidate, not an accepted placement.",
+            "Submit one externally discovered link with source metadata, provenance, and proposed Pod Placements. This creates a private Candidate, not an Accepted Placement.",
             candidate_schema(),
             false,
             false,

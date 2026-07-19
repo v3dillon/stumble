@@ -155,6 +155,90 @@ fn legacy_public_creation_contract_uses_the_canonical_pod_lifecycle() {
 }
 
 #[test]
+fn public_pod_proposer_cannot_self_approve_despite_having_approval_capability() {
+    let tools = AgentTools::new(seed_store());
+    let owner = tools.default_auth_context().unwrap();
+    let proposer = tools
+        .register_agent_harness(
+            &owner,
+            RegisterAgentHarnessRequest {
+                label: "public Pod proposer and potential approver".into(),
+                kind: AgentHarnessKind::Interactive,
+                capabilities: vec![HarnessCapability::PodCuration],
+                pod_ids: None,
+            },
+        )
+        .unwrap();
+    let admin = harness_context(
+        &tools,
+        &owner,
+        "grant expansion proposer",
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::Administration],
+    );
+    let independent_approver = harness_context(
+        &tools,
+        &owner,
+        "independent public Pod approver",
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::Approval],
+    );
+    let now = Utc::now();
+    let expansion = tools
+        .request_harness_grant_expansion(
+            &admin,
+            proposer.harness.id,
+            vec![HarnessCapability::PodCuration, HarnessCapability::Approval],
+            None,
+            now,
+        )
+        .unwrap();
+    tools
+        .approve_pending_proposal(&independent_approver, expansion.id, now)
+        .unwrap();
+    let proposer = tools
+        .authenticate_token(proposer.token.expose())
+        .unwrap()
+        .unwrap();
+
+    let CreatePodOutcome::PendingApproval(proposal) = tools
+        .request_create_pod(
+            &proposer,
+            CreatePodRequest {
+                name: "Independently approved public Pod".into(),
+                slug: "independently-approved-public-pod".into(),
+                description: "Public exposure requires a second Agent Harness".into(),
+                visibility: Visibility::Public,
+            },
+            now,
+        )
+        .unwrap()
+    else {
+        panic!("public Pod creation must remain pending approval");
+    };
+
+    assert!(matches!(
+        tools.approve_pending_proposal(&proposer, proposal.id, now),
+        Err(AgentToolsError::Forbidden { .. })
+    ));
+    assert!(tools
+        .pod_by_slug("independently-approved-public-pod", owner.tenant_id)
+        .is_err());
+
+    let approved = tools
+        .approve_pending_proposal(&independent_approver, proposal.id, now)
+        .unwrap();
+    assert_eq!(approved.status, ProposalStatus::Accepted);
+    assert_eq!(
+        tools
+            .pod_by_slug("independently-approved-public-pod", owner.tenant_id)
+            .unwrap()
+            .visibility,
+        Visibility::Public
+    );
+}
+
+#[test]
 fn legacy_public_creation_never_transfers_an_absent_proposers_ownership() {
     let mut store = seed_store();
     let owner_user_id = *store.users.keys().next().unwrap();
