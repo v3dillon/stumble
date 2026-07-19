@@ -85,6 +85,59 @@ browser `Origin` headers are rejected, and direct non-loopback binds are
 refused. Put TLS and standards-compliant OAuth in front of it before connecting
 a remote ChatGPT app.
 
+For a two-node federation workflow, keep two named adapter families,
+`stumble-origin` and `stumble-subscriber`, rather than sharing one adapter or
+credential across nodes. Because one stdio process has one fixed Harness token,
+configure a grant-specific instance for every independent authority used at the
+same node:
+
+```json
+{
+  "mcpServers": {
+    "stumble-origin-curator": {
+      "command": "/absolute/path/to/stumble-mcp",
+      "args": ["--data-dir", "/absolute/path/to/nodes/origin", "--transport", "stdio"],
+      "env": {"STUMBLE_MCP_TOKEN": "<origin-curation-token>"}
+    },
+    "stumble-origin-approver": {
+      "command": "/absolute/path/to/stumble-mcp",
+      "args": ["--data-dir", "/absolute/path/to/nodes/origin", "--transport", "stdio"],
+      "env": {"STUMBLE_MCP_TOKEN": "<independent-origin-approval-token>"}
+    },
+    "stumble-origin-discovery": {
+      "command": "/absolute/path/to/stumble-mcp",
+      "args": ["--data-dir", "/absolute/path/to/nodes/origin", "--transport", "stdio"],
+      "env": {"STUMBLE_MCP_TOKEN": "<origin-discovery-token>"}
+    },
+    "stumble-origin-reader": {
+      "command": "/absolute/path/to/stumble-mcp",
+      "args": ["--data-dir", "/absolute/path/to/nodes/origin", "--transport", "stdio"],
+      "env": {"STUMBLE_MCP_TOKEN": "<origin-feed-read-token>"}
+    },
+    "stumble-subscriber-manager": {
+      "command": "/absolute/path/to/stumble-mcp",
+      "args": ["--data-dir", "/absolute/path/to/nodes/home", "--transport", "stdio"],
+      "env": {"STUMBLE_MCP_TOKEN": "<subscriber-management-token>"}
+    },
+    "stumble-subscriber-reader": {
+      "command": "/absolute/path/to/stumble-mcp",
+      "args": ["--data-dir", "/absolute/path/to/nodes/home", "--transport", "stdio"],
+      "env": {"STUMBLE_MCP_TOKEN": "<subscriber-feed-read-token>"}
+    }
+  }
+}
+```
+
+Use an adapter in the `stumble-origin-*` family for public Pod proposals,
+Candidate submission, routing, Placement review, and Origin content reads. Send
+proposal inspection and approval only to `stumble-origin-approver`, backed by an
+independent Approval grant; give discovery workers only Candidate Submission
+and Discovery Tasks, and scope curators and readers to the public Pod. Use
+`stumble-subscriber-manager` for `subscribe_public_pod` and
+`synchronize_subscription`, and `stumble-subscriber-reader` for synchronized
+content reads. The subscriber calls the public Pod URL outbound; never copy an
+Origin token, Harness Grant, Candidate, or Discovery Task to the Home Node.
+
 ## Scheduling fallback
 
 If the Agent Harness has no scheduler, the local adapter materializes due tasks
@@ -152,6 +205,13 @@ stumble_sync::synchronize_subscription_from_origin(
     synchronized.subscription.id,
 ).await?;
 ```
+
+The equivalent MCP flow calls `subscribe_public_pod` with that canonical URL
+through `stumble-subscriber-manager`, then calls `synchronize_subscription`
+there with the returned Subscription identity for incremental refreshes.
+Continue to use `stumble-origin-curator` for later Candidate routing and
+acceptance. Addressing the adapters this way keeps node selection in operator
+configuration rather than in caller-supplied tool arguments.
 
 Only public Pod metadata, signed Package versions, Accepted Placements, and
 permitted Content References federate. Harness Grants and tokens, Candidates,
