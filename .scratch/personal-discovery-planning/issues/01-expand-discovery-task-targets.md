@@ -13,13 +13,15 @@ Expand the Discovery Task model so its governing target is explicit and can repr
 
 ## Acceptance criteria
 
-- [ ] Existing scheduled and immediate Pod Discovery Tasks use an explicit Pod target that retains Pod identity, Package version, Source Rule or conversational provenance, and lease history.
-- [ ] Persisted pre-feature Discovery Tasks migrate without losing identity, provenance, state, attempts, or idempotency.
-- [ ] Task materialization, listing, claim, renewal, completion, and failure expose the same behavior through supported adapters after the refactor.
-- [ ] The target model can represent Personal Discovery without requiring a synthetic Pod or nullable Pod invariants.
-- [ ] Existing Pod task authorization and Package pinning remain unchanged.
-- [ ] Restart and adapter parity tests pass without introducing Personal Discovery behavior prematurely.
+- [x] Existing scheduled and immediate Pod Discovery Tasks use an explicit Pod target that retains Pod identity, Package version, Source Rule or conversational provenance, and lease history.
+- [x] Persisted pre-feature Discovery Tasks migrate without losing identity, provenance, state, attempts, or idempotency.
+- [x] Task materialization, listing, claim, renewal, completion, and failure expose the same behavior through supported adapters after the refactor.
+- [x] The target model can represent Personal Discovery without requiring a synthetic Pod or nullable Pod invariants.
+- [x] Existing Pod task authorization and Package pinning remain unchanged.
+- [x] Restart and adapter parity tests pass without introducing Personal Discovery behavior prematurely.
 
 ## Comments
 
 Use an expand-first approach and keep the workspace green; contraction of obsolete representation is part of this ticket only when every maintained caller has migrated safely.
+
+Implemented in `8a8086d`.
