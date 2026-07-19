@@ -158,15 +158,15 @@ async fn handle_mcp(
             .into_response();
     };
     let tools = state.tools;
-    match tokio::task::spawn_blocking(move || dispatch(tools, &token, request)).await {
-        Ok(Ok(Some(response))) => Json(response).into_response(),
-        Ok(Ok(None)) => StatusCode::ACCEPTED.into_response(),
-        Ok(Err(DispatchError::Unauthorized)) => (
+    match dispatch(tools, &token, request).await {
+        Ok(Some(response)) => Json(response).into_response(),
+        Ok(None) => StatusCode::ACCEPTED.into_response(),
+        Err(DispatchError::Unauthorized) => (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "invalid or revoked bearer token"})),
         )
             .into_response(),
-        Ok(Err(DispatchError::Internal(error))) => {
+        Err(DispatchError::Internal(error)) => {
             error!(error = %error, "MCP authentication failed internally");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -174,11 +174,11 @@ async fn handle_mcp(
             )
                 .into_response()
         }
-        Err(error) => {
-            error!(error = %error, "MCP dispatch task failed");
+        Err(DispatchError::Task(error)) => {
+            error!(error = %error, "MCP authentication task failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "MCP dispatch task failed"})),
+                Json(json!({"error": "MCP authentication failed internally"})),
             )
                 .into_response()
         }
@@ -189,6 +189,7 @@ async fn handle_mcp(
 enum DispatchError {
     Unauthorized,
     Internal(AgentToolsError),
+    Task(tokio::task::JoinError),
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,19 +210,23 @@ struct ClientInfo {
     _version: String,
 }
 
-fn dispatch(
+async fn dispatch(
     tools: AgentTools,
     token: &str,
     request: JsonRpcRequest,
 ) -> Result<Option<Value>, DispatchError> {
-    let context = tools
-        .authenticate_token(token)
-        .map_err(DispatchError::Internal)?
-        .ok_or(DispatchError::Unauthorized)?;
-    Ok(dispatch_authenticated(tools, context, request))
+    let authentication_tools = tools.clone();
+    let token = token.to_owned();
+    let context =
+        tokio::task::spawn_blocking(move || authentication_tools.authenticate_token(&token))
+            .await
+            .map_err(DispatchError::Task)?
+            .map_err(DispatchError::Internal)?
+            .ok_or(DispatchError::Unauthorized)?;
+    Ok(dispatch_authenticated(tools, context, request).await)
 }
 
-pub(crate) fn dispatch_authenticated(
+pub(crate) async fn dispatch_authenticated(
     tools: AgentTools,
     context: AuthContext,
     request: JsonRpcRequest,
@@ -263,37 +268,44 @@ pub(crate) fn dispatch_authenticated(
                 return Some(rpc_error_value(id, -32602, &message));
             }
             let router = McpToolRouter::new(tools, context);
-            return Some(
-                match router.call_checked(McpToolCall {
-                    tool: name.to_string(),
-                    arguments,
-                }) {
-                    Ok(value) => {
-                        let structured = json!({"value": value});
-                        let text = structured.to_string();
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {
-                                "content": [{"type": "text", "text": text}],
-                                "structuredContent": structured,
-                                "isError": false
-                            }
-                        })
-                    }
-                    Err(McpToolCallError::InvalidArguments(error)) => {
-                        rpc_error_value(id, -32602, &error.to_string())
-                    }
-                    Err(McpToolCallError::Execution(error)) => json!({
+            let call = McpToolCall {
+                tool: name.to_string(),
+                arguments,
+            };
+            let called = if McpToolRouter::requires_async_dispatch(name) {
+                router.call_async_checked(call).await
+            } else {
+                match tokio::task::spawn_blocking(move || router.call_checked(call)).await {
+                    Ok(result) => result,
+                    Err(error) => Err(McpToolCallError::Execution(error.into())),
+                }
+            };
+            return Some(match called {
+                Ok(value) => {
+                    let structured = json!({"value": value});
+                    let text = structured.to_string();
+                    json!({
                         "jsonrpc": "2.0",
                         "id": id,
                         "result": {
-                            "content": [{"type": "text", "text": error.to_string()}],
-                            "isError": true
+                            "content": [{"type": "text", "text": text}],
+                            "structuredContent": structured,
+                            "isError": false
                         }
-                    }),
-                },
-            );
+                    })
+                }
+                Err(McpToolCallError::InvalidArguments(error)) => {
+                    rpc_error_value(id, -32602, &error.to_string())
+                }
+                Err(McpToolCallError::Execution(error)) => json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [{"type": "text", "text": error.to_string()}],
+                        "isError": true
+                    }
+                }),
+            });
         }
         "ping" => json!({}),
         _ => return Some(rpc_error_value(id, -32601, "method not found")),
@@ -480,6 +492,30 @@ fn tool_descriptors(tools: &AgentTools, context: &AuthContext) -> Vec<Value> {
             true,
             false,
             Some(HarnessCapability::FeedRead),
+        ),
+        descriptor(
+            "subscribe_public_pod",
+            "Subscribe to Public Pod",
+            "Subscribe to a canonical public Pod URL and import its verified signed history from the Origin Node.",
+            object_schema(
+                json!({"public_pod_url": {"type": "string", "format": "uri"}}),
+                &["public_pod_url"],
+            ),
+            false,
+            false,
+            Some(HarnessCapability::SubscriptionManagement),
+        ),
+        descriptor(
+            "synchronize_subscription",
+            "Synchronize Subscription",
+            "Fetch and apply signed Pod Events from the Origin Node after the Subscription's verified cursor.",
+            object_schema(
+                json!({"subscription_id": {"type": "string", "format": "uuid"}}),
+                &["subscription_id"],
+            ),
+            false,
+            false,
+            Some(HarnessCapability::SubscriptionManagement),
         ),
         descriptor(
             "submit_candidate",

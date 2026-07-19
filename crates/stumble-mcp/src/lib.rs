@@ -34,7 +34,27 @@ pub struct McpToolRouter {
     ctx: AuthContext,
 }
 
+#[derive(Clone, Copy)]
+enum AsyncTool {
+    SubscribePublicPod,
+    SynchronizeSubscription,
+    SyncPodWithPeer,
+}
+
+fn async_tool(tool: &str) -> Option<AsyncTool> {
+    match tool {
+        "subscribe_public_pod" => Some(AsyncTool::SubscribePublicPod),
+        "synchronize_subscription" => Some(AsyncTool::SynchronizeSubscription),
+        "sync_pod_with_peer" => Some(AsyncTool::SyncPodWithPeer),
+        _ => None,
+    }
+}
+
 impl McpToolRouter {
+    pub(crate) fn requires_async_dispatch(tool: &str) -> bool {
+        async_tool(tool).is_some()
+    }
+
     pub fn new(tools: AgentTools, ctx: AuthContext) -> Self {
         Self { tools, ctx }
     }
@@ -93,6 +113,8 @@ impl McpToolRouter {
             "get_node_info",
             "list_trusted_peers",
             "add_trusted_peer",
+            "subscribe_public_pod",
+            "synchronize_subscription",
             "sync_pod_with_peer",
             "export_pod_events",
             "import_pod_events",
@@ -100,6 +122,12 @@ impl McpToolRouter {
     }
 
     pub fn call(&self, call: McpToolCall) -> anyhow::Result<Value> {
+        if async_tool(&call.tool).is_some() {
+            return Err(anyhow::anyhow!(
+                "{} requires the asynchronous MCP dispatcher",
+                call.tool
+            ));
+        }
         match call.tool.as_str() {
             "get_feed_batch" => {
                 let request = serde_json::from_value(call.arguments)?;
@@ -384,9 +412,6 @@ impl McpToolRouter {
                     serde_json::from_value(events)?,
                 )?}))
             }
-            "sync_pod_with_peer" => Err(anyhow::anyhow!(
-                "sync_pod_with_peer requires the asynchronous MCP dispatcher"
-            )),
             "submit_link_to_pod" => Err(LegacyContract::LegacySubmission.error().into()),
             "add_source_to_pod" | "crawl_pod_sources" => {
                 Err(LegacyContract::CrawlerSourceConnector.error().into())
@@ -410,22 +435,8 @@ impl McpToolRouter {
     /// Calls a tool while preserving the MCP distinction between malformed
     /// arguments and failures produced by a valid tool execution.
     pub fn call_checked(&self, call: McpToolCall) -> Result<Value, McpToolCallError> {
-        if !call.arguments.is_object() {
-            return Err(McpToolCallError::InvalidArguments(invalid_arguments(
-                "arguments must be an object",
-            )));
-        }
-        self.call(call).map_err(|error| {
-            if error.downcast_ref::<InvalidToolArguments>().is_some()
-                || error.downcast_ref::<serde_json::Error>().is_some()
-                || error.downcast_ref::<uuid::Error>().is_some()
-                || error.downcast_ref::<DiscoveryLeaseSecondsError>().is_some()
-            {
-                McpToolCallError::InvalidArguments(error)
-            } else {
-                McpToolCallError::Execution(error)
-            }
-        })
+        validate_call_arguments(&call)?;
+        self.call(call).map_err(classify_call_error)
     }
 
     /// Dispatches tools that may perform outbound synchronization.
@@ -435,15 +446,68 @@ impl McpToolRouter {
     /// Returns an error for invalid arguments, authorization failures,
     /// incompatible peers, network failures, or underlying tool failures.
     pub async fn call_async(&self, call: McpToolCall) -> anyhow::Result<Value> {
-        if call.tool != "sync_pod_with_peer" {
-            return self.call(call);
+        match async_tool(&call.tool) {
+            Some(AsyncTool::SubscribePublicPod) => {
+                self.tools.require_harness_capability(
+                    &self.ctx,
+                    HarnessCapability::SubscriptionManagement,
+                )?;
+                let public_pod_url = arg_string(&call.arguments, "public_pod_url")?;
+                Ok(json!(
+                    stumble_sync::subscribe_pod_from_url(&self.tools, &self.ctx, &public_pod_url,)
+                        .await?
+                ))
+            }
+            Some(AsyncTool::SynchronizeSubscription) => {
+                self.tools.require_harness_capability(
+                    &self.ctx,
+                    HarnessCapability::SubscriptionManagement,
+                )?;
+                let subscription_id = arg_string(&call.arguments, "subscription_id")?.parse()?;
+                Ok(json!(
+                    stumble_sync::synchronize_subscription_from_origin(
+                        &self.tools,
+                        &self.ctx,
+                        subscription_id,
+                    )
+                    .await?
+                ))
+            }
+            Some(AsyncTool::SyncPodWithPeer) => {
+                let peer_id = arg_string(&call.arguments, "peer_id")?.parse()?;
+                let pod_slug = arg_string(&call.arguments, "pod_slug")?;
+                let peer = self.tools.trusted_peer(&self.ctx, peer_id)?;
+                Ok(json!(
+                    stumble_sync::sync_pod_from_peer(&self.tools, &self.ctx, &peer, &pod_slug,)
+                        .await?
+                ))
+            }
+            None => self.call(call),
         }
-        let peer_id = arg_string(&call.arguments, "peer_id")?.parse()?;
-        let pod_slug = arg_string(&call.arguments, "pod_slug")?;
-        let peer = self.tools.trusted_peer(&self.ctx, peer_id)?;
-        Ok(json!(
-            stumble_sync::sync_pod_from_peer(&self.tools, &self.ctx, &peer, &pod_slug,).await?
-        ))
+    }
+
+    /// Asynchronously calls a tool while preserving malformed-argument errors.
+    pub async fn call_async_checked(&self, call: McpToolCall) -> Result<Value, McpToolCallError> {
+        validate_call_arguments(&call)?;
+        self.call_async(call).await.map_err(classify_call_error)
+    }
+}
+
+fn validate_call_arguments(call: &McpToolCall) -> Result<(), McpToolCallError> {
+    call.arguments.is_object().then_some(()).ok_or_else(|| {
+        McpToolCallError::InvalidArguments(invalid_arguments("arguments must be an object"))
+    })
+}
+
+fn classify_call_error(error: anyhow::Error) -> McpToolCallError {
+    if error.downcast_ref::<InvalidToolArguments>().is_some()
+        || error.downcast_ref::<serde_json::Error>().is_some()
+        || error.downcast_ref::<uuid::Error>().is_some()
+        || error.downcast_ref::<DiscoveryLeaseSecondsError>().is_some()
+    {
+        McpToolCallError::InvalidArguments(error)
+    } else {
+        McpToolCallError::Execution(error)
     }
 }
 

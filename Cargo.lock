@@ -1545,6 +1545,7 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "stumble-api",
  "stumble-core",
  "stumble-sync",
  "thiserror 1.0.69",

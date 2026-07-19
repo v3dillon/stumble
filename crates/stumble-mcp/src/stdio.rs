@@ -16,7 +16,7 @@ use crate::protocol::{dispatch_authenticated, rpc_error_value, JsonRpcRequest};
 ///
 /// Returns an error when a session cannot be authenticated, input cannot be
 /// read, or a response cannot be written.
-pub fn serve_stdio(
+pub async fn serve_stdio(
     mut authenticate: impl FnMut() -> anyhow::Result<(AgentTools, AuthContext)>,
     input: impl BufRead,
     mut output: impl Write,
@@ -26,7 +26,7 @@ pub fn serve_stdio(
         let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
             Ok(request) if request.has_valid_version() => {
                 let (tools, context) = authenticate().context("authenticate MCP session")?;
-                dispatch_authenticated(tools, context, request)
+                dispatch_authenticated(tools, context, request).await
             }
             Ok(request) => Some(rpc_error_value(
                 request.id_json().unwrap_or(Value::Null),

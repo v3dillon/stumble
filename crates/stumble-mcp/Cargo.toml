@@ -21,4 +21,5 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+stumble-api = { path = "../stumble-api" }
 tower.workspace = true

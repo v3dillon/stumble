@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     match args.transport {
         Transport::Http => serve_http(args).await,
-        Transport::Stdio => serve_standard_io(args),
+        Transport::Stdio => serve_standard_io(args).await,
     }
 }
 
@@ -60,7 +60,7 @@ async fn serve_http(args: Args) -> anyhow::Result<()> {
         .context("serve MCP requests")
 }
 
-fn serve_standard_io(args: Args) -> anyhow::Result<()> {
+async fn serve_standard_io(args: Args) -> anyhow::Result<()> {
     let token = args
         .token
         .context("stumble-mcp stdio requires a Harness token")?;
@@ -79,6 +79,7 @@ fn serve_standard_io(args: Args) -> anyhow::Result<()> {
         input.lock(),
         output.lock(),
     )
+    .await
 }
 
 async fn shutdown_signal() {
