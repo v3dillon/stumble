@@ -1990,6 +1990,7 @@ pub(crate) enum FederatedPodEventType {
     PodPackageImported,
     PodPackageForked,
     ContentItemPlaced,
+    ContentItemMetadataUpdated,
     PlacementTombstoned,
     LegacyLinkRemoved,
     LegacyLinkSubmitted,
@@ -2004,6 +2005,7 @@ impl FederatedPodEventType {
             "pod_package_imported" => Some(Self::PodPackageImported),
             "pod_package_forked" => Some(Self::PodPackageForked),
             "content_item_placed" => Some(Self::ContentItemPlaced),
+            "content_item_metadata_updated" => Some(Self::ContentItemMetadataUpdated),
             "placement_tombstoned" => Some(Self::PlacementTombstoned),
             "link_removed" => Some(Self::LegacyLinkRemoved),
             "link_submitted" => Some(Self::LegacyLinkSubmitted),
@@ -2019,6 +2021,7 @@ impl FederatedPodEventType {
             Self::PodPackageImported => "pod_package_imported",
             Self::PodPackageForked => "pod_package_forked",
             Self::ContentItemPlaced => "content_item_placed",
+            Self::ContentItemMetadataUpdated => "content_item_metadata_updated",
             Self::PlacementTombstoned => "placement_tombstoned",
             Self::LegacyLinkRemoved => "link_removed",
             Self::LegacyLinkSubmitted => "link_submitted",
@@ -2033,6 +2036,7 @@ impl FederatedPodEventType {
             | Self::PodPackageImported
             | Self::PodPackageForked
             | Self::ContentItemPlaced
+            | Self::ContentItemMetadataUpdated
             | Self::PlacementTombstoned
             | Self::LegacyLinkRemoved => true,
             Self::LegacyLinkSubmitted => false,
@@ -2351,6 +2355,19 @@ pub struct AcceptedPlacementProjection {
     pub accepted_at: DateTime<Utc>,
 }
 
+/// Complete signed replacement for one accepted Content Reference's media evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ContentItemMetadataUpdate {
+    pub(crate) content_item_id: ContentItemId,
+    pub(crate) media_references: Vec<MediaReference>,
+}
+
+/// Typed signed-event body for a Content Reference metadata update.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ContentItemMetadataUpdatedPayload {
+    pub(crate) metadata_update: ContentItemMetadataUpdate,
+}
+
 /// One entry in a Pod's complete accepted stream, independent of Feed selection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PodContentItem {
@@ -2559,13 +2576,134 @@ pub enum MediaReferenceType {
 }
 
 /// Reference-first attached media retained without downloading its bytes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaReference {
     /// Typed media category for presentation and policy decisions.
-    pub media_type: MediaReferenceType,
-    /// Permitted HTTP(S) location; Stumble does not archive the target bytes.
-    pub url: String,
+    media_type: MediaReferenceType,
+    /// Canonical permitted HTTP(S) location; Stumble does not archive the target bytes.
+    url: String,
+}
+
+/// Error returned when a URL cannot cross Stumble's canonical URL boundary.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid or unsupported URL: {0}")]
+pub struct CanonicalUrlError(String);
+
+impl MediaReference {
+    /// Validates and canonicalizes an attached-media reference at its domain boundary.
+    pub fn new(
+        media_type: MediaReferenceType,
+        url: impl AsRef<str>,
+    ) -> Result<Self, CanonicalUrlError> {
+        Ok(Self {
+            media_type,
+            url: canonicalize_web_url(url.as_ref())?,
+        })
+    }
+
+    /// Returns the presentation category supplied for this canonical media identity.
+    #[must_use]
+    pub const fn media_type(&self) -> MediaReferenceType {
+        self.media_type
+    }
+
+    /// Returns the canonical permitted HTTP(S) location.
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct MediaReferenceWire {
+    media_type: MediaReferenceType,
+    url: String,
+}
+
+impl Serialize for MediaReference {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        MediaReferenceWire {
+            media_type: self.media_type,
+            url: self.url.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MediaReference {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = MediaReferenceWire::deserialize(deserializer)?;
+        Self::new(wire.media_type, wire.url).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Applies Stumble's canonical URL spelling policy to a permitted web URL.
+pub(crate) fn canonicalize_web_url(value: &str) -> Result<String, CanonicalUrlError> {
+    let canonical = canonicalize_url_spelling(value)?;
+    let url = url::Url::parse(&canonical).map_err(|error| CanonicalUrlError(error.to_string()))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(CanonicalUrlError(value.to_string()));
+    }
+    Ok(canonical)
+}
+
+/// Applies Stumble's shared canonical spelling policy without restricting URL schemes.
+pub(crate) fn canonicalize_url_spelling(value: &str) -> Result<String, CanonicalUrlError> {
+    let mut url = url::Url::parse(value).map_err(|error| CanonicalUrlError(error.to_string()))?;
+    url.set_fragment(None);
+    if (url.scheme() == "https" && url.port() == Some(443))
+        || (url.scheme() == "http" && url.port() == Some(80))
+    {
+        let _ = url.set_port(None);
+    }
+    let mut pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_ref(),
+                "utm_source" | "utm_medium" | "utm_campaign" | "utm_term" | "utm_content"
+            )
+        })
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    pairs.sort();
+    url.set_query(None);
+    if !pairs.is_empty() {
+        url.query_pairs_mut().extend_pairs(pairs);
+    }
+    Ok(url.to_string())
+}
+
+/// Error returned when one canonical media identity has incompatible type evidence.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("canonical media URL {url} has conflicting media types")]
+pub(crate) struct MediaEvidenceConflictError {
+    url: String,
+}
+
+/// Resolves media evidence into a canonical, deduplicated, URL-sorted union.
+pub(crate) fn resolve_media_evidence<'a>(
+    references: impl IntoIterator<Item = &'a MediaReference>,
+) -> Result<Vec<MediaReference>, MediaEvidenceConflictError> {
+    let mut resolved = BTreeMap::new();
+    for reference in references {
+        if resolved
+            .insert(reference.url(), reference.clone())
+            .is_some_and(|existing: MediaReference| existing.media_type() != reference.media_type())
+        {
+            return Err(MediaEvidenceConflictError {
+                url: reference.url().into(),
+            });
+        }
+    }
+    Ok(resolved.into_values().collect())
 }
 
 /// Harness confidence retained as bounded evidence, never authority.

@@ -3357,8 +3357,10 @@ impl AgentTools {
         }
         validate_candidate_task_context(&store, ctx, harness, &request)?;
 
+        let mut projected = store.clone();
+
         let canonical_url = canonicalize_url(&request.evidence.source_url)?;
-        let candidate = store
+        let candidate = projected
             .candidates
             .values()
             .find(|candidate| {
@@ -3381,7 +3383,7 @@ impl AgentTools {
                 review_state: CandidateReviewState::Pending,
                 created_at: Utc::now(),
             });
-        store.candidates.insert(candidate.id, candidate.clone());
+        projected.candidates.insert(candidate.id, candidate.clone());
 
         let submission = CandidateSubmission {
             id: stable_candidate_uuid(
@@ -3399,16 +3401,18 @@ impl AgentTools {
             evidence: request.evidence,
             created_at: Utc::now(),
         };
-        store
+        projected
             .candidate_submissions
             .insert(submission.id, submission.clone());
+        enrich_accepted_content_item(&mut projected, ctx, &candidate)?;
         record_harness_write(
-            &mut store,
+            &mut projected,
             ctx,
             HarnessWriteOperation::SubmitCandidate,
             None,
         );
-        self.persist_locked(&mut store)?;
+        self.persist_locked(&mut projected)?;
+        *store = projected;
         Ok(SubmittedCandidate {
             candidate,
             submission,
@@ -6947,29 +6951,7 @@ fn record_expired_lease(task: &mut DiscoveryTask, now: chrono::DateTime<Utc>) {
 }
 
 pub fn canonicalize_url(value: &str) -> Result<String, AgentToolsError> {
-    let mut url = Url::parse(value).map_err(|e| AgentToolsError::BadUrl(e.to_string()))?;
-    url.set_fragment(None);
-    if (url.scheme() == "https" && url.port() == Some(443))
-        || (url.scheme() == "http" && url.port() == Some(80))
-    {
-        let _ = url.set_port(None);
-    }
-    let mut pairs: Vec<(String, String)> = url
-        .query_pairs()
-        .filter(|(k, _)| {
-            !matches!(
-                k.as_ref(),
-                "utm_source" | "utm_medium" | "utm_campaign" | "utm_term" | "utm_content"
-            )
-        })
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-    pairs.sort();
-    url.set_query(None);
-    if !pairs.is_empty() {
-        url.query_pairs_mut().extend_pairs(pairs);
-    }
-    Ok(url.to_string())
+    canonicalize_url_spelling(value).map_err(|error| AgentToolsError::BadUrl(error.to_string()))
 }
 
 fn discard_replayed_events(
@@ -7268,6 +7250,10 @@ fn validate_imported_event_payload(event: &EventLog) -> Result<(), AgentToolsErr
             imported_event_payload::<ContentItem>(event, "content_item")?;
             imported_event_payload::<AcceptedPlacementProjection>(event, "accepted_placement")?;
         }
+        FederatedPodEventType::ContentItemMetadataUpdated => {
+            let payload = imported_event_body::<ContentItemMetadataUpdatedPayload>(event)?;
+            resolve_media_for_store(&payload.metadata_update.media_references)?;
+        }
         FederatedPodEventType::PlacementTombstoned => {
             imported_event_payload::<PlacementTombstone>(event, "placement_tombstone")?;
         }
@@ -7318,6 +7304,7 @@ fn is_subscription_projection_event(event_type: &str) -> bool {
                 | FederatedPodEventType::PodPackageImported
                 | FederatedPodEventType::PodPackageForked
                 | FederatedPodEventType::ContentItemPlaced
+                | FederatedPodEventType::ContentItemMetadataUpdated
                 | FederatedPodEventType::PlacementTombstoned
         )
     )
@@ -7348,16 +7335,7 @@ fn project_imported_public_event(
         | FederatedPodEventType::PodPackageImported
         | FederatedPodEventType::PodPackageForked => {
             let mut package = imported_event_payload::<PodPackage>(event, "package")?;
-            let local_pod_id = store
-                .pods
-                .values()
-                .find(|pod| {
-                    pod.slug == event.pod_slug
-                        && pod.tenant_id == ctx.tenant_id
-                        && pod.origin_node_id == Some(event.author_node_id)
-                })
-                .map(|pod| pod.id)
-                .ok_or_else(|| StoreError::NotFound("synchronized public Pod".to_string()))?;
+            let local_pod_id = synchronized_origin_pod_id(store, ctx, event)?;
             project_imported_package(store, local_pod_id, &mut package)?;
         }
         FederatedPodEventType::LegacyLinkSubmitted => {
@@ -7370,22 +7348,44 @@ fn project_imported_public_event(
                 project_imported_submission(store, ctx, event, content_item.into_legacy_record())?;
             let mut projection =
                 imported_event_payload::<AcceptedPlacementProjection>(event, "accepted_placement")?;
-            let local_pod_id = store
-                .pods
-                .values()
-                .find(|pod| {
-                    pod.slug == event.pod_slug
-                        && pod.tenant_id == ctx.tenant_id
-                        && pod.origin_node_id == Some(event.author_node_id)
-                })
-                .map(|pod| pod.id)
-                .ok_or_else(|| StoreError::NotFound("synchronized public Pod".to_string()))?;
+            let local_pod_id = synchronized_origin_pod_id(store, ctx, event)?;
             projection.content_item_id = content_item_id;
             projection.pod_id = local_pod_id;
             projection.origin_node_id = event.author_node_id;
             store
                 .accepted_placement_projections
                 .insert((content_item_id, local_pod_id), projection);
+        }
+        FederatedPodEventType::ContentItemMetadataUpdated => {
+            let payload = imported_event_body::<ContentItemMetadataUpdatedPayload>(event)?;
+            let update = payload.metadata_update;
+            let media_references = resolve_media_for_store(&update.media_references)?;
+            let key = FederatedContentItemKey::new(
+                ctx.tenant_id,
+                event.author_node_id,
+                update.content_item_id,
+            );
+            let local_content_item_id = store
+                .federated_content_item_ids
+                .get(&key)
+                .copied()
+                .ok_or_else(|| StoreError::NotFound("synchronized Content Item".into()))?;
+            let local_pod_id = synchronized_origin_pod_id(store, ctx, event)?;
+            if !store
+                .accepted_placement_projections
+                .contains_key(&(local_content_item_id, local_pod_id))
+            {
+                return Err(StoreError::Validation(
+                    "metadata update requires a synchronized Accepted Placement".into(),
+                )
+                .into());
+            }
+            let item = store
+                .submissions
+                .get_mut(&Uuid::from(local_content_item_id))
+                .ok_or_else(|| StoreError::NotFound("synchronized Content Item".into()))?;
+            item.media_references =
+                resolve_media_for_store(item.media_references.iter().chain(&media_references))?;
         }
         FederatedPodEventType::PlacementTombstoned => {
             let mut tombstone =
@@ -7466,6 +7466,23 @@ fn project_imported_public_event(
     Ok(())
 }
 
+fn synchronized_origin_pod_id(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    event: &EventLog,
+) -> Result<PodId, AgentToolsError> {
+    store
+        .pods
+        .values()
+        .find(|pod| {
+            pod.slug == event.pod_slug
+                && pod.tenant_id == ctx.tenant_id
+                && pod.origin_node_id == Some(event.author_node_id)
+        })
+        .map(|pod| pod.id)
+        .ok_or_else(|| StoreError::NotFound("synchronized public Pod".into()).into())
+}
+
 fn imported_event_payload<T: serde::de::DeserializeOwned>(
     event: &EventLog,
     field: &str,
@@ -7479,6 +7496,18 @@ fn imported_event_payload<T: serde::de::DeserializeOwned>(
     serde_json::from_value(value).map_err(|error| {
         StoreError::Validation(format!(
             "signed {} event has invalid {field}: {error}",
+            event.event_type
+        ))
+        .into()
+    })
+}
+
+fn imported_event_body<T: serde::de::DeserializeOwned>(
+    event: &EventLog,
+) -> Result<T, AgentToolsError> {
+    serde_json::from_value(event.payload_json.clone()).map_err(|error| {
+        StoreError::Validation(format!(
+            "signed {} payload is malformed: {error}",
             event.event_type
         ))
         .into()
@@ -8220,23 +8249,35 @@ fn validate_candidate_submission(
         )
         .into());
     }
-    canonicalize_url(&evidence.source_url)?;
+    let canonical_source_url = canonicalize_url(&evidence.source_url)?;
     if let Some(referrer_url) = &evidence.provenance.referrer_url {
         canonicalize_url(referrer_url)?;
     }
-    for media_reference in &evidence.media_references {
-        let url = Url::parse(&media_reference.url).map_err(|_| {
-            StoreError::Validation(
-                "Candidate Submission media references must use HTTP or HTTPS URLs".into(),
+    resolve_media_for_store(
+        store
+            .submissions
+            .values()
+            .filter(|item| {
+                item.tenant_id == ctx.tenant_id && item.canonical_url == canonical_source_url
+            })
+            .flat_map(|item| &item.media_references)
+            .chain(
+                store
+                    .candidate_submissions
+                    .values()
+                    .filter(|submission| {
+                        store
+                            .candidates
+                            .get(&submission.candidate_id)
+                            .is_some_and(|candidate| {
+                                candidate.tenant_id == ctx.tenant_id
+                                    && candidate.canonical_url == canonical_source_url
+                            })
+                    })
+                    .flat_map(|submission| &submission.evidence.media_references),
             )
-        })?;
-        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-            return Err(StoreError::Validation(
-                "Candidate Submission media references must use HTTP or HTTPS URLs".into(),
-            )
-            .into());
-        }
-    }
+            .chain(&evidence.media_references),
+    )?;
 
     let mut pod_ids = HashSet::with_capacity(evidence.proposed_placements.len());
     let local_node_id = store.node_for_tenant(ctx.tenant_id)?.id;
@@ -8278,6 +8319,13 @@ fn validate_candidate_submission(
     }
 
     Ok(())
+}
+
+fn resolve_media_for_store<'a>(
+    references: impl IntoIterator<Item = &'a MediaReference>,
+) -> Result<Vec<MediaReference>, AgentToolsError> {
+    resolve_media_evidence(references)
+        .map_err(|error| StoreError::Validation(error.to_string()).into())
 }
 
 fn validate_candidate_task_context(
@@ -8621,15 +8669,11 @@ fn ensure_content_item(
         .agent_harnesses
         .get(&evidence.submitted_by)
         .map(|harness| harness.user_id);
-    let mut media_references = Vec::new();
-    for media_reference in submissions
-        .iter()
-        .flat_map(|submission| &submission.evidence.media_references)
-    {
-        if !media_references.contains(media_reference) {
-            media_references.push(media_reference.clone());
-        }
-    }
+    let media_references = resolve_media_for_store(
+        submissions
+            .iter()
+            .flat_map(|submission| &submission.evidence.media_references),
+    )?;
     let item = Submission {
         id: stable_candidate_uuid("content-item", &[&candidate.id.to_string()]),
         tenant_id: candidate.tenant_id,
@@ -8655,6 +8699,83 @@ fn ensure_content_item(
     };
     store.submissions.insert(item.id, item.clone());
     Ok(ContentItem::from(&item))
+}
+
+fn enrich_accepted_content_item(
+    store: &mut InMemoryStore,
+    ctx: &AuthContext,
+    candidate: &Candidate,
+) -> Result<(), AgentToolsError> {
+    let Some(item_id) = store
+        .submissions
+        .values()
+        .find(|item| {
+            item.tenant_id == candidate.tenant_id && item.canonical_url == candidate.canonical_url
+        })
+        .map(|item| item.id)
+    else {
+        return Ok(());
+    };
+    let existing_media = store
+        .submissions
+        .get(&item_id)
+        .ok_or_else(|| StoreError::NotFound("Content Item".into()))?
+        .media_references
+        .clone();
+    let resolved = resolve_media_for_store(
+        existing_media.iter().chain(
+            store
+                .candidate_submissions
+                .values()
+                .filter(|submission| submission.candidate_id == candidate.id)
+                .flat_map(|submission| &submission.evidence.media_references),
+        ),
+    )?;
+    let item = store
+        .submissions
+        .get_mut(&item_id)
+        .ok_or_else(|| StoreError::NotFound("Content Item".into()))?;
+    if item.media_references == resolved {
+        return Ok(());
+    }
+    item.media_references = resolved;
+
+    let content_item_id = ContentItemId::from(item_id);
+    let node = store.node_for_tenant(ctx.tenant_id)?;
+    let mut pods = store
+        .accepted_placement_projections
+        .values()
+        .filter(|placement| {
+            placement.content_item_id == content_item_id && placement.origin_node_id == node.id
+        })
+        .filter_map(|placement| store.pods.get(&placement.pod_id).cloned())
+        .collect::<Vec<_>>();
+    pods.sort_by(|left, right| left.slug.cmp(&right.slug).then(left.id.cmp(&right.id)));
+    let media_references = store
+        .submissions
+        .get(&item_id)
+        .expect("accepted Content Item remains present")
+        .media_references
+        .clone();
+    for pod in pods {
+        let payload = ContentItemMetadataUpdatedPayload {
+            metadata_update: ContentItemMetadataUpdate {
+                content_item_id,
+                media_references: media_references.clone(),
+            },
+        };
+        let event = sign_public_event(
+            &node,
+            FederatedPodEventType::ContentItemMetadataUpdated.as_wire(),
+            &pod.slug,
+            serde_json::to_value(payload).map_err(|error| {
+                StoreError::Validation(format!("metadata update cannot be signed: {error}"))
+            })?,
+            store.latest_event_hash(&pod.slug),
+        )?;
+        store.event_log.push(event);
+    }
+    Ok(())
 }
 
 fn accept_placement(

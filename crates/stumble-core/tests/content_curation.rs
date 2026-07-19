@@ -1,6 +1,10 @@
 use chrono::{TimeZone, Utc};
 use stumble_core::*;
 
+fn media(media_type: MediaReferenceType, url: &str) -> MediaReference {
+    MediaReference::new(media_type, url).unwrap()
+}
+
 struct TestDataDir(std::path::PathBuf);
 
 impl TestDataDir {
@@ -112,10 +116,10 @@ fn candidate_request(pod_id: PodId, confidence: f32) -> CandidateSubmissionReque
             permitted_excerpt: Some("Permitted evidence".into()),
             summary: Some("A report worth curating".into()),
             content_type: CandidateContentType::Article,
-            media_references: vec![MediaReference {
-                media_type: MediaReferenceType::Image,
-                url: "https://media.example.com/curation/preview.jpg".into(),
-            }],
+            media_references: vec![media(
+                MediaReferenceType::Image,
+                "https://media.example.com/curation/preview.jpg",
+            )],
             tags: vec!["curation".into()],
             provenance: CandidateProvenance {
                 discovered_at: Utc.with_ymd_and_hms(2026, 7, 17, 10, 0, 0).unwrap(),
@@ -142,7 +146,7 @@ fn rationale(value: &str) -> CurationRationale {
 fn manual_curation_queues_every_placement_until_authorized_review() {
     let data_dir = TestDataDir::new();
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
-    let pod = private_pod(&tools, "manual-curation");
+    let pod = public_pod(&tools, "manual-curation");
     let curator = harness(
         &tools,
         "manual curator",
@@ -168,14 +172,14 @@ fn manual_curation_queues_every_placement_until_authorized_review() {
     corroborating.evidence.harness_idempotency_key = "corroborating-worker".into();
     corroborating.evidence.client_idempotency_key = "corroborating-client".into();
     corroborating.evidence.media_references = vec![
-        MediaReference {
-            media_type: MediaReferenceType::Image,
-            url: "https://media.example.com/curation/preview.jpg".into(),
-        },
-        MediaReference {
-            media_type: MediaReferenceType::Video,
-            url: "https://media.example.com/curation/demo.mp4".into(),
-        },
+        media(
+            MediaReferenceType::Image,
+            "HTTPS://MEDIA.EXAMPLE.COM:443/curation/preview.jpg#corroborated",
+        ),
+        media(
+            MediaReferenceType::Video,
+            "https://media.example.com/curation/demo.mp4",
+        ),
     ];
     let corroborated = tools.submit_candidate(&submitter, corroborating).unwrap();
     assert_eq!(corroborated.candidate.id, submitted.candidate.id);
@@ -211,15 +215,49 @@ fn manual_curation_queues_every_placement_until_authorized_review() {
     assert_eq!(
         accepted[0].media_references(),
         &[
-            MediaReference {
-                media_type: MediaReferenceType::Image,
-                url: "https://media.example.com/curation/preview.jpg".into(),
-            },
-            MediaReference {
-                media_type: MediaReferenceType::Video,
-                url: "https://media.example.com/curation/demo.mp4".into(),
-            }
+            media(
+                MediaReferenceType::Video,
+                "https://media.example.com/curation/demo.mp4"
+            ),
+            media(
+                MediaReferenceType::Image,
+                "https://media.example.com/curation/preview.jpg"
+            )
         ]
+    );
+
+    let mut later = candidate_request(pod.id, 0.7);
+    later.evidence.source_url = "https://example.com/curation".into();
+    later.evidence.harness_idempotency_key = "failed-enrichment-worker".into();
+    later.evidence.client_idempotency_key = "failed-enrichment-client".into();
+    later.evidence.media_references = vec![media(
+        MediaReferenceType::Image,
+        "https://media.example.com/curation/later.jpg",
+    )];
+    let staged = tools.store().read().unwrap().clone();
+    let failing = AgentTools::new_persistent(staged, &data_dir.0);
+    let events_before = failing
+        .federation_pod_events(&curator, &pod.slug)
+        .unwrap()
+        .len();
+
+    assert!(matches!(
+        failing.submit_candidate(&submitter, later),
+        Err(AgentToolsError::Persistence(StorePersistenceError::Io(_)))
+    ));
+    assert_eq!(
+        failing
+            .list_content_items_for_pod(&curator, pod.id)
+            .unwrap()[0]
+            .media_references(),
+        accepted[0].media_references()
+    );
+    assert_eq!(
+        failing
+            .federation_pod_events(&curator, &pod.slug)
+            .unwrap()
+            .len(),
+        events_before
     );
 }
 

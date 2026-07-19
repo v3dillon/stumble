@@ -1,6 +1,10 @@
 use chrono::{TimeZone, Utc};
 use stumble_core::*;
 
+fn media(media_type: MediaReferenceType, url: &str) -> MediaReference {
+    MediaReference::new(media_type, url).unwrap()
+}
+
 struct TestDataDir(std::path::PathBuf);
 
 impl TestDataDir {
@@ -33,14 +37,14 @@ fn candidate_request(pod_ids: &[PodId]) -> CandidateSubmissionRequest {
             summary: Some("How the team diagnosed and repaired the incident.".into()),
             content_type: CandidateContentType::Article,
             media_references: vec![
-                MediaReference {
-                    media_type: MediaReferenceType::Image,
-                    url: "https://cdn.example.com/report/diagram.png".into(),
-                },
-                MediaReference {
-                    media_type: MediaReferenceType::Video,
-                    url: "https://cdn.example.com/report/demo.mp4".into(),
-                },
+                media(
+                    MediaReferenceType::Image,
+                    "https://cdn.example.com/report/diagram.png",
+                ),
+                media(
+                    MediaReferenceType::Video,
+                    "https://cdn.example.com/report/demo.mp4",
+                ),
             ],
             tags: vec!["reliability".into(), "incident-review".into()],
             provenance: CandidateProvenance {
@@ -172,14 +176,14 @@ fn interactive_harness_submits_structured_private_multi_pod_candidate() {
     assert_eq!(
         submitted.submission.evidence.media_references,
         vec![
-            MediaReference {
-                media_type: MediaReferenceType::Image,
-                url: "https://cdn.example.com/report/diagram.png".into(),
-            },
-            MediaReference {
-                media_type: MediaReferenceType::Video,
-                url: "https://cdn.example.com/report/demo.mp4".into(),
-            },
+            media(
+                MediaReferenceType::Image,
+                "https://cdn.example.com/report/diagram.png"
+            ),
+            media(
+                MediaReferenceType::Video,
+                "https://cdn.example.com/report/demo.mp4"
+            ),
         ]
     );
     assert_eq!(
@@ -245,16 +249,90 @@ fn candidate_submission_rejects_media_references_that_are_not_permitted_web_urls
         vec![HarnessCapability::CandidateSubmission],
         Some(vec![pod.id]),
     );
-    let mut request = candidate_request(&[pod.id]);
-    request.evidence.media_references[0].url = "file:///tmp/archived-image.png".into();
+    let request = serde_json::json!({
+        "media_type": "image",
+        "url": "file:///tmp/archived-image.png"
+    });
+    assert!(serde_json::from_value::<MediaReference>(request).is_err());
+    assert!(tools.list_candidates(&harness).unwrap().is_empty());
+}
 
-    let result = tools.submit_candidate(&harness, request);
+#[test]
+fn media_reference_boundary_canonicalizes_equivalent_web_urls() {
+    let reference = MediaReference::new(
+        MediaReferenceType::Image,
+        "HTTPS://CDN.EXAMPLE.COM:443/report/diagram.png?utm_source=feed&b=2&a=1#preview",
+    )
+    .unwrap();
+
+    assert_eq!(
+        reference.url(),
+        "https://cdn.example.com/report/diagram.png?a=1&b=2"
+    );
+    assert!(MediaReference::new(MediaReferenceType::Image, "file:///tmp/image.png").is_err());
+    assert_eq!(
+        canonicalize_url("ftp://EXAMPLE.COM/report?a=1#section").unwrap(),
+        "ftp://example.com/report?a=1"
+    );
+    assert!(serde_json::from_value::<MediaReference>(serde_json::json!({
+        "media_type": "image",
+        "url": "javascript:alert(1)"
+    }))
+    .is_err());
+}
+
+#[test]
+fn canonical_media_identity_deduplicates_and_rejects_type_conflicts() {
+    let tools = AgentTools::new(seed_store());
+    let pod = create_test_pod(&tools, "canonical-media-evidence");
+    let harness = candidate_harness(
+        &tools,
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::CandidateSubmission],
+        Some(vec![pod.id]),
+    );
+    let mut first = candidate_request(&[pod.id]);
+    first.evidence.media_references = vec![MediaReference::new(
+        MediaReferenceType::Image,
+        "https://CDN.example.com:443/report/diagram.png?b=2&a=1#first",
+    )
+    .unwrap()];
+    let submitted = tools.submit_candidate(&harness, first).unwrap();
+
+    let mut duplicate = candidate_request(&[pod.id]);
+    duplicate.evidence.source_url = "https://example.com/report".into();
+    duplicate.evidence.harness_idempotency_key = "canonical-duplicate-worker".into();
+    duplicate.evidence.client_idempotency_key = "canonical-duplicate-client".into();
+    duplicate.evidence.media_references = vec![MediaReference::new(
+        MediaReferenceType::Image,
+        "https://cdn.example.com/report/diagram.png?a=1&b=2",
+    )
+    .unwrap()];
+    tools.submit_candidate(&harness, duplicate).unwrap();
+
+    let mut conflict = candidate_request(&[pod.id]);
+    conflict.evidence.source_url = "https://example.com/report".into();
+    conflict.evidence.harness_idempotency_key = "canonical-conflict-worker".into();
+    conflict.evidence.client_idempotency_key = "canonical-conflict-client".into();
+    conflict.evidence.media_references = vec![MediaReference::new(
+        MediaReferenceType::Video,
+        "https://cdn.example.com/report/diagram.png?a=1&b=2",
+    )
+    .unwrap()];
 
     assert!(matches!(
-        result,
+        tools.submit_candidate(&harness, conflict),
         Err(AgentToolsError::Store(StoreError::Validation(message)))
-            if message == "Candidate Submission media references must use HTTP or HTTPS URLs"
+            if message.contains("conflicting media types")
     ));
+    assert_eq!(
+        tools
+            .inspect_candidate(&harness, submitted.candidate.id)
+            .unwrap()
+            .submissions
+            .len(),
+        2
+    );
 }
 
 #[test]
@@ -300,14 +378,14 @@ fn retries_are_idempotent_and_canonical_deduplication_keeps_independent_evidence
     assert!(inspected.submissions.iter().all(|submission| {
         submission.evidence.media_references
             == vec![
-                MediaReference {
-                    media_type: MediaReferenceType::Image,
-                    url: "https://cdn.example.com/report/diagram.png".into(),
-                },
-                MediaReference {
-                    media_type: MediaReferenceType::Video,
-                    url: "https://cdn.example.com/report/demo.mp4".into(),
-                },
+                media(
+                    MediaReferenceType::Image,
+                    "https://cdn.example.com/report/diagram.png",
+                ),
+                media(
+                    MediaReferenceType::Video,
+                    "https://cdn.example.com/report/demo.mp4",
+                ),
             ]
     }));
     assert!(inspected.submissions.iter().any(|submission| {
