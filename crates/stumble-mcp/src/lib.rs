@@ -1,8 +1,10 @@
+use registry::{McpTool, ToolDefinition, ToolHandlerKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use stumble_core::*;
 
 mod protocol;
+mod registry;
 mod stdio;
 
 pub use protocol::streamable_http_router;
@@ -34,27 +36,11 @@ pub struct McpToolRouter {
     ctx: AuthContext,
 }
 
-#[derive(Clone, Copy)]
-enum AsyncTool {
-    SubscribePublicPod,
-    SynchronizeSubscription,
-    SyncPodWithPeer,
-}
-
-fn async_tool(tool: &str) -> Option<AsyncTool> {
-    match tool {
-        "subscribe_public_pod" => Some(AsyncTool::SubscribePublicPod),
-        "synchronize_subscription" => Some(AsyncTool::SynchronizeSubscription),
-        "sync_pod_with_peer" => Some(AsyncTool::SyncPodWithPeer),
-        _ => None,
-    }
+fn tool_definition(name: &str) -> Option<&'static ToolDefinition> {
+    registry::definition(name)
 }
 
 impl McpToolRouter {
-    pub(crate) fn requires_async_dispatch(tool: &str) -> bool {
-        async_tool(tool).is_some()
-    }
-
     pub fn new(tools: AgentTools, ctx: AuthContext) -> Self {
         Self { tools, ctx }
     }
@@ -73,63 +59,24 @@ impl McpToolRouter {
     }
 
     pub fn tool_names() -> &'static [&'static str] {
-        &[
-            "list_pods",
-            "get_feed_batch",
-            "complete_feed_batch",
-            "record_feed_feedback",
-            "set_priority_subscription",
-            "get_taste_profile",
-            "update_taste_profile",
-            "reset_learned_taste",
-            "register_agent_harness",
-            "revoke_agent_harness",
-            "create_pending_proposal",
-            "get_pending_proposal",
-            "approve_pending_proposal",
-            "reject_pending_proposal",
-            "create_pod",
-            "route_candidate",
-            "review_candidate_placement",
-            "list_pod_content",
-            "create_private_pod_with_package",
-            "join_pod",
-            "submit_candidate",
-            "inspect_candidate",
-            "materialize_discovery_tasks",
-            "list_discovery_tasks",
-            "list_ready_discovery_tasks",
-            "create_immediate_discovery_task",
-            "discovery_task_status",
-            "claim_discovery_task",
-            "renew_discovery_task",
-            "complete_discovery_task",
-            "fail_discovery_task",
-            "get_pod_package",
-            "export_pod_package",
-            "import_pod_package",
-            "fork_pod_package",
-            "validate_pod_package",
-            "get_node_info",
-            "list_trusted_peers",
-            "add_trusted_peer",
-            "subscribe_public_pod",
-            "synchronize_subscription",
-            "sync_pod_with_peer",
-            "export_pod_events",
-            "import_pod_events",
-        ]
+        registry::names()
     }
 
     pub fn call(&self, call: McpToolCall) -> anyhow::Result<Value> {
-        if async_tool(&call.tool).is_some() {
+        if let Some(error) = legacy_tool_error(&call.tool) {
+            return Err(error);
+        }
+        let definition = tool_definition(&call.tool)
+            .ok_or_else(|| anyhow::anyhow!("unknown MCP tool {}", call.tool))?;
+        if definition.handler == ToolHandlerKind::Async {
             return Err(anyhow::anyhow!(
                 "{} requires the asynchronous MCP dispatcher",
                 call.tool
             ));
         }
-        match call.tool.as_str() {
-            "get_feed_batch" => {
+        use McpTool::*;
+        match definition.tool {
+            GetFeedBatch => {
                 let request = serde_json::from_value(call.arguments)?;
                 Ok(json!(self.tools.get_feed_batch(
                     &self.ctx,
@@ -137,7 +84,7 @@ impl McpToolRouter {
                     chrono::Utc::now(),
                 )?))
             }
-            "complete_feed_batch" => {
+            CompleteFeedBatch => {
                 let id = arg_string(&call.arguments, "batch_id")?.parse()?;
                 Ok(json!(self.tools.complete_feed_batch(
                     &self.ctx,
@@ -145,7 +92,7 @@ impl McpToolRouter {
                     chrono::Utc::now(),
                 )?))
             }
-            "record_feed_feedback" => {
+            RecordFeedFeedback => {
                 let id = arg_string(&call.arguments, "content_item_id")?.parse()?;
                 let kind = arg_string(&call.arguments, "kind")?
                     .parse::<FeedbackKind>()
@@ -159,7 +106,7 @@ impl McpToolRouter {
                     chrono::Utc::now(),
                 )?))
             }
-            "set_priority_subscription" => {
+            SetPrioritySubscription => {
                 let request: SetPrioritySubscriptionRequest =
                     serde_json::from_value(call.arguments)?;
                 self.tools.set_priority_subscription(
@@ -169,29 +116,29 @@ impl McpToolRouter {
                 )?;
                 Ok(json!({"status": "updated"}))
             }
-            "get_taste_profile" => Ok(json!(self.tools.taste_profile(&self.ctx)?)),
-            "update_taste_profile" => {
+            GetTasteProfile => Ok(json!(self.tools.taste_profile(&self.ctx)?)),
+            UpdateTasteProfile => {
                 let request = serde_json::from_value(call.arguments)?;
                 Ok(json!(self
                     .tools
                     .update_taste_profile(&self.ctx, request)?))
             }
-            "reset_learned_taste" => {
+            ResetLearnedTaste => {
                 let request = serde_json::from_value(call.arguments)?;
                 Ok(json!(self.tools.reset_learned_taste(&self.ctx, request)?))
             }
-            "register_agent_harness" => {
+            RegisterAgentHarness => {
                 let request = serde_json::from_value(call.arguments)?;
                 Ok(json!(self
                     .tools
                     .register_agent_harness(&self.ctx, request)?))
             }
-            "revoke_agent_harness" => {
+            RevokeAgentHarness => {
                 let id = arg_string(&call.arguments, "harness_id")?.parse()?;
                 self.tools.revoke_agent_harness(&self.ctx, id)?;
                 Ok(json!({"revoked": id}))
             }
-            "create_pending_proposal" => {
+            CreatePendingProposal => {
                 let request = serde_json::from_value(call.arguments)?;
                 Ok(json!(self.tools.create_pending_proposal_from_request(
                     &self.ctx,
@@ -199,7 +146,7 @@ impl McpToolRouter {
                     chrono::Utc::now(),
                 )?))
             }
-            "get_pending_proposal" => {
+            GetPendingProposal => {
                 let id = arg_string(&call.arguments, "proposal_id")?.parse()?;
                 Ok(json!(self.tools.pending_proposal(
                     &self.ctx,
@@ -207,7 +154,7 @@ impl McpToolRouter {
                     chrono::Utc::now(),
                 )?))
             }
-            "approve_pending_proposal" => {
+            ApprovePendingProposal => {
                 let id = arg_string(&call.arguments, "proposal_id")?.parse()?;
                 Ok(json!(self.tools.approve_pending_proposal(
                     &self.ctx,
@@ -215,7 +162,7 @@ impl McpToolRouter {
                     chrono::Utc::now(),
                 )?))
             }
-            "reject_pending_proposal" => {
+            RejectPendingProposal => {
                 let id = arg_string(&call.arguments, "proposal_id")?.parse()?;
                 let reason = arg_string(&call.arguments, "reason")?;
                 Ok(json!(self.tools.reject_pending_proposal(
@@ -225,8 +172,8 @@ impl McpToolRouter {
                     reason,
                 )?))
             }
-            "list_pods" => Ok(json!(self.tools.list_pods_for_harness(&self.ctx)?)),
-            "create_pod" => {
+            ListPods => Ok(json!(self.tools.list_pods_for_harness(&self.ctx)?)),
+            CreatePod => {
                 let request: CreatePodRequest = serde_json::from_value(call.arguments)?;
                 Ok(json!(self.tools.request_create_pod(
                     &self.ctx,
@@ -234,7 +181,7 @@ impl McpToolRouter {
                     chrono::Utc::now(),
                 )?))
             }
-            "route_candidate" => {
+            RouteCandidate => {
                 let request: RouteCandidateArguments = serde_json::from_value(call.arguments)?;
                 Ok(json!(self.tools.route_candidate_placement(
                     &self.ctx,
@@ -247,7 +194,7 @@ impl McpToolRouter {
                     chrono::Utc::now(),
                 )?))
             }
-            "review_candidate_placement" => {
+            ReviewCandidatePlacement => {
                 let request: ReviewCandidatePlacementArguments =
                     serde_json::from_value(call.arguments)?;
                 Ok(json!(self.tools.review_candidate_placement(
@@ -259,42 +206,42 @@ impl McpToolRouter {
                     chrono::Utc::now(),
                 )?))
             }
-            "list_pod_content" => {
+            ListPodContent => {
                 let pod_id = arg_string(&call.arguments, "pod_id")?.parse()?;
                 Ok(json!(self.tools.pod_content_stream(&self.ctx, pod_id)?))
             }
-            "create_private_pod_with_package" => {
+            CreatePrivatePodWithPackage => {
                 let request: CreatePrivatePodWithPackageRequest =
                     serde_json::from_value(call.arguments)?;
                 Ok(json!(self
                     .tools
                     .create_private_pod_with_package(&self.ctx, request)?))
             }
-            "join_pod" => {
+            JoinPod => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
                 self.tools.join_pod(&self.ctx, &pod_slug)?;
                 Ok(json!({"joined": pod_slug}))
             }
-            "submit_candidate" => {
+            SubmitCandidate => {
                 let request = serde_json::from_value(call.arguments)?;
                 Ok(json!(self.tools.submit_candidate(&self.ctx, request)?))
             }
-            "inspect_candidate" => {
+            InspectCandidate => {
                 let candidate_id = arg_string(&call.arguments, "candidate_id")?.parse()?;
                 Ok(json!(self
                     .tools
                     .inspect_candidate(&self.ctx, candidate_id)?))
             }
-            "materialize_discovery_tasks" => Ok(json!(self
+            MaterializeDiscoveryTasks => Ok(json!(self
                 .tools
                 .materialize_due_discovery_tasks(&self.ctx, chrono::Utc::now(),)?)),
-            "list_discovery_tasks" => Ok(json!(self
+            ListDiscoveryTasks => Ok(json!(self
                 .tools
                 .list_discovery_tasks(&self.ctx, chrono::Utc::now())?)),
-            "list_ready_discovery_tasks" => Ok(json!(self
+            ListReadyDiscoveryTasks => Ok(json!(self
                 .tools
                 .list_ready_discovery_tasks(&self.ctx, chrono::Utc::now())?)),
-            "create_immediate_discovery_task" => {
+            CreateImmediateDiscoveryTask => {
                 let request = serde_json::from_value(call.arguments)?;
                 Ok(json!(self.tools.create_immediate_discovery_task(
                     &self.ctx,
@@ -302,7 +249,7 @@ impl McpToolRouter {
                     chrono::Utc::now(),
                 )?))
             }
-            "discovery_task_status" => {
+            DiscoveryTaskStatus => {
                 let task_id = arg_string(&call.arguments, "task_id")?.parse()?;
                 Ok(json!(self.tools.discovery_task_status(
                     &self.ctx,
@@ -310,7 +257,7 @@ impl McpToolRouter {
                     chrono::Utc::now(),
                 )?))
             }
-            "claim_discovery_task" | "renew_discovery_task" => {
+            ClaimDiscoveryTask | RenewDiscoveryTask => {
                 let task_id = arg_string(&call.arguments, "task_id")?.parse()?;
                 let lease_seconds = call
                     .arguments
@@ -319,7 +266,7 @@ impl McpToolRouter {
                     .unwrap_or(300);
                 let lease_seconds = DiscoveryLeaseSeconds::new(lease_seconds)?;
                 let now = chrono::Utc::now();
-                let task = if call.tool == "claim_discovery_task" {
+                let task = if definition.tool == ClaimDiscoveryTask {
                     self.tools
                         .claim_discovery_task(&self.ctx, task_id, now, lease_seconds)?
                 } else {
@@ -328,7 +275,7 @@ impl McpToolRouter {
                 };
                 Ok(json!(task))
             }
-            "complete_discovery_task" => {
+            CompleteDiscoveryTask => {
                 let task_id = arg_string(&call.arguments, "task_id")?.parse()?;
                 Ok(json!(self.tools.complete_discovery_task(
                     &self.ctx,
@@ -336,7 +283,7 @@ impl McpToolRouter {
                     chrono::Utc::now()
                 )?))
             }
-            "fail_discovery_task" => {
+            FailDiscoveryTask => {
                 let task_id = arg_string(&call.arguments, "task_id")?.parse()?;
                 let reason = arg_string(&call.arguments, "reason")?;
                 Ok(json!(self.tools.fail_discovery_task(
@@ -346,15 +293,15 @@ impl McpToolRouter {
                     reason
                 )?))
             }
-            "get_pod_package" => {
+            GetPodPackage => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
                 Ok(json!(self.tools.get_skill_pack(&self.ctx, &pod_slug)?))
             }
-            "export_pod_package" => {
+            ExportPodPackage => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
                 Ok(json!(self.tools.export_skill_pack(&self.ctx, &pod_slug)?))
             }
-            "import_pod_package" => {
+            ImportPodPackage => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
                 let files = call
                     .arguments
@@ -367,7 +314,7 @@ impl McpToolRouter {
                     serde_json::from_value(files)?
                 )?))
             }
-            "fork_pod_package" => {
+            ForkPodPackage => {
                 let source = arg_string(&call.arguments, "source_pod_slug")?;
                 let target: CreatePodRequest =
                     serde_json::from_value(call.arguments["target"].clone())?;
@@ -375,15 +322,15 @@ impl McpToolRouter {
                     .tools
                     .fork_skill_pack(&self.ctx, &source, target)?))
             }
-            "validate_pod_package" => {
+            ValidatePodPackage => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
                 Ok(json!(self
                     .tools
                     .validate_pod_skill_pack(&self.ctx, &pod_slug)?))
             }
-            "get_node_info" => Ok(json!(self.tools.node_info(&self.ctx)?)),
-            "list_trusted_peers" => Ok(json!(self.tools.trusted_peers(&self.ctx)?)),
-            "add_trusted_peer" => {
+            GetNodeInfo => Ok(json!(self.tools.node_info(&self.ctx)?)),
+            ListTrustedPeers => Ok(json!(self.tools.trusted_peers(&self.ctx)?)),
+            AddTrustedPeer => {
                 let display_name = arg_string(&call.arguments, "display_name")?;
                 let base_url = arg_string(&call.arguments, "base_url")?;
                 let public_key = arg_string(&call.arguments, "public_key")?;
@@ -395,11 +342,11 @@ impl McpToolRouter {
                     chrono::Utc::now(),
                 )?))
             }
-            "export_pod_events" => {
+            ExportPodEvents => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
                 Ok(json!(self.tools.export_pod_events(&self.ctx, &pod_slug)?))
             }
-            "import_pod_events" => {
+            ImportPodEvents => {
                 let peer_id = arg_string(&call.arguments, "peer_id")?.parse()?;
                 let events = call
                     .arguments
@@ -412,23 +359,7 @@ impl McpToolRouter {
                     serde_json::from_value(events)?,
                 )?}))
             }
-            "submit_link_to_pod" => Err(LegacyContract::LegacySubmission.error().into()),
-            "add_source_to_pod" | "crawl_pod_sources" => {
-                Err(LegacyContract::CrawlerSourceConnector.error().into())
-            }
-            "discover_in_pod" | "stumble_pod" | "get_pod_brief" => {
-                Err(LegacyContract::LegacyFeedPresentation.error().into())
-            }
-            "save_link" | "rate_link" | "block_source" | "block_topic" => {
-                Err(LegacyContract::LegacyFeedback.error().into())
-            }
-            "get_pod_skill"
-            | "list_pod_skills"
-            | "export_pod_skill_pack"
-            | "import_pod_skill_pack"
-            | "fork_pod_skill_pack"
-            | "validate_pod_skill_pack" => Err(LegacyContract::LegacySkillPack.error().into()),
-            unknown => Err(anyhow::anyhow!("unknown MCP tool {unknown}")),
+            SubscribePublicPod | SynchronizeSubscription | SyncPodWithPeer => unreachable!(),
         }
     }
 
@@ -446,23 +377,29 @@ impl McpToolRouter {
     /// Returns an error for invalid arguments, authorization failures,
     /// incompatible peers, network failures, or underlying tool failures.
     pub async fn call_async(&self, call: McpToolCall) -> anyhow::Result<Value> {
-        match async_tool(&call.tool) {
-            Some(AsyncTool::SubscribePublicPod) => {
-                self.tools.require_harness_capability(
-                    &self.ctx,
-                    HarnessCapability::SubscriptionManagement,
-                )?;
+        if let Some(error) = legacy_tool_error(&call.tool) {
+            return Err(error);
+        }
+        let definition = tool_definition(&call.tool)
+            .ok_or_else(|| anyhow::anyhow!("unknown MCP tool {}", call.tool))?;
+        if definition.handler == ToolHandlerKind::Async {
+            if let Some(capability) = definition.capability {
+                self.require_capability_on_blocking(capability).await?;
+            }
+        }
+        match definition.handler {
+            ToolHandlerKind::Blocking => {
+                let router = self.clone();
+                tokio::task::spawn_blocking(move || router.call(call)).await?
+            }
+            ToolHandlerKind::Async if definition.tool == McpTool::SubscribePublicPod => {
                 let public_pod_url = arg_string(&call.arguments, "public_pod_url")?;
                 Ok(json!(
                     stumble_sync::subscribe_pod_from_url(&self.tools, &self.ctx, &public_pod_url,)
                         .await?
                 ))
             }
-            Some(AsyncTool::SynchronizeSubscription) => {
-                self.tools.require_harness_capability(
-                    &self.ctx,
-                    HarnessCapability::SubscriptionManagement,
-                )?;
+            ToolHandlerKind::Async if definition.tool == McpTool::SynchronizeSubscription => {
                 let subscription_id = arg_string(&call.arguments, "subscription_id")?.parse()?;
                 Ok(json!(
                     stumble_sync::synchronize_subscription_from_origin(
@@ -473,16 +410,19 @@ impl McpToolRouter {
                     .await?
                 ))
             }
-            Some(AsyncTool::SyncPodWithPeer) => {
+            ToolHandlerKind::Async if definition.tool == McpTool::SyncPodWithPeer => {
                 let peer_id = arg_string(&call.arguments, "peer_id")?.parse()?;
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
-                let peer = self.tools.trusted_peer(&self.ctx, peer_id)?;
+                let tools = self.tools.clone();
+                let ctx = self.ctx.clone();
+                let peer = tokio::task::spawn_blocking(move || tools.trusted_peer(&ctx, peer_id))
+                    .await??;
                 Ok(json!(
                     stumble_sync::sync_pod_from_peer(&self.tools, &self.ctx, &peer, &pod_slug,)
                         .await?
                 ))
             }
-            None => self.call(call),
+            ToolHandlerKind::Async => unreachable!("registry async handler has no dispatcher"),
         }
     }
 
@@ -491,6 +431,38 @@ impl McpToolRouter {
         validate_call_arguments(&call)?;
         self.call_async(call).await.map_err(classify_call_error)
     }
+
+    async fn require_capability_on_blocking(
+        &self,
+        capability: HarnessCapability,
+    ) -> anyhow::Result<()> {
+        let tools = self.tools.clone();
+        let ctx = self.ctx.clone();
+        tokio::task::spawn_blocking(move || tools.require_harness_capability(&ctx, capability))
+            .await??;
+        Ok(())
+    }
+}
+
+fn legacy_tool_error(name: &str) -> Option<anyhow::Error> {
+    let contract = match name {
+        "submit_link_to_pod" => LegacyContract::LegacySubmission,
+        "add_source_to_pod" | "crawl_pod_sources" => LegacyContract::CrawlerSourceConnector,
+        "discover_in_pod" | "stumble_pod" | "get_pod_brief" => {
+            LegacyContract::LegacyFeedPresentation
+        }
+        "save_link" | "rate_link" | "block_source" | "block_topic" => {
+            LegacyContract::LegacyFeedback
+        }
+        "get_pod_skill"
+        | "list_pod_skills"
+        | "export_pod_skill_pack"
+        | "import_pod_skill_pack"
+        | "fork_pod_skill_pack"
+        | "validate_pod_skill_pack" => LegacyContract::LegacySkillPack,
+        _ => return None,
+    };
+    Some(contract.error().into())
 }
 
 fn validate_call_arguments(call: &McpToolCall) -> Result<(), McpToolCallError> {
@@ -553,6 +525,54 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn every_supported_tool_has_one_complete_definition() {
+        let definitions = registry::definitions();
+        assert_eq!(definitions.len(), McpTool::VARIANT_COUNT);
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|definition| definition.tool)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            definitions.len()
+        );
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|definition| definition.name)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            definitions.len()
+        );
+        assert_eq!(
+            definitions
+                .iter()
+                .filter(|definition| definition.handler == ToolHandlerKind::Async)
+                .map(|definition| definition.tool)
+                .collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from([
+                McpTool::SubscribePublicPod,
+                McpTool::SynchronizeSubscription,
+                McpTool::SyncPodWithPeer,
+            ])
+        );
+        let mut discovery_order = definitions
+            .iter()
+            .filter_map(|definition| definition.discovery_order)
+            .collect::<Vec<_>>();
+        discovery_order.sort_unstable();
+        assert_eq!(
+            discovery_order,
+            (0..discovery_order.len()).collect::<Vec<_>>()
+        );
+        for name in McpToolRouter::tool_names() {
+            let definition = tool_definition(name).expect("supported tool definition");
+            assert_eq!(definition.name, *name);
+            assert!(definition.input_schema.is_object());
+        }
+    }
+
+    #[test]
     fn harness_capability_denial_is_returned_by_mcp() {
         let tools = AgentTools::new(seed_store());
         let owner = tools.default_auth_context().unwrap();
@@ -575,5 +595,24 @@ mod tests {
             })
             .unwrap_err();
         assert!(error.to_string().contains("harness grant lacks feedback"));
+    }
+
+    #[tokio::test]
+    async fn asynchronous_entrypoint_preserves_retired_contract_errors() {
+        let tools = AgentTools::new(seed_store());
+        let router = McpToolRouter::new(tools.clone(), tools.default_auth_context().unwrap());
+
+        let error = router
+            .call_async(McpToolCall {
+                tool: "submit_link_to_pod".into(),
+                arguments: json!({}),
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            LegacyContract::LegacySubmission.error().to_string()
+        );
     }
 }

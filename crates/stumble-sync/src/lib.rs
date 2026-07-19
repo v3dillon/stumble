@@ -22,6 +22,8 @@ pub struct HubRefreshReport {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DirectSubscriptionError {
+    #[error("direct subscription core task failed")]
+    CoreTask(#[source] tokio::task::JoinError),
     #[error("invalid public Pod URL {url}")]
     InvalidUrl {
         url: String,
@@ -154,15 +156,25 @@ pub async fn subscribe_pod_from_url(
     ctx: &AuthContext,
     public_pod_url: &str,
 ) -> Result<SynchronizationResult, DirectSubscriptionError> {
-    let public_pod_url = canonical_public_pod_url(public_pod_url)
+    let address = public_pod_url.to_owned();
+    let public_pod_url = tokio::task::spawn_blocking(move || canonical_public_pod_url(&address))
+        .await
+        .map_err(DirectSubscriptionError::CoreTask)?
         .map_err(DirectSubscriptionError::InvalidAddress)?;
     let client = origin_client(&public_pod_url)?;
     let snapshot = fetch_pod_snapshot(&client, &public_pod_url, None).await?;
-    Ok(tools.subscribe_public_pod(
-        ctx,
-        SubscribePublicPodRequest::new(public_pod_url, snapshot),
-        chrono::Utc::now(),
-    )?)
+    let tools = tools.clone();
+    let ctx = ctx.clone();
+    tokio::task::spawn_blocking(move || {
+        tools.subscribe_public_pod(
+            &ctx,
+            SubscribePublicPodRequest::new(public_pod_url, snapshot),
+            chrono::Utc::now(),
+        )
+    })
+    .await
+    .map_err(DirectSubscriptionError::CoreTask)?
+    .map_err(DirectSubscriptionError::Core)
 }
 
 /// Fetches and applies only events after a Subscription's stored cursor.
@@ -176,17 +188,28 @@ pub async fn synchronize_subscription_from_origin(
     ctx: &AuthContext,
     subscription_id: SubscriptionId,
 ) -> Result<SynchronizationResult, DirectSubscriptionError> {
-    let subscription = tools.subscription(ctx, subscription_id)?;
-    let public_pod_url = canonical_public_pod_url(&subscription.public_pod_url)
-        .map_err(DirectSubscriptionError::InvalidAddress)?;
+    let read_tools = tools.clone();
+    let read_ctx = ctx.clone();
+    let (public_pod_url, cursor) = tokio::task::spawn_blocking(move || {
+        let subscription = read_tools
+            .subscription(&read_ctx, subscription_id)
+            .map_err(DirectSubscriptionError::Core)?;
+        let public_pod_url = canonical_public_pod_url(&subscription.public_pod_url)
+            .map_err(DirectSubscriptionError::InvalidAddress)?;
+        Ok::<_, DirectSubscriptionError>((public_pod_url, subscription.last_event_hash))
+    })
+    .await
+    .map_err(DirectSubscriptionError::CoreTask)??;
     let client = origin_client(&public_pod_url)?;
-    let snapshot = fetch_pod_snapshot(
-        &client,
-        &public_pod_url,
-        subscription.last_event_hash.as_deref(),
-    )
-    .await?;
-    Ok(tools.synchronize_subscription(ctx, subscription_id, snapshot)?)
+    let snapshot = fetch_pod_snapshot(&client, &public_pod_url, cursor.as_deref()).await?;
+    let tools = tools.clone();
+    let ctx = ctx.clone();
+    tokio::task::spawn_blocking(move || {
+        tools.synchronize_subscription(&ctx, subscription_id, snapshot)
+    })
+    .await
+    .map_err(DirectSubscriptionError::CoreTask)?
+    .map_err(DirectSubscriptionError::Core)
 }
 
 fn origin_client(public_pod_url: &str) -> Result<reqwest::Client, DirectSubscriptionError> {

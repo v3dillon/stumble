@@ -383,8 +383,10 @@ async fn stdio_dispatches_direct_subscription_and_incremental_synchronization() 
         }
     });
     let mut subscribe_output = Vec::new();
+    let stdio_home = home.clone();
+    let stdio_context = context.clone();
     serve_stdio(
-        || Ok((home.clone(), context.clone())),
+        move || Ok((stdio_home.clone(), stdio_context.clone())),
         std::io::Cursor::new(format!("{subscribe_request}\n")),
         &mut subscribe_output,
     )
@@ -412,8 +414,10 @@ async fn stdio_dispatches_direct_subscription_and_incremental_synchronization() 
         }
     });
     let mut synchronize_output = Vec::new();
+    let stdio_home = home.clone();
+    let stdio_context = context.clone();
     serve_stdio(
-        || Ok((home.clone(), context.clone())),
+        move || Ok((stdio_home.clone(), stdio_context.clone())),
         std::io::Cursor::new(format!("{synchronize_request}\n")),
         &mut synchronize_output,
     )

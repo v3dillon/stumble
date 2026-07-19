@@ -3,6 +3,7 @@
 use anyhow::Context;
 use serde_json::Value;
 use std::io::{BufRead, Write};
+use std::sync::Arc;
 use stumble_core::{AgentTools, AuthContext};
 
 use crate::protocol::{dispatch_authenticated, rpc_error_value, JsonRpcRequest};
@@ -17,15 +18,20 @@ use crate::protocol::{dispatch_authenticated, rpc_error_value, JsonRpcRequest};
 /// Returns an error when a session cannot be authenticated, input cannot be
 /// read, or a response cannot be written.
 pub async fn serve_stdio(
-    mut authenticate: impl FnMut() -> anyhow::Result<(AgentTools, AuthContext)>,
+    authenticate: impl Fn() -> anyhow::Result<(AgentTools, AuthContext)> + Send + Sync + 'static,
     input: impl BufRead,
     mut output: impl Write,
 ) -> anyhow::Result<()> {
+    let authenticate = Arc::new(authenticate);
     for line in input.lines() {
         let line = line.context("read MCP message from stdin")?;
         let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
             Ok(request) if request.has_valid_version() => {
-                let (tools, context) = authenticate().context("authenticate MCP session")?;
+                let authenticate = authenticate.clone();
+                let (tools, context) = tokio::task::spawn_blocking(move || authenticate())
+                    .await
+                    .context("join MCP authentication task")?
+                    .context("authenticate MCP session")?;
                 dispatch_authenticated(tools, context, request).await
             }
             Ok(request) => Some(rpc_error_value(

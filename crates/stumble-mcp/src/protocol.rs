@@ -9,7 +9,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use stumble_core::{AgentTools, AgentToolsError, AuthContext, HarnessCapability};
+use stumble_core::{AgentTools, AgentToolsError, AuthContext};
 use tracing::error;
 use url::Url;
 
@@ -250,7 +250,12 @@ pub(crate) async fn dispatch_authenticated(
                 "instructions": "Use Stumble to save provenance-bearing links, claim discovery work, and retrieve finite personal Feed Batches. Confirm write intent and preserve source provenance."
             })
         }
-        "tools/list" => json!({"tools": tool_descriptors(&tools, &context)}),
+        "tools/list" => {
+            let Ok(descriptors) = tool_descriptors_on_blocking(&tools, &context).await else {
+                return Some(rpc_error_value(id, -32603, "tool discovery task failed"));
+            };
+            json!({"tools": descriptors})
+        }
         "tools/call" => {
             let Some(name) = request.params.get("name").and_then(Value::as_str) else {
                 return Some(rpc_error_value(id, -32602, "missing tool name"));
@@ -260,7 +265,9 @@ pub(crate) async fn dispatch_authenticated(
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            let available_tools = tool_descriptors(&tools, &context);
+            let Ok(available_tools) = tool_descriptors_on_blocking(&tools, &context).await else {
+                return Some(rpc_error_value(id, -32603, "tool discovery task failed"));
+            };
             let Some(descriptor) = available_tools.iter().find(|tool| tool["name"] == name) else {
                 return Some(rpc_error_value(id, -32602, "unknown tool"));
             };
@@ -272,14 +279,7 @@ pub(crate) async fn dispatch_authenticated(
                 tool: name.to_string(),
                 arguments,
             };
-            let called = if McpToolRouter::requires_async_dispatch(name) {
-                router.call_async_checked(call).await
-            } else {
-                match tokio::task::spawn_blocking(move || router.call_checked(call)).await {
-                    Ok(result) => result,
-                    Err(error) => Err(McpToolCallError::Execution(error.into())),
-                }
-            };
+            let called = router.call_async_checked(call).await;
             return Some(match called {
                 Ok(value) => {
                     let structured = json!({"value": value});
@@ -372,308 +372,47 @@ fn negotiated_version(requested: &str) -> &str {
 }
 
 fn tool_descriptors(tools: &AgentTools, context: &AuthContext) -> Vec<Value> {
-    vec![
-        descriptor(
-            "list_pods",
-            "List Pods",
-            "List the Pods visible to this Agent Harness.",
-            object_schema(json!({}), &[]),
-            true,
-            false,
-            None,
-        ),
-        descriptor(
-            "get_pod_package",
-            "Read Pod Package",
-            "Read the versioned context, curation instructions, and Source Rules for one Pod.",
-            object_schema(json!({"pod_slug": {"type": "string"}}), &["pod_slug"]),
-            true,
-            false,
-            None,
-        ),
-        descriptor(
-            "create_pod",
-            "Create Pod",
-            "Create an isolated Pod. Public exposure returns a Pending Proposal and does not take effect until independently approved.",
-            object_schema(
-                json!({
-                    "name": {"type": "string"},
-                    "slug": {"type": "string"},
-                    "description": {"type": "string"},
-                    "visibility": {"type": "string", "enum": ["private", "invite_only", "public"]}
-                }),
-                &["name", "slug", "description", "visibility"],
-            ),
-            false,
-            false,
-            Some(HarnessCapability::PodCuration),
-        ),
-        descriptor(
-            "get_pending_proposal",
-            "Inspect Pending Proposal",
-            "Inspect a sensitive change before making an independent approval decision.",
-            object_schema(
-                json!({"proposal_id": {"type": "string", "format": "uuid"}}),
-                &["proposal_id"],
-            ),
-            true,
-            false,
-            Some(HarnessCapability::Approval),
-        ),
-        descriptor(
-            "approve_pending_proposal",
-            "Approve Pending Proposal",
-            "Approve a sensitive change as a separately authorized interactive Harness.",
-            object_schema(
-                json!({"proposal_id": {"type": "string", "format": "uuid"}}),
-                &["proposal_id"],
-            ),
-            false,
-            false,
-            Some(HarnessCapability::Approval),
-        ),
-        descriptor(
-            "reject_pending_proposal",
-            "Reject Pending Proposal",
-            "Reject a sensitive change as a separately authorized interactive Agent Harness.",
-            object_schema(
-                json!({
-                    "proposal_id": {"type": "string", "format": "uuid"},
-                    "reason": {"type": "string"}
-                }),
-                &["proposal_id", "reason"],
-            ),
-            false,
-            false,
-            Some(HarnessCapability::Approval),
-        ),
-        descriptor(
-            "route_candidate",
-            "Route Candidate",
-            "Propose an evidence-backed Pod Placement for a private Candidate in an authorized local Pod.",
-            object_schema(
-                json!({
-                    "candidate_id": {"type": "string", "format": "uuid"},
-                    "pod_id": {"type": "string", "format": "uuid"},
-                    "reason": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0}
-                }),
-                &["candidate_id", "pod_id", "reason", "confidence"],
-            ),
-            false,
-            false,
-            Some(HarnessCapability::PodCuration),
-        ),
-        descriptor(
-            "review_candidate_placement",
-            "Review Candidate Placement",
-            "Accept or reject one pending Pod Placement under existing curation authority.",
-            object_schema(
-                json!({
-                    "candidate_id": {"type": "string", "format": "uuid"},
-                    "pod_id": {"type": "string", "format": "uuid"},
-                    "decision": {"type": "string", "enum": ["accept", "reject"]},
-                    "note": {"type": "string"}
-                }),
-                &["candidate_id", "pod_id", "decision"],
-            ),
-            false,
-            false,
-            Some(HarnessCapability::PodCuration),
-        ),
-        descriptor(
-            "list_pod_content",
-            "List Pod Content",
-            "List the complete accepted Content Item stream for one Pod without private Candidate data.",
-            object_schema(
-                json!({"pod_id": {"type": "string", "format": "uuid"}}),
-                &["pod_id"],
-            ),
-            true,
-            false,
-            Some(HarnessCapability::FeedRead),
-        ),
-        descriptor(
-            "subscribe_public_pod",
-            "Subscribe to Public Pod",
-            "Subscribe to a canonical public Pod URL and import its verified signed history from the Origin Node.",
-            object_schema(
-                json!({"public_pod_url": {"type": "string", "format": "uri"}}),
-                &["public_pod_url"],
-            ),
-            false,
-            false,
-            Some(HarnessCapability::SubscriptionManagement),
-        ),
-        descriptor(
-            "synchronize_subscription",
-            "Synchronize Subscription",
-            "Fetch and apply signed Pod Events from the Origin Node after the Subscription's verified cursor.",
-            object_schema(
-                json!({"subscription_id": {"type": "string", "format": "uuid"}}),
-                &["subscription_id"],
-            ),
-            false,
-            false,
-            Some(HarnessCapability::SubscriptionManagement),
-        ),
-        descriptor(
-            "submit_candidate",
-            "Save Discovered Link",
-            "Submit one externally discovered link with source metadata, provenance, and proposed Pod Placements. This creates a private Candidate, not an Accepted Placement.",
-            candidate_schema(),
-            false,
-            false,
-            Some(HarnessCapability::CandidateSubmission),
-        ),
-        descriptor(
-            "inspect_candidate",
-            "Inspect Candidate",
-            "Inspect a private Candidate and its independent provenance records.",
-            object_schema(
-                json!({"candidate_id": {"type": "string", "format": "uuid"}}),
-                &["candidate_id"],
-            ),
-            true,
-            false,
-            Some(HarnessCapability::CandidateSubmission),
-        ),
-        descriptor(
-            "list_ready_discovery_tasks",
-            "List Ready Discovery Tasks",
-            "List due discovery work that this Agent Harness is authorized to claim.",
-            object_schema(json!({}), &[]),
-            true,
-            false,
-            Some(HarnessCapability::DiscoveryTasks),
-        ),
-        descriptor(
-            "create_immediate_discovery_task",
-            "Request Discovery",
-            "Create retry-safe discovery work for a Pod from the user's current instructions.",
-            object_schema(
-                json!({
-                    "pod_id": {"type": "string", "format": "uuid"},
-                    "instructions": {"type": "string"},
-                    "idempotency_key": {"type": "string"}
-                }),
-                &["pod_id", "instructions", "idempotency_key"],
-            ),
-            false,
-            false,
-            Some(HarnessCapability::DiscoveryTasks),
-        ),
-        descriptor(
-            "claim_discovery_task",
-            "Claim Discovery Task",
-            "Claim a ready Discovery Task with an exclusive, expiring lease.",
-            task_lease_schema(),
-            false,
-            false,
-            Some(HarnessCapability::DiscoveryTasks),
-        ),
-        descriptor(
-            "complete_discovery_task",
-            "Complete Discovery Task",
-            "Mark a claimed Discovery Task complete after its Candidates have been submitted.",
-            task_id_schema(),
-            false,
-            false,
-            Some(HarnessCapability::DiscoveryTasks),
-        ),
-        descriptor(
-            "fail_discovery_task",
-            "Fail Discovery Task",
-            "Record a failed Discovery Task attempt with an inspectable reason.",
-            object_schema(
-                json!({
-                    "task_id": {"type": "string", "format": "uuid"},
-                    "reason": {"type": "string"}
-                }),
-                &["task_id", "reason"],
-            ),
-            false,
-            true,
-            Some(HarnessCapability::DiscoveryTasks),
-        ),
-        descriptor(
-            "get_feed_batch",
-            "Get Personal Feed",
-            "Return a stable finite Feed Batch with provenance, explanations, and allowed actions.",
-            feed_batch_schema(),
-            false,
-            false,
-            Some(HarnessCapability::FeedRead),
-        ),
-        descriptor(
-            "complete_feed_batch",
-            "Complete Feed Batch",
-            "Mark a finite Feed Batch complete after presentation.",
-            object_schema(
-                json!({"batch_id": {"type": "string", "format": "uuid"}}),
-                &["batch_id"],
-            ),
-            false,
-            false,
-            Some(HarnessCapability::FeedRead),
-        ),
-        descriptor(
-            "record_feed_feedback",
-            "Record Feed Feedback",
-            "Record an explicit private Feedback Signal for a delivered Content Item.",
-            object_schema(
-                json!({
-                    "content_item_id": {"type": "string", "format": "uuid"},
-                    "kind": {
-                        "type": "string",
-                        "enum": ["interesting", "not_for_me", "dismissed", "saved", "block_source", "block_topic"]
-                    },
-                    "topic": {"type": "string"},
-                    "reason": {"type": "string"}
-                }),
-                &["content_item_id", "kind"],
-            ),
-            false,
-            false,
-            Some(HarnessCapability::Feedback),
-        ),
-    ]
-    .into_iter()
-    .filter_map(|(capability, descriptor)| {
-        capability
-            .is_none_or(|capability| {
-                tools
-                    .require_harness_capability(context, capability)
-                    .is_ok()
+    let mut definitions = crate::registry::definitions()
+        .iter()
+        .filter_map(|definition| {
+            definition.discovery_order.and_then(|order| {
+                definition
+                    .capability
+                    .is_none_or(|capability| {
+                        tools
+                            .require_harness_capability(context, capability)
+                            .is_ok()
+                    })
+                    .then_some((order, definition))
             })
-            .then_some(descriptor)
-    })
-    .collect()
+        })
+        .collect::<Vec<_>>();
+    definitions.sort_by_key(|(order, _)| *order);
+    definitions
+        .into_iter()
+        .map(|(_, definition)| {
+            json!({
+                "name": definition.name,
+                "title": definition.title,
+                "description": definition.description,
+                "inputSchema": definition.input_schema,
+                "annotations": {
+                    "readOnlyHint": definition.read_only,
+                    "openWorldHint": false,
+                    "destructiveHint": definition.destructive
+                }
+            })
+        })
+        .collect()
 }
 
-fn descriptor(
-    name: &str,
-    title: &str,
-    description: &str,
-    input_schema: Value,
-    read_only: bool,
-    destructive: bool,
-    capability: Option<HarnessCapability>,
-) -> (Option<HarnessCapability>, Value) {
-    (
-        capability,
-        json!({
-            "name": name,
-            "title": title,
-            "description": description,
-            "inputSchema": input_schema,
-            "annotations": {
-                "readOnlyHint": read_only,
-                "openWorldHint": false,
-                "destructiveHint": destructive
-            }
-        }),
-    )
+async fn tool_descriptors_on_blocking(
+    tools: &AgentTools,
+    context: &AuthContext,
+) -> Result<Vec<Value>, tokio::task::JoinError> {
+    let tools = tools.clone();
+    let context = context.clone();
+    tokio::task::spawn_blocking(move || tool_descriptors(&tools, &context)).await
 }
 
 fn validate_schema(schema: &Value, value: &Value, path: &str) -> Result<(), String> {
@@ -776,144 +515,4 @@ fn value_matches_type(value: &Value, expected: &str) -> bool {
         "null" => value.is_null(),
         _ => false,
     }
-}
-
-fn object_schema(properties: Value, required: &[&str]) -> Value {
-    json!({
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": false
-    })
-}
-
-fn task_id_schema() -> Value {
-    object_schema(
-        json!({"task_id": {"type": "string", "format": "uuid"}}),
-        &["task_id"],
-    )
-}
-
-fn task_lease_schema() -> Value {
-    object_schema(
-        json!({
-            "task_id": {"type": "string", "format": "uuid"},
-            "lease_seconds": {"type": "integer", "minimum": 1, "maximum": 604800}
-        }),
-        &["task_id"],
-    )
-}
-
-fn feed_batch_schema() -> Value {
-    object_schema(
-        json!({
-            "size": {"type": "integer", "minimum": 1, "maximum": 100},
-            "recurrence_penalty_days": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 36500
-            },
-            "feed_mix": {
-                "type": "object",
-                "properties": {
-                    "high_value_percent": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "exploration_percent": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "old_gem_percent": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "per_pod_cap": {"type": "integer", "minimum": 1},
-                    "per_source_cap": {"type": "integer", "minimum": 1}
-                },
-                "additionalProperties": false
-            },
-            "batch_intent": {
-                "type": "object",
-                "properties": {
-                    "focus_topics": {"type": "array", "items": {"type": "string"}},
-                    "avoid_topics": {"type": "array", "items": {"type": "string"}}
-                },
-                "additionalProperties": false
-            }
-        }),
-        &[],
-    )
-}
-
-fn candidate_schema() -> Value {
-    object_schema(
-        json!({
-            "source_url": {"type": "string", "format": "uri"},
-            "source_metadata": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": ["string", "null"]},
-                    "author": {"type": ["string", "null"]},
-                    "published_at": {"type": ["string", "null"], "format": "date-time"}
-                },
-                "additionalProperties": false
-            },
-            "permitted_excerpt": {"type": ["string", "null"]},
-            "summary": {"type": ["string", "null"]},
-            "content_type": {
-                "type": "string",
-                "enum": ["article", "video", "audio", "image", "podcast", "repository", "dataset", "other"]
-            },
-            "media_references": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "media_type": {"type": "string", "enum": ["image", "video"]},
-                        "url": {"type": "string", "format": "uri"}
-                    },
-                    "required": ["media_type", "url"],
-                    "additionalProperties": false
-                }
-            },
-            "tags": {"type": "array", "items": {"type": "string"}},
-            "provenance": {
-                "type": "object",
-                "properties": {
-                    "discovered_at": {"type": "string", "format": "date-time"},
-                    "discovery_method": {"type": "string"},
-                    "referrer_url": {"type": ["string", "null"]}
-                },
-                "required": ["discovered_at", "discovery_method"],
-                "additionalProperties": false
-            },
-            "proposed_placements": {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "pod_id": {"type": "string", "format": "uuid"},
-                        "reason": {"type": "string"},
-                        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
-                    },
-                    "required": ["pod_id", "reason", "confidence"],
-                    "additionalProperties": false
-                }
-            },
-            "task_context": {
-                "type": ["object", "null"],
-                "properties": {
-                    "task_id": {"type": "string", "format": "uuid"},
-                    "package_version": {"type": "integer", "minimum": 1}
-                },
-                "required": ["task_id", "package_version"],
-                "additionalProperties": false
-            },
-            "harness_idempotency_key": {"type": "string"},
-            "client_idempotency_key": {"type": "string"}
-        }),
-        &[
-            "source_url",
-            "source_metadata",
-            "content_type",
-            "tags",
-            "provenance",
-            "proposed_placements",
-            "harness_idempotency_key",
-            "client_idempotency_key",
-        ],
-    )
 }
