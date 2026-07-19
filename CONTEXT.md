@@ -36,6 +36,26 @@ _Avoid_: Account, member
 The User's private combination of explicit preferences and inspectable learned weights that shapes Attention Value on their Home Node.
 _Avoid_: Engagement profile, recommendation identity
 
+**Interest Seed**:
+Weak private evidence created when a User submits a Content Reference, describing possible topic, author, source, and source-context affinities without becoming durable preference until corroborated. Agent-discovered Candidates never create Interest Seeds by themselves.
+_Avoid_: Implicit like, browsing event, engagement signal
+
+**Source Affinity**:
+An inspectable private preference for a content neighborhood such as a domain, publisher, author, account, or community, learned from Interest Seeds and Feedback Signals.
+_Avoid_: Follow, browsing history, platform profile
+
+**Discovery Plan**:
+A private, finite source-selection strategy for one discovery run that balances proven Source Affinities with adjacent exploration while honoring explicit blocks.
+_Avoid_: Search prompt, crawl configuration, source list
+
+**Discovery Lead**:
+A potential source neighborhood inferred from private User evidence or verified public Stumble metadata that may be selected into a Discovery Plan but is not yet a Candidate.
+_Avoid_: Candidate, recommendation, remote search query
+
+**Discovery Result Batch**:
+A finite private shortlist of Candidates returned from one Discovery Task for the User to review and explicitly save, place, reinforce, or reject.
+_Avoid_: Feed Batch, search results, scraped links
+
 **Home Node**:
 The User-controlled Stumble node that synchronizes subscribed Pod content and assembles the User's Feed locally.
 _Avoid_: Client, central server
@@ -192,8 +212,12 @@ An optional Home Node notification indicating that a new stable Feed Batch is av
 _Avoid_: Push feed, notification item
 
 **Discovery Task**:
-A leaseable unit of due discovery work derived from a Pod's Source Rules and completed by an Agent Harness.
+A leaseable unit of due discovery work derived from either a Pod's Source Rules or a User's private Discovery Plan and completed by an Agent Harness.
 _Avoid_: Crawl job, scheduled prompt
+
+**Personal Discovery**:
+User-scoped discovery governed by a private Discovery Plan that produces a Discovery Result Batch without requiring or modifying a Pod.
+_Avoid_: For You Pod, personal Pod, global recommendations
 
 **Scheduler Adapter**:
 A mechanism that wakes discovery workers, supplied either by an Agent Harness or by Stumble's local platform integration without changing Discovery Task semantics.
@@ -202,6 +226,10 @@ _Avoid_: Stumble scheduler, cron rule
 **Discovery-ready Event**:
 A notification that browser-required Discovery Tasks are waiting for an authorized Agent Harness to claim them.
 _Avoid_: Browser job, forced wake-up
+
+**Discovery-results-ready Event**:
+A private one-shot notification that a completed Discovery Result Batch is available for an Agent Harness to present or retain for the User.
+_Avoid_: Feed-ready Event, repeated reminder, push result
 
 **Browser Connector**:
 An Agent Harness capability that reads through its own User-approved browser session and submits discovered references to Stumble as Candidates.
