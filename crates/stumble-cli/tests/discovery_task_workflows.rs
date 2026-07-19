@@ -149,6 +149,10 @@ fn due_source_rules_automatically_materialize_once_and_list_with_filters_and_pag
     let first_items = first["data"]["items"].as_array().unwrap();
     assert_eq!(first_items.len(), 1);
     assert_eq!(first_items[0]["pod_id"], pod_id);
+    assert_eq!(first_items[0]["package_version"], 1);
+    assert_eq!(first_items[0]["target"]["kind"], "pod");
+    assert_eq!(first_items[0]["target"]["pod_id"], pod_id);
+    assert_eq!(first_items[0]["target"]["package_version"], 1);
     assert_eq!(first_items[0]["origin"]["kind"], "scheduled");
     let cursor = first["data"]["next_cursor"].as_str().unwrap();
 

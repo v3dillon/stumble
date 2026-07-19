@@ -2475,10 +2475,13 @@ impl AgentTools {
                     continue;
                 }
                 let due_at = cadence.period_start(now);
+                let target = DiscoveryTaskTarget::Pod {
+                    pod_id: package.pod_id,
+                    package_version: version,
+                };
                 let exists = store.discovery_tasks.values().any(|task| {
                     matches!(task.origin, DiscoveryTaskOrigin::Scheduled { source_rule_index: index } if index == source_rule_index)
-                        && task.pod_id == package.pod_id
-                        && task.package_version == version
+                        && task.target == target
                         && task.due_at == due_at
                 });
                 if exists {
@@ -2486,8 +2489,7 @@ impl AgentTools {
                 }
                 let task = DiscoveryTask {
                     id: Uuid::now_v7().into(),
-                    pod_id: package.pod_id,
-                    package_version: version,
+                    target,
                     origin: DiscoveryTaskOrigin::Scheduled { source_rule_index },
                     due_at,
                     state: DiscoveryTaskState::Pending,
@@ -2499,7 +2501,7 @@ impl AgentTools {
                     &mut store,
                     ctx,
                     HarnessWriteOperation::CreateDiscoveryTask,
-                    Some(task.pod_id),
+                    Some(package.pod_id),
                 );
                 created.push(task);
             }
@@ -2552,9 +2554,11 @@ impl AgentTools {
             .ok_or_else(|| StoreError::NotFound("Pod Package".into()))?;
         let task = DiscoveryTask {
             id: Uuid::now_v7().into(),
-            pod_id: request.pod_id,
-            package_version: PackageVersion::new(package.version)
-                .map_err(|error| StoreError::Validation(error.to_string()))?,
+            target: DiscoveryTaskTarget::Pod {
+                pod_id: request.pod_id,
+                package_version: PackageVersion::new(package.version)
+                    .map_err(|error| StoreError::Validation(error.to_string()))?,
+            },
             origin: DiscoveryTaskOrigin::Immediate {
                 instructions: request.instructions,
                 idempotency_key: request.idempotency_key,
@@ -2597,7 +2601,11 @@ impl AgentTools {
         Ok(store
             .discovery_tasks
             .values()
-            .filter(|task| scoped.is_none_or(|pods| pods.contains(&task.pod_id)))
+            .filter(|task| {
+                task.target
+                    .pod()
+                    .is_some_and(|(pod_id, _)| scoped.is_none_or(|pods| pods.contains(&pod_id)))
+            })
             .cloned()
             .map(|task| task_with_expired_lease_recorded(task, now))
             .collect())
@@ -2640,12 +2648,7 @@ impl AgentTools {
             .discovery_tasks
             .get(&task_id)
             .ok_or_else(|| StoreError::NotFound("Discovery Task".into()))?;
-        authorize_harness(
-            &store,
-            ctx,
-            HarnessCapability::DiscoveryTasks,
-            Some(task.pod_id),
-        )?;
+        authorize_pod_discovery_task(&store, ctx, task)?;
         Ok(task_with_expired_lease_recorded(task.clone(), now))
     }
 
@@ -8340,20 +8343,21 @@ fn validate_candidate_task_context(
                 .discovery_tasks
                 .get(&task_context.task_id)
                 .ok_or_else(|| StoreError::NotFound("Discovery Task".into()))?;
-            authorize_harness(
-                store,
-                ctx,
-                HarnessCapability::DiscoveryTasks,
-                Some(task.pod_id),
-            )?;
-            if task.package_version != task_context.package_version {
+            let Some((pod_id, package_version)) = task.target.pod() else {
+                return Err(StoreError::Validation(
+                    "Pod Candidate Submission cannot use a Personal Discovery Task".into(),
+                )
+                .into());
+            };
+            authorize_harness(store, ctx, HarnessCapability::DiscoveryTasks, Some(pod_id))?;
+            if package_version != task_context.package_version {
                 return Err(AgentToolsError::CandidatePackageVersionMismatch);
             }
             if !request
                 .evidence
                 .proposed_placements
                 .iter()
-                .any(|placement| placement.pod_id == task.pod_id)
+                .any(|placement| placement.pod_id == pod_id)
             {
                 return Err(StoreError::Validation(
                     "task-driven Candidate Submission must propose its task Pod".into(),
@@ -8426,16 +8430,29 @@ fn authorized_discovery_task_mutation(
     ctx: &AuthContext,
     task_id: DiscoveryTaskId,
 ) -> Result<(PodId, AgentHarnessId), AgentToolsError> {
-    let pod_id = store
+    let task = store
         .discovery_tasks
         .get(&task_id)
-        .ok_or_else(|| StoreError::NotFound("Discovery Task".into()))?
-        .pod_id;
-    authorize_harness(store, ctx, HarnessCapability::DiscoveryTasks, Some(pod_id))?;
+        .ok_or_else(|| StoreError::NotFound("Discovery Task".into()))?;
+    let pod_id = authorize_pod_discovery_task(store, ctx, task)?;
     let harness_id = ctx.harness_id.ok_or_else(|| AgentToolsError::Forbidden {
         reason: "task mutation requires an Agent Harness".into(),
     })?;
     Ok((pod_id, harness_id))
+}
+
+fn authorize_pod_discovery_task(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    task: &DiscoveryTask,
+) -> Result<PodId, AgentToolsError> {
+    let Some((pod_id, _)) = task.target.pod() else {
+        return Err(AgentToolsError::Forbidden {
+            reason: "Personal Discovery execution is not available yet".into(),
+        });
+    };
+    authorize_harness(store, ctx, HarnessCapability::DiscoveryTasks, Some(pod_id))?;
+    Ok(pod_id)
 }
 
 fn authorize_harness_for_new_pod(
@@ -8633,7 +8650,11 @@ fn trusted_placement_confidence(
                 .evidence
                 .task_context
                 .and_then(|context| store.discovery_tasks.get(&context.task_id))
-                .is_some_and(|task| task.pod_id == pod_id)
+                .is_some_and(|task| {
+                    task.target
+                        .pod()
+                        .is_some_and(|(task_pod_id, _)| task_pod_id == pod_id)
+                })
         })
         .flat_map(|submission| &submission.evidence.proposed_placements)
         .filter(|placement| placement.pod_id == pod_id)

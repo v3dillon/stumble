@@ -201,6 +201,31 @@ impl From<Uuid> for DiscoveryTaskId {
     }
 }
 
+/// Stable local identity of an immutable private Discovery Plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DiscoveryPlanId(Uuid);
+
+impl From<Uuid> for DiscoveryPlanId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl std::fmt::Display for DiscoveryPlanId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::str::FromStr for DiscoveryPlanId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse().map(Self)
+    }
+}
+
 impl std::fmt::Display for DiscoveryTaskId {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(formatter)
@@ -1828,15 +1853,54 @@ pub struct DiscoveryTaskAttempt {
     pub outcome: DiscoveryTaskAttemptOutcome,
 }
 
+/// Immutable contract governing one Discovery Task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DiscoveryTaskTarget {
+    /// Pod discovery pinned to the Package version the worker must follow.
+    Pod {
+        /// Pod whose Package governs this work.
+        pod_id: PodId,
+        /// Immutable Package version used by the worker.
+        package_version: PackageVersion,
+    },
+    /// Personal Discovery pinned to a private immutable Discovery Plan.
+    Personal {
+        /// Plan minimized for and pinned to this task.
+        discovery_plan_id: DiscoveryPlanId,
+    },
+}
+
+impl DiscoveryTaskTarget {
+    /// Returns the Pod contract when this is Pod discovery.
+    #[must_use]
+    pub const fn pod(&self) -> Option<(PodId, PackageVersion)> {
+        match self {
+            Self::Pod {
+                pod_id,
+                package_version,
+            } => Some((*pod_id, *package_version)),
+            Self::Personal { .. } => None,
+        }
+    }
+
+    /// Returns the pinned plan identity when this is Personal Discovery.
+    #[must_use]
+    pub const fn discovery_plan_id(&self) -> Option<DiscoveryPlanId> {
+        match self {
+            Self::Personal { discovery_plan_id } => Some(*discovery_plan_id),
+            Self::Pod { .. } => None,
+        }
+    }
+}
+
 /// Leaseable discovery work derived from a Source Rule or immediate request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveryTask {
     /// Stable task identity.
     pub id: DiscoveryTaskId,
-    /// Pod whose Package governs this work.
-    pub pod_id: PodId,
-    /// Immutable Package version used by the worker.
-    pub package_version: PackageVersion,
+    /// Immutable Pod or Personal Discovery contract.
+    pub target: DiscoveryTaskTarget,
     /// Scheduled or conversational provenance.
     pub origin: DiscoveryTaskOrigin,
     /// Earliest claim time.
@@ -1847,6 +1911,100 @@ pub struct DiscoveryTask {
     pub attempts: Vec<DiscoveryTaskAttempt>,
     /// Time at which Stumble created the task.
     pub created_at: DateTime<Utc>,
+}
+
+impl Serialize for DiscoveryTask {
+    fn serialize<Serializer>(
+        &self,
+        serializer: Serializer,
+    ) -> Result<Serializer::Ok, Serializer::Error>
+    where
+        Serializer: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let field_count = if self.target.pod().is_some() { 9 } else { 7 };
+        let mut task = serializer.serialize_struct("DiscoveryTask", field_count)?;
+        task.serialize_field("id", &self.id)?;
+        task.serialize_field("target", &self.target)?;
+        if let Some((pod_id, package_version)) = self.target.pod() {
+            task.serialize_field("pod_id", &pod_id)?;
+            task.serialize_field("package_version", &package_version)?;
+        }
+        task.serialize_field("origin", &self.origin)?;
+        task.serialize_field("due_at", &self.due_at)?;
+        task.serialize_field("state", &self.state)?;
+        task.serialize_field("attempts", &self.attempts)?;
+        task.serialize_field("created_at", &self.created_at)?;
+        task.end()
+    }
+}
+
+#[derive(Deserialize)]
+struct DiscoveryTaskWire {
+    id: DiscoveryTaskId,
+    #[serde(default)]
+    target: Option<DiscoveryTaskTarget>,
+    #[serde(default)]
+    pod_id: Option<PodId>,
+    #[serde(default)]
+    package_version: Option<PackageVersion>,
+    origin: DiscoveryTaskOrigin,
+    due_at: DateTime<Utc>,
+    state: DiscoveryTaskState,
+    attempts: Vec<DiscoveryTaskAttempt>,
+    created_at: DateTime<Utc>,
+}
+
+impl<'de> Deserialize<'de> for DiscoveryTask {
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        let wire = DiscoveryTaskWire::deserialize(deserializer)?;
+        let target = match (wire.target, wire.pod_id, wire.package_version) {
+            (Some(target), None, None) => target,
+            (
+                Some(
+                    target @ DiscoveryTaskTarget::Pod {
+                        pod_id: target_pod_id,
+                        package_version: target_package_version,
+                    },
+                ),
+                Some(pod_id),
+                Some(package_version),
+            ) if target_pod_id == pod_id && target_package_version == package_version => target,
+            (Some(_), Some(_), Some(_)) => {
+                return Err(Deserializer::Error::custom(
+                    "typed and legacy Discovery Task targets must agree",
+                ))
+            }
+            (Some(_), _, _) => {
+                return Err(Deserializer::Error::custom(
+                    "legacy Discovery Task target fields must be complete",
+                ))
+            }
+            (None, Some(pod_id), Some(package_version)) => DiscoveryTaskTarget::Pod {
+                pod_id,
+                package_version,
+            },
+            (None, None, _) => return Err(Deserializer::Error::missing_field("target")),
+            (None, Some(_), None) => {
+                return Err(Deserializer::Error::missing_field("package_version"))
+            }
+        };
+        Ok(Self {
+            id: wire.id,
+            target,
+            origin: wire.origin,
+            due_at: wire.due_at,
+            state: wire.state,
+            attempts: wire.attempts,
+            created_at: wire.created_at,
+        })
+    }
 }
 
 /// Request for immediate conversational discovery with retry-safe identity.

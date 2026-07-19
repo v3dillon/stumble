@@ -85,8 +85,13 @@ fn due_source_rules_create_idempotent_versioned_tasks() {
 
     assert_eq!(first.len(), 1);
     assert!(second.is_empty());
-    assert_eq!(first[0].pod_id, pod.id);
-    assert_eq!(first[0].package_version, PackageVersion::new(1).unwrap());
+    assert_eq!(
+        first[0].target,
+        DiscoveryTaskTarget::Pod {
+            pod_id: pod.id,
+            package_version: PackageVersion::new(1).unwrap(),
+        }
+    );
     assert!(matches!(
         first[0].origin,
         DiscoveryTaskOrigin::Scheduled {
@@ -95,6 +100,90 @@ fn due_source_rules_create_idempotent_versioned_tasks() {
     ));
     assert_eq!(first[0].due_at, due_at);
     assert_eq!(first[0].state, DiscoveryTaskState::Pending);
+}
+
+#[test]
+fn personal_target_carries_a_plan_without_a_pod_contract() {
+    let plan_id = DiscoveryPlanId::from(uuid::Uuid::now_v7());
+    let target = DiscoveryTaskTarget::Personal {
+        discovery_plan_id: plan_id,
+    };
+
+    assert_eq!(target.discovery_plan_id(), Some(plan_id));
+    assert_eq!(target.pod(), None);
+}
+
+#[test]
+fn typed_and_legacy_task_targets_must_agree_exactly() {
+    let tools = AgentTools::new(seed_store());
+    let (worker, _) = task_harness(&tools);
+    let now = Utc.with_ymd_and_hms(2026, 7, 17, 0, 0, 0).unwrap();
+    let task = tools.materialize_due_discovery_tasks(&worker, now).unwrap()[0].clone();
+    let mut contradictory = serde_json::to_value(&task).unwrap();
+    contradictory["pod_id"] = serde_json::json!(uuid::Uuid::now_v7());
+    assert!(serde_json::from_value::<DiscoveryTask>(contradictory).is_err());
+
+    let mut partial = serde_json::to_value(&task).unwrap();
+    partial.as_object_mut().unwrap().remove("package_version");
+    assert!(serde_json::from_value::<DiscoveryTask>(partial).is_err());
+
+    let personal = DiscoveryTaskTarget::Personal {
+        discovery_plan_id: uuid::Uuid::now_v7().into(),
+    };
+    let mut personal_with_pod_aliases = serde_json::to_value(&task).unwrap();
+    personal_with_pod_aliases["target"] = serde_json::to_value(personal).unwrap();
+    assert!(serde_json::from_value::<DiscoveryTask>(personal_with_pod_aliases).is_err());
+}
+
+#[test]
+fn pod_discovery_workers_cannot_list_future_personal_tasks() {
+    let tools = AgentTools::new(seed_store());
+    let (unscoped_worker, pod) = task_harness(&tools);
+    let owner = tools.default_auth_context().unwrap();
+    let scoped_worker = tools
+        .register_agent_harness(
+            &owner,
+            RegisterAgentHarnessRequest {
+                label: "Pod-scoped worker".into(),
+                kind: AgentHarnessKind::Unattended,
+                capabilities: vec![HarnessCapability::DiscoveryTasks],
+                pod_ids: Some(vec![pod.id]),
+            },
+        )
+        .unwrap();
+    let scoped_worker = tools
+        .authenticate_token(scoped_worker.token.expose())
+        .unwrap()
+        .unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 7, 17, 0, 0, 0).unwrap();
+    let personal_task = DiscoveryTask {
+        id: uuid::Uuid::now_v7().into(),
+        target: DiscoveryTaskTarget::Personal {
+            discovery_plan_id: uuid::Uuid::now_v7().into(),
+        },
+        origin: DiscoveryTaskOrigin::Immediate {
+            instructions: "future private plan".into(),
+            idempotency_key: "future-personal".into(),
+            requested_by: unscoped_worker.harness_id.unwrap(),
+        },
+        due_at: now,
+        state: DiscoveryTaskState::Pending,
+        attempts: Vec::new(),
+        created_at: now,
+    };
+    tools
+        .store()
+        .write()
+        .unwrap()
+        .discovery_tasks
+        .insert(personal_task.id, personal_task.clone());
+
+    for worker in [&unscoped_worker, &scoped_worker] {
+        let listed = tools.list_discovery_tasks(worker, now).unwrap();
+        assert!(!listed.iter().any(|task| task.id == personal_task.id));
+        let ready = tools.list_ready_discovery_tasks(worker, now).unwrap();
+        assert!(!ready.iter().any(|task| task.id == personal_task.id));
+    }
 }
 
 #[test]
@@ -199,7 +288,7 @@ fn failure_retry_and_completion_history_are_inspectable() {
         .create_immediate_discovery_task(
             &worker,
             CreateImmediateDiscoveryTaskRequest {
-                pod_id: task.pod_id,
+                pod_id: task.target.pod().unwrap().0,
                 instructions: "find a fresh incident analysis".into(),
                 idempotency_key: "conversation-1".into(),
             },
@@ -210,7 +299,7 @@ fn failure_retry_and_completion_history_are_inspectable() {
         .create_immediate_discovery_task(
             &worker,
             CreateImmediateDiscoveryTaskRequest {
-                pod_id: task.pod_id,
+                pod_id: task.target.pod().unwrap().0,
                 instructions: "find a fresh incident analysis".into(),
                 idempotency_key: "conversation-1".into(),
             },
@@ -293,4 +382,160 @@ fn tasks_and_retry_history_survive_home_node_restart() {
         restored.attempts[0].outcome,
         DiscoveryTaskAttemptOutcome::Failed { ref reason } if reason == "temporary outage"
     ));
+}
+
+#[test]
+fn initialized_sqlite_migrates_pre_feature_tasks_before_lifecycle_mutation() {
+    let data_dir = TestDataDir::new();
+    let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
+    let (worker, _) = task_harness(&tools);
+    let at = Utc.with_ymd_and_hms(2026, 7, 17, 0, 0, 0).unwrap();
+    let scheduled = tools.materialize_due_discovery_tasks(&worker, at).unwrap()[0].clone();
+    let immediate = tools
+        .create_immediate_discovery_task(
+            &worker,
+            CreateImmediateDiscoveryTaskRequest {
+                pod_id: scheduled.target.pod().unwrap().0,
+                instructions: "find a migration report".into(),
+                idempotency_key: "sqlite-legacy-task".into(),
+            },
+            at,
+        )
+        .unwrap();
+    drop(tools);
+
+    let database_path = data_dir.0.join("stumble.sqlite3");
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    let legacy_rows = {
+        let mut statement = connection
+            .prepare(
+                "SELECT record_key, value_json FROM stumble_store_records \
+                 WHERE collection = 'discovery_tasks'",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    for (record_key, value_json) in legacy_rows {
+        let mut task: serde_json::Value = serde_json::from_str(&value_json).unwrap();
+        task.as_object_mut().unwrap().remove("target").unwrap();
+        connection
+            .execute(
+                "UPDATE stumble_store_records SET value_json = ?1 \
+                 WHERE collection = 'discovery_tasks' AND record_key = ?2",
+                rusqlite::params![serde_json::to_string(&task).unwrap(), record_key],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let reopened = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
+    reopened
+        .claim_discovery_task(&worker, scheduled.id, at, lease(300))
+        .unwrap();
+    reopened
+        .renew_discovery_task_lease(&worker, scheduled.id, at, lease(600))
+        .unwrap();
+    reopened
+        .fail_discovery_task(&worker, scheduled.id, at, "retry after migration".into())
+        .unwrap();
+    reopened
+        .claim_discovery_task(&worker, immediate.id, at, lease(300))
+        .unwrap();
+    reopened
+        .complete_discovery_task(&worker, immediate.id, at)
+        .unwrap();
+    drop(reopened);
+
+    let restarted = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
+    assert_eq!(
+        restarted
+            .discovery_task_status(&worker, scheduled.id, at)
+            .unwrap()
+            .attempts
+            .len(),
+        1
+    );
+    assert_eq!(
+        restarted
+            .discovery_task_status(&worker, immediate.id, at)
+            .unwrap()
+            .state,
+        DiscoveryTaskState::Completed
+    );
+}
+
+#[test]
+fn pre_feature_tasks_migrate_identity_provenance_history_and_idempotency() {
+    let data_dir = TestDataDir::new();
+    let tools = AgentTools::new(seed_store());
+    let (worker, _) = task_harness(&tools);
+    let at = Utc.with_ymd_and_hms(2026, 7, 17, 0, 0, 0).unwrap();
+    let scheduled = tools.materialize_due_discovery_tasks(&worker, at).unwrap()[0].clone();
+    tools
+        .claim_discovery_task(&worker, scheduled.id, at, lease(300))
+        .unwrap();
+    tools
+        .fail_discovery_task(&worker, scheduled.id, at, "temporary outage".into())
+        .unwrap();
+    let immediate = tools
+        .create_immediate_discovery_task(
+            &worker,
+            CreateImmediateDiscoveryTaskRequest {
+                pod_id: scheduled.target.pod().unwrap().0,
+                instructions: "find a durable incident analysis".into(),
+                idempotency_key: "legacy-conversation".into(),
+            },
+            at + Duration::hours(1),
+        )
+        .unwrap();
+    let snapshot_path = data_dir.0.join("store.json");
+    save_store_snapshot(&tools.store().read().unwrap(), &snapshot_path).unwrap();
+    drop(tools);
+
+    let mut snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&snapshot_path).unwrap()).unwrap();
+    for task in snapshot["discovery_tasks"].as_array_mut().unwrap() {
+        let target = task.as_object_mut().unwrap().remove("target").unwrap();
+        let target = target.as_object().unwrap();
+        assert_eq!(target["kind"], "pod");
+        task["pod_id"] = target["pod_id"].clone();
+        task["package_version"] = target["package_version"].clone();
+    }
+    std::fs::write(
+        &snapshot_path,
+        serde_json::to_vec_pretty(&snapshot).unwrap(),
+    )
+    .unwrap();
+
+    let reopened = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
+    let restored = reopened
+        .discovery_task_status(&worker, scheduled.id, at)
+        .unwrap();
+    assert_eq!(restored.id, scheduled.id);
+    assert_eq!(restored.target, scheduled.target);
+    assert_eq!(restored.origin, scheduled.origin);
+    assert_eq!(restored.state, DiscoveryTaskState::Pending);
+    assert_eq!(restored.attempts.len(), 1);
+    assert!(matches!(
+        restored.attempts[0].outcome,
+        DiscoveryTaskAttemptOutcome::Failed { ref reason } if reason == "temporary outage"
+    ));
+    let retried = reopened
+        .create_immediate_discovery_task(
+            &worker,
+            CreateImmediateDiscoveryTaskRequest {
+                pod_id: scheduled.target.pod().unwrap().0,
+                instructions: "find a durable incident analysis".into(),
+                idempotency_key: "legacy-conversation".into(),
+            },
+            at + Duration::hours(1),
+        )
+        .unwrap();
+    assert_eq!(retried.id, immediate.id);
 }

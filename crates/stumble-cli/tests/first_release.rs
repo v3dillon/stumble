@@ -203,7 +203,7 @@ fn submit_candidate(
                         .collect(),
                     task_context: Some(CandidateTaskContext {
                         task_id: task.id,
-                        package_version: task.package_version,
+                        package_version: task.target.pod().unwrap().1,
                     }),
                     harness_idempotency_key: format!("worker-{}", task.id),
                     client_idempotency_key: format!("client-{}", task.id),
@@ -487,7 +487,11 @@ fn materialize_and_wake_discovery(
         .materialize_due_discovery_tasks(worker, now)
         .unwrap()
         .into_iter()
-        .find(|task| task.pod_id == pod_id)
+        .find(|task| {
+            task.target
+                .pod()
+                .is_some_and(|(task_pod_id, _)| task_pod_id == pod_id)
+        })
         .unwrap();
     let scheduler_event = home_dir.0.join("discovery-ready.json");
     let wake =

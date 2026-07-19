@@ -174,6 +174,96 @@ fn create_request(slug: &str) -> CreatePrivatePodWithPackageRequest {
     }
 }
 
+#[tokio::test]
+async fn discovery_task_adapters_return_the_same_typed_target() {
+    let data_dir = TestDataDir::new();
+    let tools = AgentTools::open_home_node(data_dir.path(), seed_store).unwrap();
+    let issued = tools
+        .register_agent_harness(
+            &tools.default_auth_context().unwrap(),
+            RegisterAgentHarnessRequest {
+                label: "discovery worker".into(),
+                kind: AgentHarnessKind::Unattended,
+                capabilities: vec![
+                    HarnessCapability::PodCuration,
+                    HarnessCapability::PackageManagement,
+                    HarnessCapability::DiscoveryTasks,
+                ],
+                pod_ids: None,
+            },
+        )
+        .unwrap();
+    let token = issued.token.expose().to_string();
+    let worker = tools.authenticate_token(&token).unwrap().unwrap();
+    let mut request = create_request("typed-target");
+    request.package.sources_yaml = request.package.sources_yaml.replace("daily", "on_demand");
+    let pod = tools
+        .create_private_pod_with_package(&worker, request)
+        .unwrap()
+        .pod;
+    tools
+        .create_immediate_discovery_task(
+            &worker,
+            CreateImmediateDiscoveryTaskRequest {
+                pod_id: pod.id,
+                instructions: "find a primary incident report".into(),
+                idempotency_key: "adapter-target".into(),
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    drop(tools);
+
+    let cli = Command::new(env!("CARGO_BIN_EXE_stumble"))
+        .args([
+            "--data-dir",
+            data_dir.path().to_str().unwrap(),
+            "discover",
+            "task",
+            "list",
+        ])
+        .env("STUMBLE_HARNESS_CREDENTIAL", &token)
+        .output()
+        .unwrap();
+    assert!(cli.status.success());
+    let cli: serde_json::Value = serde_json::from_slice(&cli.stdout).unwrap();
+    let cli_task = cli["data"]["items"][0].clone();
+
+    let tools = AgentTools::open_home_node(data_dir.path(), seed_store).unwrap();
+    let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
+    let mcp_task = mcp
+        .call(McpToolCall {
+            tool: "list_discovery_tasks".into(),
+            arguments: json!({}),
+        })
+        .unwrap()[0]
+        .clone();
+
+    let response = router(tools)
+        .oneshot(
+            Request::get("/discovery-tasks")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let http: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let http_task = http[0].clone();
+
+    assert_eq!(cli_task, mcp_task);
+    assert_eq!(mcp_task, http_task);
+    assert_eq!(http_task["target"]["kind"], "pod");
+    assert_eq!(http_task["target"]["pod_id"], pod.id.to_string());
+    assert_eq!(http_task["target"]["package_version"], 1);
+    assert_eq!(http_task["pod_id"], pod.id.to_string());
+    assert_eq!(http_task["package_version"], 1);
+}
+
 fn package_fixture() -> (TestDataDir, AgentTools, String) {
     let data_dir = TestDataDir::new();
     let tools = AgentTools::open_home_node(data_dir.path(), seed_store).unwrap();

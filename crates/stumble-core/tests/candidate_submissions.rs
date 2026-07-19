@@ -444,7 +444,7 @@ fn task_submission_requires_the_owning_lease_and_pinned_package_version() {
     ));
     request.evidence.task_context = Some(CandidateTaskContext {
         task_id: task.id,
-        package_version: task.package_version,
+        package_version: task.target.pod().unwrap().1,
     });
     assert!(matches!(
         tools.submit_candidate(&other, request.clone()),
@@ -465,7 +465,7 @@ fn task_submission_requires_the_owning_lease_and_pinned_package_version() {
         .task_context
         .as_mut()
         .unwrap()
-        .package_version = task.package_version;
+        .package_version = task.target.pod().unwrap().1;
 
     let submitted = tools.submit_candidate(&worker, request).unwrap();
     assert_eq!(
@@ -584,7 +584,7 @@ fn task_submission_retry_remains_safe_after_task_completion() {
     let mut request = candidate_request(&[pod.id]);
     request.evidence.task_context = Some(CandidateTaskContext {
         task_id: task.id,
-        package_version: task.package_version,
+        package_version: task.target.pod().unwrap().1,
     });
     let first = tools.submit_candidate(&worker, request.clone()).unwrap();
     tools
@@ -631,7 +631,7 @@ fn expired_task_lease_cannot_authorize_a_new_candidate_submission() {
     let mut request = candidate_request(&[pod.id]);
     request.evidence.task_context = Some(CandidateTaskContext {
         task_id: task.id,
-        package_version: task.package_version,
+        package_version: task.target.pod().unwrap().1,
     });
 
     assert!(matches!(

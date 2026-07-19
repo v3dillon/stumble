@@ -337,7 +337,7 @@ fn assisted_curation_accepts_only_trusted_high_confidence_evidence() {
     trusted_low.evidence.client_idempotency_key = "trusted-low-client".into();
     trusted_low.evidence.task_context = Some(CandidateTaskContext {
         task_id: task.id,
-        package_version: task.package_version,
+        package_version: task.target.pod().unwrap().1,
     });
     let mixed = tools.submit_candidate(&worker, trusted_low).unwrap();
     let mut untrusted_high = candidate_request(pod.id, 1.0);
@@ -363,7 +363,7 @@ fn assisted_curation_accepts_only_trusted_high_confidence_evidence() {
     request.evidence.client_idempotency_key = "trusted-client".into();
     request.evidence.task_context = Some(CandidateTaskContext {
         task_id: task.id,
-        package_version: task.package_version,
+        package_version: task.target.pod().unwrap().1,
     });
     let trusted = tools.submit_candidate(&worker, request).unwrap();
 

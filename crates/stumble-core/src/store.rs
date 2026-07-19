@@ -907,6 +907,9 @@ fn initialize_sqlite_store(
 fn load_sqlite_store_from_connection(
     connection: &mut rusqlite::Connection,
 ) -> Result<InMemoryStore, StorePersistenceError> {
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let mut legacy_discovery_task_rows = Vec::new();
     let mut collections = serde_json::Map::new();
     for collection in STORE_COLLECTIONS {
         collections.insert(
@@ -916,15 +919,23 @@ fn load_sqlite_store_from_connection(
     }
     collections.insert("version".to_string(), serde_json::json!(1));
 
-    let mut statement = connection.prepare(
-        "SELECT collection, value_json FROM stumble_store_records ORDER BY collection, record_key",
+    let mut statement = transaction.prepare(
+        "SELECT collection, record_key, value_json FROM stumble_store_records
+         ORDER BY collection, record_key",
     )?;
     let records = statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
     })?;
     for record in records {
-        let (collection, value_json) = record?;
-        let value = serde_json::from_str(&value_json)?;
+        let (collection, record_key, value_json) = record?;
+        let value: serde_json::Value = serde_json::from_str(&value_json)?;
+        if collection == "discovery_tasks" && value.get("target").is_none() {
+            legacy_discovery_task_rows.push(record_key);
+        }
         if let Some(serde_json::Value::Array(values)) = collections.get_mut(&collection) {
             values.push(value);
         }
@@ -936,10 +947,35 @@ fn load_sqlite_store_from_connection(
     }
     let had_legacy_pod_memberships = !snapshot.pod_memberships.is_empty();
     let store = snapshot.try_into()?;
+    if !legacy_discovery_task_rows.is_empty() {
+        persist_migrated_discovery_tasks(&transaction, &store, &legacy_discovery_task_rows)?;
+    }
+    transaction.commit()?;
     if had_legacy_pod_memberships {
         persist_migrated_pod_relationships(connection, &store)?;
     }
     Ok(store)
+}
+
+fn persist_migrated_discovery_tasks(
+    transaction: &rusqlite::Transaction<'_>,
+    store: &InMemoryStore,
+    legacy_record_keys: &[String],
+) -> Result<(), StorePersistenceError> {
+    let records = store_records(store)?;
+    for record_key in legacy_record_keys {
+        let collection_and_key = ("discovery_tasks".to_string(), record_key.clone());
+        let value_json = records
+            .get(&collection_and_key)
+            .expect("loaded Discovery Task has a canonical store record");
+        let updated = transaction.execute(
+            "UPDATE stumble_store_records SET value_json = ?1
+             WHERE collection = 'discovery_tasks' AND record_key = ?2",
+            rusqlite::params![value_json, record_key],
+        )?;
+        debug_assert_eq!(updated, 1, "loaded Discovery Task row still exists");
+    }
+    Ok(())
 }
 
 fn persist_migrated_pod_relationships(
@@ -1435,6 +1471,97 @@ mod tests {
                 .interests,
             vec!["retried writer"]
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn two_connections_prevent_stale_discovery_task_migration_overwrite() {
+        let dir = temp_store_dir("sqlite-discovery-task-migration-race");
+        let database_path = dir.join("stumble.sqlite3");
+        let legacy_path = dir.join("store.json");
+        let mut store = crate::seeds::seed_store();
+        let pod_id = Uuid::now_v7();
+        let now = chrono::Utc::now();
+        let task = DiscoveryTask {
+            id: Uuid::now_v7().into(),
+            target: DiscoveryTaskTarget::Pod {
+                pod_id,
+                package_version: PackageVersion::new(1).unwrap(),
+            },
+            origin: DiscoveryTaskOrigin::Scheduled {
+                source_rule_index: 0,
+            },
+            due_at: now,
+            state: DiscoveryTaskState::Pending,
+            attempts: Vec::new(),
+            created_at: now,
+        };
+        store.discovery_tasks.insert(task.id, task.clone());
+        load_or_initialize_sqlite_store(&database_path, &legacy_path, || store.clone()).unwrap();
+
+        let records = store_records(&store).unwrap();
+        let ((_, record_key), canonical_json) = records
+            .iter()
+            .find(|((collection, _), _)| collection == "discovery_tasks")
+            .unwrap();
+        let mut legacy_task: serde_json::Value = serde_json::from_str(canonical_json).unwrap();
+        legacy_task
+            .as_object_mut()
+            .unwrap()
+            .remove("target")
+            .unwrap();
+        let legacy_json = serde_json::to_string(&legacy_task).unwrap();
+        let mut first = rusqlite::Connection::open(&database_path).unwrap();
+        first
+            .execute(
+                "UPDATE stumble_store_records SET value_json = ?1
+                 WHERE collection = 'discovery_tasks' AND record_key = ?2",
+                rusqlite::params![legacy_json, record_key],
+            )
+            .unwrap();
+
+        let mut lifecycle_update = legacy_task;
+        lifecycle_update["state"] = serde_json::json!({"status": "completed"});
+        let lifecycle_json = serde_json::to_string(&lifecycle_update).unwrap();
+        let second = rusqlite::Connection::open(&database_path).unwrap();
+        second.busy_timeout(Duration::from_millis(1)).unwrap();
+        let transaction = first
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let competing_write = second.execute(
+            "UPDATE stumble_store_records SET value_json = ?1
+                 WHERE collection = 'discovery_tasks' AND record_key = ?2",
+            rusqlite::params![lifecycle_json, record_key],
+        );
+        assert!(matches!(
+            competing_write,
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if matches!(
+                    error.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+        ));
+
+        persist_migrated_discovery_tasks(&transaction, &store, std::slice::from_ref(record_key))
+            .unwrap();
+        transaction.commit().unwrap();
+        second
+            .execute(
+                "UPDATE stumble_store_records SET value_json = ?1
+                 WHERE collection = 'discovery_tasks' AND record_key = ?2",
+                rusqlite::params![lifecycle_json, record_key],
+            )
+            .unwrap();
+        let persisted: String = second
+            .query_row(
+                "SELECT value_json FROM stumble_store_records
+                 WHERE collection = 'discovery_tasks' AND record_key = ?1",
+                [record_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted, lifecycle_json);
 
         let _ = std::fs::remove_dir_all(dir);
     }

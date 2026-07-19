@@ -219,7 +219,7 @@ impl TwoNodeScenario {
             .await;
         let task = task.discovery_task();
         let task_id = task.id.to_string();
-        let package_version = task.package_version;
+        let package_version = task.target.pod().unwrap().1;
         discovery
             .call_tool(8, "claim_discovery_task", json!({"task_id": task_id}))
             .await;

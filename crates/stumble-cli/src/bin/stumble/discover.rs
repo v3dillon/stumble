@@ -39,8 +39,11 @@ fn execute_task(command: TaskWorkflow, tools: &AgentTools, actor: &AuthContext) 
                 .list_discovery_tasks(actor, now)
                 .map_err(agent_tools_error)?;
             items.retain(|task| {
-                pod.as_ref().is_none_or(|pod| task.pod_id == pod.id)
-                    && task_matches_state(task, args.state, now)
+                pod.as_ref().is_none_or(|pod| {
+                    task.target
+                        .pod()
+                        .is_some_and(|(pod_id, _)| pod_id == pod.id)
+                }) && task_matches_state(task, args.state, now)
             });
             items.sort_by(|left, right| {
                 left.due_at
