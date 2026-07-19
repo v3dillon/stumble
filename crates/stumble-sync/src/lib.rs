@@ -331,26 +331,36 @@ pub async fn synchronize_subscription_from_peer(
     peer: &TrustedPeer,
     subscription_id: SubscriptionId,
 ) -> Result<SynchronizationResult, PeerSyncError> {
-    let subscription = tools.subscription(ctx, subscription_id)?;
-    if subscription.origin_node_id != peer.node_id
-        || subscription.origin_public_key != peer.public_key
-    {
-        return Err(PeerSyncError::SubscriptionPeerMismatch);
-    }
+    let read_tools = tools.clone();
+    let read_ctx = ctx.clone();
+    let selected_peer = peer.clone();
+    let (pod_slug, cursor) = tokio::task::spawn_blocking(move || {
+        let subscription = read_tools.subscription(&read_ctx, subscription_id)?;
+        if subscription.origin_node_id != selected_peer.node_id
+            || subscription.origin_public_key != selected_peer.public_key
+        {
+            return Err(PeerSyncError::SubscriptionPeerMismatch);
+        }
+        Ok((subscription.pod_slug, subscription.last_event_hash))
+    })
+    .await
+    .map_err(DirectSubscriptionError::CoreTask)??;
     let public_pod_url = format!(
         "{}/federation/pods/{}",
         peer.base_url.trim_end_matches('/'),
-        subscription.pod_slug
+        pod_slug
     );
     let client = origin_client(&public_pod_url)?;
-    let snapshot = fetch_pod_snapshot(
-        &client,
-        &public_pod_url,
-        subscription.last_event_hash.as_deref(),
-    )
-    .await?;
+    let snapshot = fetch_pod_snapshot(&client, &public_pod_url, cursor.as_deref()).await?;
     validate_peer_identity(peer, &snapshot.node)?;
-    Ok(tools.synchronize_subscription(ctx, subscription_id, snapshot)?)
+    let tools = tools.clone();
+    let ctx = ctx.clone();
+    tokio::task::spawn_blocking(move || {
+        tools.synchronize_subscription(&ctx, subscription_id, snapshot)
+    })
+    .await
+    .map_err(DirectSubscriptionError::CoreTask)?
+    .map_err(PeerSyncError::Core)
 }
 
 async fn sync_pod_from_peer_with_transport(
