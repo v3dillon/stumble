@@ -1,7 +1,10 @@
 mod support;
 
-use serde_json::{json, Value};
-use stumble_core::{HarnessCapability, PodId};
+use serde_json::json;
+use stumble_core::{
+    CreatePodOutcome, DiscoveryTask, DiscoveryTaskState, HarnessCapability, MediaReference,
+    MediaReferenceType, PodContentItem, PodId, PodPlacementStatus, ProposalStatus, Visibility,
+};
 use stumble_mcp::{McpToolCall, McpToolRouter};
 use support::{EphemeralHttpServer, PersistentNode, ScopedHarness};
 
@@ -99,8 +102,12 @@ impl TwoNodeScenario {
                 }),
             )
             .await;
-        assert_eq!(inbox.value()["status"], "created");
-        let inbox = parse_pod_id(&inbox.value()["result"]["id"], "Inbox Pod identity");
+        let inbox = match inbox.create_pod_outcome() {
+            CreatePodOutcome::Created(pod) => pod.id,
+            CreatePodOutcome::PendingApproval(_) => {
+                panic!("private Pod must be created immediately")
+            }
+        };
 
         let proposed = creator
             .call_tool(
@@ -114,10 +121,10 @@ impl TwoNodeScenario {
                 }),
             )
             .await;
-        assert_eq!(proposed.value()["status"], "pending_approval");
-        let proposal_id = proposed.value()["result"]["id"]
-            .as_str()
-            .expect("public exposure Pending Proposal identity");
+        let proposal_id = match proposed.create_pod_outcome() {
+            CreatePodOutcome::PendingApproval(proposal) => proposal.id,
+            CreatePodOutcome::Created(_) => panic!("public Pod creation requires approval"),
+        };
         let approved = self
             .origin
             .mcp(&self.origin_approver)
@@ -127,17 +134,17 @@ impl TwoNodeScenario {
                 json!({"proposal_id": proposal_id}),
             )
             .await;
-        assert_eq!(approved.value()["status"], "accepted");
+        assert_eq!(approved.pending_proposal().status, ProposalStatus::Accepted);
 
         let origin_pods = creator.call_tool(4, "list_pods", json!({})).await;
-        let origin_pods = origin_pods.value().as_array().expect("Origin Pods");
+        let origin_pods = origin_pods.pods();
         assert!(origin_pods.iter().any(|pod| {
-            pod["slug"] == "federation-acceptance-inbox" && pod["visibility"] == "private"
+            pod.slug == "federation-acceptance-inbox" && pod.visibility == Visibility::Private
         }));
         let public_pod_id = origin_pods
             .iter()
-            .find(|pod| pod["slug"] == "federated-post-acceptance")
-            .map(|pod| parse_pod_id(&pod["id"], "approved public Pod identity"))
+            .find(|pod| pod.slug == "federated-post-acceptance")
+            .map(|pod| pod.id)
             .expect("approved public Pod");
         OriginPods {
             inbox,
@@ -210,13 +217,9 @@ impl TwoNodeScenario {
                 }),
             )
             .await;
-        let task_id = task.value()["id"]
-            .as_str()
-            .expect("Discovery Task identity")
-            .to_owned();
-        let package_version = task.value()["package_version"]
-            .as_u64()
-            .expect("Discovery Task Package version");
+        let task = task.discovery_task();
+        let task_id = task.id.to_string();
+        let package_version = task.package_version;
         discovery
             .call_tool(8, "claim_discovery_task", json!({"task_id": task_id}))
             .await;
@@ -264,12 +267,7 @@ impl TwoNodeScenario {
                 )
                 .await;
             assert!(!submitted.is_error());
-            candidate_ids.push(
-                submitted.value()["candidate"]["id"]
-                    .as_str()
-                    .expect("private Candidate identity")
-                    .to_owned(),
-            );
+            candidate_ids.push(submitted.submitted_candidate().candidate.id.to_string());
         }
         discovery
             .call_tool(20, "complete_discovery_task", json!({"task_id": task_id}))
@@ -309,7 +307,9 @@ impl TwoNodeScenario {
                 arguments: json!({"task_id": discoveries.task_id}),
             })
             .expect("Origin retains its completed Discovery Task");
-        assert_eq!(completed_task["state"]["status"], "completed");
+        let completed_task: DiscoveryTask =
+            serde_json::from_value(completed_task).expect("completed Discovery Task result");
+        assert_eq!(completed_task.state, DiscoveryTaskState::Completed);
     }
 
     async fn curate_six_posts(
@@ -332,7 +332,7 @@ impl TwoNodeScenario {
                     }),
                 )
                 .await;
-            assert_eq!(routed.value()["status"], "pending");
+            assert_eq!(routed.pod_placement().status, PodPlacementStatus::Pending);
             let accepted = curator
                 .call_tool(
                     40 + index as u64,
@@ -345,7 +345,10 @@ impl TwoNodeScenario {
                     }),
                 )
                 .await;
-            assert_eq!(accepted.value()["status"], "accepted");
+            assert_eq!(
+                accepted.pod_placement().status,
+                PodPlacementStatus::Accepted
+            );
         }
     }
 
@@ -359,7 +362,7 @@ impl TwoNodeScenario {
             .mcp(&harnesses.reader)
             .call_tool(50, "list_pod_content", json!({"pod_id": pods.public}))
             .await;
-        assert_six_post_references_with_seed_image(content.value());
+        assert_six_content_item_references_with_seed_image(&content.pod_content());
 
         let private_task = self
             .origin
@@ -374,10 +377,7 @@ impl TwoNodeScenario {
                 }),
             )
             .await;
-        private_task.value()["id"]
-            .as_str()
-            .expect("private sentinel Discovery Task identity")
-            .to_owned()
+        private_task.discovery_task().id.to_string()
     }
 
     fn scope_home_harnesses(&self) -> HomeHarnesses {
@@ -428,25 +428,25 @@ impl TwoNodeScenario {
             )
             .await;
         assert!(!subscribed.is_error());
-        assert!(subscribed.value()["imported_events"]
-            .as_u64()
-            .is_some_and(|count| count >= 6));
-        assert!(subscribed.value()["subscription"]["last_event_hash"]
-            .as_str()
+        let subscribed = subscribed.synchronization_result();
+        assert!(subscribed.imported_events >= 6);
+        assert!(subscribed
+            .subscription
+            .last_event_hash
             .is_some_and(|cursor| !cursor.is_empty()));
     }
 
     async fn verify_public_federation(&self, harnesses: &HomeHarnesses) {
         let reader = self.home.mcp(&harnesses.reader);
         let home_pods = reader.call_tool(62, "list_pods", json!({})).await;
-        let home_pods = home_pods.value().as_array().expect("Home Node Pods");
+        let home_pods = home_pods.pods();
         assert!(!home_pods
             .iter()
-            .any(|pod| pod["slug"] == "federation-acceptance-inbox"));
+            .any(|pod| pod.slug == "federation-acceptance-inbox"));
         let synchronized_pod_id = home_pods
             .iter()
-            .find(|pod| pod["slug"] == "federated-post-acceptance")
-            .and_then(|pod| pod["id"].as_str())
+            .find(|pod| pod.slug == "federated-post-acceptance")
+            .map(|pod| pod.id)
             .expect("synchronized public Pod identity");
         let content = reader
             .call_tool(
@@ -455,7 +455,7 @@ impl TwoNodeScenario {
                 json!({"pod_id": synchronized_pod_id}),
             )
             .await;
-        assert_six_post_references_with_seed_image(content.value());
+        assert_six_content_item_references_with_seed_image(&content.pod_content());
     }
 
     async fn verify_private_state_stayed_on_origin(
@@ -498,43 +498,28 @@ impl TwoNodeScenario {
         let home_ready_tasks = private_reader
             .call_tool(80, "list_ready_discovery_tasks", json!({}))
             .await;
-        assert_eq!(home_ready_tasks.value(), &json!([]));
+        assert!(home_ready_tasks.discovery_tasks().is_empty());
         let origin_ready_tasks = self
             .origin
             .mcp(&origin_harnesses.discovery)
             .call_tool(81, "list_ready_discovery_tasks", json!({}))
             .await;
         assert!(origin_ready_tasks
-            .value()
-            .as_array()
-            .expect("Origin ready Discovery Tasks")
+            .discovery_tasks()
             .iter()
-            .any(|task| task["id"] == private_sentinel_task_id));
+            .any(|task| task.id.to_string() == private_sentinel_task_id));
     }
-}
-
-fn parse_pod_id(value: &Value, label: &str) -> PodId {
-    value
-        .as_str()
-        .unwrap_or_else(|| panic!("{label}"))
-        .parse()
-        .unwrap_or_else(|_| panic!("valid {label}"))
 }
 
 fn has_tool(tools: &[String], expected: &str) -> bool {
     tools.iter().any(|tool| tool == expected)
 }
 
-fn assert_six_post_references_with_seed_image(content: &Value) {
-    let content = content.as_array().expect("accepted Pod content");
+fn assert_six_content_item_references_with_seed_image(content: &[PodContentItem]) {
     assert_eq!(content.len(), 6);
     let mut urls = content
         .iter()
-        .map(|placement| {
-            placement["content_item"]["canonical_url"]
-                .as_str()
-                .expect("post Content Reference URL")
-        })
+        .map(|placement| placement.content_item.canonical_url())
         .collect::<Vec<_>>();
     urls.sort_unstable();
     assert_eq!(
@@ -546,17 +531,15 @@ fn assert_six_post_references_with_seed_image(content: &Value) {
     let seed = content
         .iter()
         .find(|placement| {
-            placement["content_item"]["canonical_url"] == "https://social.example/author/status/1"
+            placement.content_item.canonical_url() == "https://social.example/author/status/1"
         })
         .expect("seed post Content Reference");
     assert_eq!(
-        seed["content_item"]["media_references"],
-        json!([{
-            "media_type": "image",
-            "url": "https://media.example/post-1/image.jpg"
-        }])
+        seed.content_item.media_references(),
+        &[MediaReference::new(
+            MediaReferenceType::Image,
+            "https://media.example/post-1/image.jpg",
+        )
+        .expect("valid expected media reference")]
     );
-    assert!(content.iter().all(|placement| {
-        placement.get("candidate").is_none() && placement.get("submissions").is_none()
-    }));
 }

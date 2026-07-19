@@ -6,11 +6,14 @@ use axum::{
     response::Response,
     Router,
 };
+use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use stumble_api::router_with_base_url;
 use stumble_core::{
-    seed_store, AgentHarnessId, AgentHarnessKind, AgentTools, HarnessCapability, PodId,
-    RegisterAgentHarnessRequest, RegisterAgentHarnessResponse,
+    seed_store, AgentHarnessId, AgentHarnessKind, AgentTools, CreatePodOutcome, DiscoveryTask,
+    HarnessCapability, PendingProposal, Pod, PodContentItem, PodId, PodPlacement,
+    RegisterAgentHarnessRequest, RegisterAgentHarnessResponse, SubmittedCandidate,
+    SynchronizationResult,
 };
 use stumble_mcp::streamable_http_router;
 use tower::ServiceExt;
@@ -212,8 +215,47 @@ impl McpToolResult {
         Self(value)
     }
 
-    pub fn value(&self) -> &Value {
-        &self.0["result"]["structuredContent"]["value"]
+    pub fn create_pod_outcome(&self) -> CreatePodOutcome {
+        self.decode("Pod creation result")
+    }
+
+    pub fn pending_proposal(&self) -> PendingProposal {
+        self.decode("Pending Proposal result")
+    }
+
+    pub fn submitted_candidate(&self) -> SubmittedCandidate {
+        self.decode("Candidate submission result")
+    }
+
+    pub fn discovery_task(&self) -> DiscoveryTask {
+        self.decode("Discovery Task result")
+    }
+
+    pub fn discovery_tasks(&self) -> Vec<DiscoveryTask> {
+        self.decode("Discovery Task list result")
+    }
+
+    pub fn pod_placement(&self) -> PodPlacement {
+        self.decode("Pod Placement result")
+    }
+
+    pub fn synchronization_result(&self) -> SynchronizationResult {
+        self.decode("Subscription synchronization result")
+    }
+
+    pub fn pods(&self) -> Vec<Pod> {
+        self.decode("Pod list result")
+    }
+
+    pub fn pod_content(&self) -> Vec<PodContentItem> {
+        let items = self
+            .structured_value()
+            .as_array()
+            .unwrap_or_else(|| panic!("Pod content result must be an array"));
+        assert!(items
+            .iter()
+            .all(|item| { item.get("candidate").is_none() && item.get("submissions").is_none() }));
+        self.decode("Pod content result")
     }
 
     pub fn structured_content(&self) -> &Value {
@@ -234,6 +276,15 @@ impl McpToolResult {
         self.0["result"]["content"][0]["text"]
             .as_str()
             .expect("MCP tool error text")
+    }
+
+    fn decode<T: DeserializeOwned>(&self, label: &str) -> T {
+        serde_json::from_value(self.structured_value().clone())
+            .unwrap_or_else(|error| panic!("decode {label}: {error}"))
+    }
+
+    fn structured_value(&self) -> &Value {
+        &self.0["result"]["structuredContent"]["value"]
     }
 }
 

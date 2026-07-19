@@ -235,12 +235,12 @@ async fn subscription_management_harness_subscribes_and_refreshes_from_a_real_or
         )
         .await;
     assert!(!subscribed.is_error());
-    assert_eq!(subscribed.value()["imported_events"], 3);
-    let subscription_id = subscribed.value()["subscription"]["id"]
-        .as_str()
-        .expect("Subscription identity");
-    let first_cursor = subscribed.value()["subscription"]["last_event_hash"]
-        .as_str()
+    let subscribed = subscribed.synchronization_result();
+    assert_eq!(subscribed.imported_events, 3);
+    let subscription_id = subscribed.subscription.id;
+    let first_cursor = subscribed
+        .subscription
+        .last_event_hash
         .expect("verified cursor");
 
     publish_item(
@@ -267,11 +267,9 @@ async fn subscription_management_harness_subscribes_and_refreshes_from_a_real_or
         )
         .await;
     assert!(!refreshed.is_error());
-    assert_eq!(refreshed.value()["imported_events"], 1);
-    assert_ne!(
-        refreshed.value()["subscription"]["last_event_hash"],
-        first_cursor
-    );
+    let refreshed = refreshed.synchronization_result();
+    assert_eq!(refreshed.imported_events, 1);
+    assert_ne!(refreshed.subscription.last_event_hash, Some(first_cursor));
 }
 
 #[tokio::test]
@@ -321,9 +319,7 @@ async fn stdio_dispatches_direct_subscription_and_incremental_synchronization() 
         serde_json::from_slice(&subscribe_output).expect("stdio JSON response"),
     );
     assert!(!subscribed.is_error());
-    let subscription_id = subscribed.value()["subscription"]["id"]
-        .as_str()
-        .expect("Subscription identity");
+    let subscription_id = subscribed.synchronization_result().subscription.id;
 
     publish_item(
         &origin.tools,
@@ -354,7 +350,7 @@ async fn stdio_dispatches_direct_subscription_and_incremental_synchronization() 
         serde_json::from_slice(&synchronize_output).expect("stdio JSON response"),
     );
     assert!(!synchronized.is_error());
-    assert_eq!(synchronized.value()["imported_events"], 1);
+    assert_eq!(synchronized.synchronization_result().imported_events, 1);
 }
 
 #[tokio::test]
@@ -462,9 +458,7 @@ async fn subscription_mcp_preserves_origin_identity_signature_and_chain_errors()
             }),
         )
         .await;
-    let subscription_id = subscribed.value()["subscription"]["id"]
-        .as_str()
-        .expect("Subscription identity");
+    let subscription_id = subscribed.synchronization_result().subscription.id;
     let replacement_origin = AgentTools::new(seed_store());
     fixture.snapshot.write().expect("fixture snapshot").node = replacement_origin
         .node_info(

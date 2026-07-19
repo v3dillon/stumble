@@ -6,8 +6,9 @@ use axum::{
 };
 use serde_json::{json, Value};
 use stumble_core::{
-    seed_store, AgentTools, CreatePrivatePodWithPackageRequest, HarnessCapability,
-    PodPackageContents,
+    seed_store, AgentTools, CreatePodOutcome, CreatePrivatePodWithPackageRequest,
+    HarnessCapability, MediaReference, MediaReferenceType, PodPackageContents, PodPlacementStatus,
+    ProposalStatus,
 };
 use stumble_mcp::streamable_http_router;
 use support::{mcp_request, response_json, McpClient, ScopedHarness};
@@ -418,20 +419,22 @@ async fn chatgpt_can_submit_a_provenance_bearing_link_to_an_authorized_pod() {
         .await;
 
     assert!(!response.is_error());
+    let submitted = response.submitted_candidate();
     assert_eq!(
-        response.value()["candidate"]["canonical_url"],
+        submitted.candidate.canonical_url,
         "https://example.com/field-note"
     );
     assert_eq!(
-        response.value()["submission"]["provenance"]["discovery_method"],
+        submitted.submission.evidence.provenance.discovery_method,
         "chatgpt_conversation"
     );
     assert_eq!(
-        response.value()["submission"]["media_references"],
-        json!([{
-            "media_type": "image",
-            "url": "https://media.example.com/field-note.png"
-        }])
+        submitted.submission.evidence.media_references,
+        vec![MediaReference::new(
+            MediaReferenceType::Image,
+            "https://media.example.com/field-note.png",
+        )
+        .expect("valid expected media reference")]
     );
 }
 
@@ -500,10 +503,10 @@ async fn harnesses_can_curate_an_origin_pod_without_bypassing_scope_or_approval(
             }),
         )
         .await;
-    assert_eq!(inbox.value()["status"], "created");
-    let inbox_id = inbox.value()["result"]["id"]
-        .as_str()
-        .expect("private Inbox Pod id");
+    let inbox_id = match inbox.create_pod_outcome() {
+        CreatePodOutcome::Created(pod) => pod.id,
+        CreatePodOutcome::PendingApproval(_) => panic!("private Pod must be created immediately"),
+    };
 
     let proposed = curator_mcp
         .call_tool(
@@ -517,10 +520,10 @@ async fn harnesses_can_curate_an_origin_pod_without_bypassing_scope_or_approval(
             }),
         )
         .await;
-    assert_eq!(proposed.value()["status"], "pending_approval");
-    let proposal_id = proposed.value()["result"]["id"]
-        .as_str()
-        .expect("Pending Proposal id");
+    let proposal_id = match proposed.create_pod_outcome() {
+        CreatePodOutcome::PendingApproval(proposal) => proposal.id,
+        CreatePodOutcome::Created(_) => panic!("public Pod creation requires approval"),
+    };
 
     let self_approval = curator_mcp
         .call_tool(
@@ -541,7 +544,7 @@ async fn harnesses_can_curate_an_origin_pod_without_bypassing_scope_or_approval(
             json!({"proposal_id": proposal_id}),
         )
         .await;
-    assert_eq!(inspected.value()["status"], "pending");
+    assert_eq!(inspected.pending_proposal().status, ProposalStatus::Pending);
     let approved = approver_mcp
         .call_tool(
             24,
@@ -549,16 +552,14 @@ async fn harnesses_can_curate_an_origin_pod_without_bypassing_scope_or_approval(
             json!({"proposal_id": proposal_id}),
         )
         .await;
-    assert_eq!(approved.value()["status"], "accepted");
+    assert_eq!(approved.pending_proposal().status, ProposalStatus::Accepted);
 
     let listed = curator_mcp.call_tool(25, "list_pods", json!({})).await;
     let public_pod_id = listed
-        .value()
-        .as_array()
-        .expect("visible Pods")
-        .iter()
-        .find(|pod| pod["slug"] == "federated-finds")
-        .and_then(|pod| pod["id"].as_str())
+        .pods()
+        .into_iter()
+        .find(|pod| pod.slug == "federated-finds")
+        .map(|pod| pod.id)
         .expect("approved public Pod id");
 
     let submitted = curator_mcp
@@ -585,15 +586,13 @@ async fn harnesses_can_curate_an_origin_pod_without_bypassing_scope_or_approval(
             }),
         )
         .await;
-    let candidate_id = submitted.value()["candidate"]["id"]
-        .as_str()
-        .expect("Candidate id");
+    let candidate_id = submitted.submitted_candidate().candidate.id;
 
     let scoped_curator = ScopedHarness::register(
         &tools,
         "Inbox-only curator",
         vec![HarnessCapability::PodCuration],
-        Some(vec![inbox_id.parse().expect("Inbox Pod id")]),
+        Some(vec![inbox_id]),
     );
     let scoped_curator_mcp = McpClient::new(app.clone(), scoped_curator.token());
     let denied_route = scoped_curator_mcp
@@ -622,7 +621,7 @@ async fn harnesses_can_curate_an_origin_pod_without_bypassing_scope_or_approval(
             }),
         )
         .await;
-    assert_eq!(routed.value()["status"], "pending");
+    assert_eq!(routed.pod_placement().status, PodPlacementStatus::Pending);
     let denied_review = scoped_curator_mcp
         .call_tool(
             29,
@@ -647,25 +646,26 @@ async fn harnesses_can_curate_an_origin_pod_without_bypassing_scope_or_approval(
             }),
         )
         .await;
-    assert_eq!(reviewed.value()["status"], "accepted");
+    assert_eq!(
+        reviewed.pod_placement().status,
+        PodPlacementStatus::Accepted
+    );
 
     let reader = ScopedHarness::register(
         &tools,
         "accepted content reader",
         vec![HarnessCapability::FeedRead],
-        Some(vec![public_pod_id.parse().expect("public Pod id")]),
+        Some(vec![public_pod_id]),
     );
     let content = McpClient::new(app, reader.token())
         .call_tool(31, "list_pod_content", json!({"pod_id": public_pod_id}))
         .await;
-    let items = content.value().as_array().expect("accepted Pod content");
+    let items = content.pod_content();
     assert_eq!(items.len(), 1);
     assert_eq!(
-        items[0]["content_item"]["canonical_url"],
+        items[0].content_item.canonical_url(),
         "https://example.com/origin-discovery"
     );
-    assert!(items[0].get("candidate").is_none());
-    assert!(items[0].get("submissions").is_none());
 }
 
 fn complete_package() -> PodPackageContents {
