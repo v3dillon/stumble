@@ -1,29 +1,11 @@
-use axum::{body::Body, http::Request, routing::get, Json, Router};
+mod support;
+
+use axum::{routing::get, Json, Router};
 use chrono::Utc;
-use serde_json::{json, Value};
-use stumble_api::router_with_base_url;
+use serde_json::json;
 use stumble_core::*;
-use stumble_mcp::{serve_stdio, streamable_http_router, McpToolCall, McpToolRouter};
-use tower::ServiceExt;
-
-struct TestDataDir(std::path::PathBuf);
-
-impl TestDataDir {
-    fn new(label: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "stumble-subscriber-mcp-{label}-{}",
-            uuid::Uuid::now_v7()
-        ));
-        std::fs::create_dir_all(&path).expect("create test Home Node directory");
-        Self(path)
-    }
-}
-
-impl Drop for TestDataDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use stumble_mcp::{serve_stdio, McpToolCall, McpToolRouter};
+use support::{EphemeralHttpServer, McpClient, McpToolResult, PersistentNode, ScopedHarness};
 
 #[derive(Clone)]
 struct FixtureOrigin {
@@ -32,11 +14,7 @@ struct FixtureOrigin {
 
 async fn start_fixture_origin(
     snapshot: FederationPodSnapshot,
-) -> (
-    String,
-    FixtureOrigin,
-    tokio::task::JoinHandle<Result<(), std::io::Error>>,
-) {
+) -> (FixtureOrigin, EphemeralHttpServer) {
     let fixture = FixtureOrigin {
         snapshot: std::sync::Arc::new(std::sync::RwLock::new(snapshot)),
     };
@@ -85,40 +63,18 @@ async fn start_fixture_origin(
                 async move { Json(value) }
             }),
         );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind fixture Origin");
-    let base_url = format!("http://{}", listener.local_addr().expect("fixture address"));
-    let server = tokio::spawn(async move { axum::serve(listener, app).await });
-    (base_url, fixture, server)
-}
-
-fn harness(
-    tools: &AgentTools,
-    label: &str,
-    capabilities: Vec<HarnessCapability>,
-) -> RegisterAgentHarnessResponse {
-    tools
-        .register_agent_harness(
-            &tools.default_auth_context().expect("owner context"),
-            RegisterAgentHarnessRequest {
-                label: label.into(),
-                kind: AgentHarnessKind::Interactive,
-                capabilities,
-                pod_ids: None,
-            },
-        )
-        .expect("register Harness")
+    (fixture, EphemeralHttpServer::start(app).await)
 }
 
 fn publish_item(origin: &AgentTools, pod: Option<&Pod>, source_url: &str, key: &str) -> Pod {
-    let curator = harness(
+    let curator = ScopedHarness::register(
         origin,
         &format!("origin curator {key}"),
         vec![HarnessCapability::PodCuration],
+        None,
     );
     let curator = origin
-        .authenticate_token(curator.token.expose())
+        .authenticate_token(curator.token())
         .expect("authenticate curator")
         .expect("current curator token");
     let pod = match pod {
@@ -135,13 +91,14 @@ fn publish_item(origin: &AgentTools, pod: Option<&Pod>, source_url: &str, key: &
                     },
                 )
                 .expect("create private Pod");
-            let approver = harness(
+            let approver = ScopedHarness::register(
                 origin,
                 "origin publication approver",
                 vec![HarnessCapability::Approval],
+                None,
             );
             let approver = origin
-                .authenticate_token(approver.token.expose())
+                .authenticate_token(approver.token())
                 .expect("authenticate approver")
                 .expect("current approver token");
             let proposal = match origin
@@ -167,13 +124,14 @@ fn publish_item(origin: &AgentTools, pod: Option<&Pod>, source_url: &str, key: &
     origin
         .set_pod_curation_policy(&curator, pod.id, CurationPolicy::Manual, Utc::now())
         .expect("set manual curation");
-    let submitter = harness(
+    let submitter = ScopedHarness::register(
         origin,
         &format!("origin submitter {key}"),
         vec![HarnessCapability::CandidateSubmission],
+        None,
     );
     let submitter = origin
-        .authenticate_token(submitter.token.expose())
+        .authenticate_token(submitter.token())
         .expect("authenticate submitter")
         .expect("current submitter token");
     let submitted = origin
@@ -227,38 +185,32 @@ fn publish_item(origin: &AgentTools, pod: Option<&Pod>, source_url: &str, key: &
 
 #[tokio::test]
 async fn subscription_management_harness_subscribes_and_refreshes_from_a_real_origin() {
-    let origin_dir = TestDataDir::new("http-origin");
-    let home_dir = TestDataDir::new("http-home");
-    let origin = AgentTools::open_home_node(&origin_dir.0, seed_store).expect("open Origin Node");
-    let home = AgentTools::open_home_node(&home_dir.0, seed_store).expect("open Home Node");
+    let origin = PersistentNode::open("subscriber-http-origin");
+    let home = PersistentNode::open("subscriber-http-home");
     let pod = publish_item(
-        &origin,
+        &origin.tools,
         None,
         "https://example.com/subscriber-mcp/first",
         "first",
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind Origin listener");
-    let origin_base_url = format!("http://{}", listener.local_addr().expect("Origin address"));
-    let origin_app = router_with_base_url(origin.clone(), &origin_base_url);
-    let origin_server = tokio::spawn(async move { axum::serve(listener, origin_app).await });
-    let subscriber = harness(
-        &home,
+    let origin_http = EphemeralHttpServer::start_origin(origin.tools.clone()).await;
+    let subscriber = home.harness(
         "subscriber MCP Harness",
         vec![HarnessCapability::SubscriptionManagement],
+        None,
     );
-    let denied = harness(
-        &home,
+    let denied = home.harness(
         "feed-only direct caller",
         vec![HarnessCapability::FeedRead],
+        None,
     );
     let denied_context = home
-        .authenticate_token(denied.token.expose())
+        .tools
+        .authenticate_token(denied.token())
         .expect("authenticate denied caller")
         .expect("current denied caller token");
-    let denied_router = McpToolRouter::new(home.clone(), denied_context);
-    let public_pod_url = format!("{origin_base_url}/federation/pods/subscriber-mcp");
+    let denied_router = McpToolRouter::new(home.tools.clone(), denied_context);
+    let public_pod_url = format!("{}/federation/pods/subscriber-mcp", origin_http.base_url);
     let denied_subscription = denied_router
         .call_async(McpToolCall {
             tool: "subscribe_public_pod".into(),
@@ -269,46 +221,30 @@ async fn subscription_management_harness_subscribes_and_refreshes_from_a_real_or
     assert!(denied_subscription
         .to_string()
         .contains("harness grant lacks subscription_management"));
-    let mcp = streamable_http_router(home);
+    let mcp = home.mcp(&subscriber);
 
-    let catalog = call_mcp(
-        mcp.clone(),
-        subscriber.token.expose(),
-        "tools/list",
-        json!({}),
-    )
-    .await;
-    let names = catalog["result"]["tools"]
-        .as_array()
-        .expect("tool descriptors")
-        .iter()
-        .filter_map(|tool| tool["name"].as_str())
-        .collect::<Vec<_>>();
-    assert!(names.contains(&"subscribe_public_pod"));
-    assert!(names.contains(&"synchronize_subscription"));
+    let names = mcp.list_tool_names(1).await;
+    assert!(names.iter().any(|name| name == "subscribe_public_pod"));
+    assert!(names.iter().any(|name| name == "synchronize_subscription"));
 
-    let subscribed = call_tool(
-        mcp.clone(),
-        subscriber.token.expose(),
-        "subscribe_public_pod",
-        json!({"public_pod_url": public_pod_url}),
-    )
-    .await;
-    assert_eq!(subscribed["result"]["isError"], false);
-    assert_eq!(
-        subscribed["result"]["structuredContent"]["value"]["imported_events"],
-        3
-    );
-    let subscription_id = subscribed["result"]["structuredContent"]["value"]["subscription"]["id"]
+    let subscribed = mcp
+        .call_tool(
+            2,
+            "subscribe_public_pod",
+            json!({"public_pod_url": public_pod_url}),
+        )
+        .await;
+    assert!(!subscribed.is_error());
+    assert_eq!(subscribed.value()["imported_events"], 3);
+    let subscription_id = subscribed.value()["subscription"]["id"]
         .as_str()
         .expect("Subscription identity");
-    let first_cursor = subscribed["result"]["structuredContent"]["value"]["subscription"]
-        ["last_event_hash"]
+    let first_cursor = subscribed.value()["subscription"]["last_event_hash"]
         .as_str()
         .expect("verified cursor");
 
     publish_item(
-        &origin,
+        &origin.tools,
         Some(&pod),
         "https://example.com/subscriber-mcp/second",
         "second",
@@ -323,51 +259,40 @@ async fn subscription_management_harness_subscribes_and_refreshes_from_a_real_or
     assert!(denied_refresh
         .to_string()
         .contains("harness grant lacks subscription_management"));
-    let refreshed = call_tool(
-        mcp,
-        subscriber.token.expose(),
-        "synchronize_subscription",
-        json!({"subscription_id": subscription_id}),
-    )
-    .await;
-    assert_eq!(refreshed["result"]["isError"], false);
-    assert_eq!(
-        refreshed["result"]["structuredContent"]["value"]["imported_events"],
-        1
-    );
+    let refreshed = mcp
+        .call_tool(
+            3,
+            "synchronize_subscription",
+            json!({"subscription_id": subscription_id}),
+        )
+        .await;
+    assert!(!refreshed.is_error());
+    assert_eq!(refreshed.value()["imported_events"], 1);
     assert_ne!(
-        refreshed["result"]["structuredContent"]["value"]["subscription"]["last_event_hash"],
+        refreshed.value()["subscription"]["last_event_hash"],
         first_cursor
     );
-
-    origin_server.abort();
 }
 
 #[tokio::test]
 async fn stdio_dispatches_direct_subscription_and_incremental_synchronization() {
-    let origin_dir = TestDataDir::new("stdio-origin");
-    let home_dir = TestDataDir::new("stdio-home");
-    let origin = AgentTools::open_home_node(&origin_dir.0, seed_store).expect("open Origin Node");
-    let home = AgentTools::open_home_node(&home_dir.0, seed_store).expect("open Home Node");
+    let origin = PersistentNode::open("subscriber-stdio-origin");
+    let home = PersistentNode::open("subscriber-stdio-home");
     let pod = publish_item(
-        &origin,
+        &origin.tools,
         None,
         "https://example.com/subscriber-mcp/stdio-first",
         "stdio-first",
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind Origin listener");
-    let origin_base_url = format!("http://{}", listener.local_addr().expect("Origin address"));
-    let origin_app = router_with_base_url(origin.clone(), &origin_base_url);
-    let origin_server = tokio::spawn(async move { axum::serve(listener, origin_app).await });
-    let subscriber = harness(
-        &home,
+    let origin_http = EphemeralHttpServer::start_origin(origin.tools.clone()).await;
+    let subscriber = home.harness(
         "stdio subscriber",
         vec![HarnessCapability::SubscriptionManagement],
+        None,
     );
     let context = home
-        .authenticate_token(subscriber.token.expose())
+        .tools
+        .authenticate_token(subscriber.token())
         .expect("authenticate stdio subscriber")
         .expect("current stdio subscriber token");
 
@@ -378,12 +303,12 @@ async fn stdio_dispatches_direct_subscription_and_incremental_synchronization() 
         "params": {
             "name": "subscribe_public_pod",
             "arguments": {
-                "public_pod_url": format!("{origin_base_url}/federation/pods/subscriber-mcp")
+                "public_pod_url": format!("{}/federation/pods/subscriber-mcp", origin_http.base_url)
             }
         }
     });
     let mut subscribe_output = Vec::new();
-    let stdio_home = home.clone();
+    let stdio_home = home.tools.clone();
     let stdio_context = context.clone();
     serve_stdio(
         move || Ok((stdio_home.clone(), stdio_context.clone())),
@@ -392,14 +317,16 @@ async fn stdio_dispatches_direct_subscription_and_incremental_synchronization() 
     )
     .await
     .expect("serve stdio subscription call");
-    let subscribed: Value = serde_json::from_slice(&subscribe_output).expect("stdio JSON response");
-    assert_eq!(subscribed["result"]["isError"], false);
-    let subscription_id = subscribed["result"]["structuredContent"]["value"]["subscription"]["id"]
+    let subscribed = McpToolResult::from_json(
+        serde_json::from_slice(&subscribe_output).expect("stdio JSON response"),
+    );
+    assert!(!subscribed.is_error());
+    let subscription_id = subscribed.value()["subscription"]["id"]
         .as_str()
         .expect("Subscription identity");
 
     publish_item(
-        &origin,
+        &origin.tools,
         Some(&pod),
         "https://example.com/subscriber-mcp/stdio-second",
         "stdio-second",
@@ -414,7 +341,7 @@ async fn stdio_dispatches_direct_subscription_and_incremental_synchronization() 
         }
     });
     let mut synchronize_output = Vec::new();
-    let stdio_home = home.clone();
+    let stdio_home = home.tools.clone();
     let stdio_context = context.clone();
     serve_stdio(
         move || Ok((stdio_home.clone(), stdio_context.clone())),
@@ -423,65 +350,57 @@ async fn stdio_dispatches_direct_subscription_and_incremental_synchronization() 
     )
     .await
     .expect("serve stdio synchronization call");
-    let synchronized: Value =
-        serde_json::from_slice(&synchronize_output).expect("stdio JSON response");
-    assert_eq!(synchronized["result"]["isError"], false);
-    assert_eq!(
-        synchronized["result"]["structuredContent"]["value"]["imported_events"],
-        1
+    let synchronized = McpToolResult::from_json(
+        serde_json::from_slice(&synchronize_output).expect("stdio JSON response"),
     );
-    origin_server.abort();
+    assert!(!synchronized.is_error());
+    assert_eq!(synchronized.value()["imported_events"], 1);
 }
 
 #[tokio::test]
 async fn subscription_tools_are_hidden_without_subscription_management() {
     let home = AgentTools::new(seed_store());
-    let feed_reader = harness(
+    let feed_reader = ScopedHarness::register(
         &home,
         "feed-only subscriber",
         vec![HarnessCapability::FeedRead],
+        None,
     );
 
-    let catalog = call_mcp(
-        streamable_http_router(home),
-        feed_reader.token.expose(),
-        "tools/list",
-        json!({}),
+    let names = McpClient::new(
+        stumble_mcp::streamable_http_router(home),
+        feed_reader.token(),
     )
+    .list_tool_names(1)
     .await;
-    let names = catalog["result"]["tools"]
-        .as_array()
-        .expect("tool descriptors")
-        .iter()
-        .filter_map(|tool| tool["name"].as_str())
-        .collect::<Vec<_>>();
 
-    assert!(!names.contains(&"subscribe_public_pod"));
-    assert!(!names.contains(&"synchronize_subscription"));
+    assert!(!names.iter().any(|name| name == "subscribe_public_pod"));
+    assert!(!names.iter().any(|name| name == "synchronize_subscription"));
 }
 
 #[tokio::test]
 async fn direct_subscription_preserves_the_canonical_public_pod_url_error() {
     let home = AgentTools::new(seed_store());
-    let subscriber = harness(
+    let subscriber = ScopedHarness::register(
         &home,
         "canonical URL subscriber",
         vec![HarnessCapability::SubscriptionManagement],
+        None,
     );
 
-    let response = call_tool(
-        streamable_http_router(home),
-        subscriber.token.expose(),
+    let response = McpClient::new(
+        stumble_mcp::streamable_http_router(home),
+        subscriber.token(),
+    )
+    .call_tool(
+        1,
         "subscribe_public_pod",
         json!({"public_pod_url": "https://example.com/not-a-public-pod-address"}),
     )
     .await;
 
-    assert_eq!(response["result"]["isError"], true);
-    assert_eq!(
-        response["result"]["content"][0]["text"],
-        "invalid public Pod address"
-    );
+    assert!(response.is_error());
+    assert_eq!(response.error_text(), "invalid public Pod address");
 }
 
 #[tokio::test]
@@ -504,44 +423,46 @@ async fn subscription_mcp_preserves_origin_identity_signature_and_chain_errors()
         .last_mut()
         .expect("signed event")
         .signature = "invalid-signature".into();
-    let (signature_base_url, _, signature_server) = start_fixture_origin(invalid_signature).await;
+    let (_, signature_server) = start_fixture_origin(invalid_signature).await;
     assert_subscription_error(
-        &signature_base_url,
+        &signature_server.base_url,
         "invalid signature",
         "signature failure subscriber",
     )
     .await;
-    signature_server.abort();
 
     let mut broken_chain = valid_snapshot.clone();
     broken_chain.events.remove(1);
-    let (chain_base_url, _, chain_server) = start_fixture_origin(broken_chain).await;
+    let (_, chain_server) = start_fixture_origin(broken_chain).await;
     assert_subscription_error(
-        &chain_base_url,
+        &chain_server.base_url,
         "validation failed: signed Pod Event chain is discontinuous",
         "chain failure subscriber",
     )
     .await;
-    chain_server.abort();
 
-    let (identity_base_url, fixture, identity_server) = start_fixture_origin(valid_snapshot).await;
+    let (fixture, identity_server) = start_fixture_origin(valid_snapshot).await;
     let home = AgentTools::new(seed_store());
-    let subscriber = harness(
+    let subscriber = ScopedHarness::register(
         &home,
         "identity change subscriber",
         vec![HarnessCapability::SubscriptionManagement],
+        None,
     );
-    let mcp = streamable_http_router(home);
-    let subscribed = call_tool(
-        mcp.clone(),
-        subscriber.token.expose(),
-        "subscribe_public_pod",
-        json!({
-            "public_pod_url": format!("{identity_base_url}/federation/pods/subscriber-mcp")
-        }),
-    )
-    .await;
-    let subscription_id = subscribed["result"]["structuredContent"]["value"]["subscription"]["id"]
+    let mcp = McpClient::new(
+        stumble_mcp::streamable_http_router(home),
+        subscriber.token(),
+    );
+    let subscribed = mcp
+        .call_tool(
+            1,
+            "subscribe_public_pod",
+            json!({
+                "public_pod_url": format!("{}/federation/pods/subscriber-mcp", identity_server.base_url)
+            }),
+        )
+        .await;
+    let subscription_id = subscribed.value()["subscription"]["id"]
         .as_str()
         .expect("Subscription identity");
     let replacement_origin = AgentTools::new(seed_store());
@@ -553,70 +474,40 @@ async fn subscription_mcp_preserves_origin_identity_signature_and_chain_errors()
         )
         .expect("replacement Origin identity");
 
-    let refreshed = call_tool(
-        mcp,
-        subscriber.token.expose(),
-        "synchronize_subscription",
-        json!({"subscription_id": subscription_id}),
-    )
-    .await;
-    assert_eq!(refreshed["result"]["isError"], true);
+    let refreshed = mcp
+        .call_tool(
+            2,
+            "synchronize_subscription",
+            json!({"subscription_id": subscription_id}),
+        )
+        .await;
+    assert!(refreshed.is_error());
     assert_eq!(
-        refreshed["result"]["content"][0]["text"],
+        refreshed.error_text(),
         "validation failed: synchronization artifacts do not match the Subscription"
     );
-    identity_server.abort();
 }
 
 async fn assert_subscription_error(base_url: &str, expected: &str, label: &str) {
     let home = AgentTools::new(seed_store());
-    let subscriber = harness(
+    let subscriber = ScopedHarness::register(
         &home,
         label,
         vec![HarnessCapability::SubscriptionManagement],
+        None,
     );
-    let response = call_tool(
-        streamable_http_router(home),
-        subscriber.token.expose(),
+    let response = McpClient::new(
+        stumble_mcp::streamable_http_router(home),
+        subscriber.token(),
+    )
+    .call_tool(
+        1,
         "subscribe_public_pod",
         json!({
             "public_pod_url": format!("{base_url}/federation/pods/subscriber-mcp")
         }),
     )
     .await;
-    assert_eq!(response["result"]["isError"], true);
-    assert_eq!(response["result"]["content"][0]["text"], expected);
-}
-
-async fn call_tool(app: axum::Router, token: &str, name: &str, arguments: Value) -> Value {
-    call_mcp(
-        app,
-        token,
-        "tools/call",
-        json!({"name": name, "arguments": arguments}),
-    )
-    .await
-}
-
-async fn call_mcp(app: axum::Router, token: &str, method: &str, params: Value) -> Value {
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/mcp")
-                .header("authorization", format!("Bearer {token}"))
-                .header("content-type", "application/json")
-                .header("mcp-protocol-version", "2025-06-18")
-                .body(Body::from(
-                    json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
-                        .to_string(),
-                ))
-                .expect("MCP request"),
-        )
-        .await
-        .expect("MCP response");
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("MCP response body");
-    serde_json::from_slice(&body).expect("MCP JSON response")
+    assert!(response.is_error());
+    assert_eq!(response.error_text(), expected);
 }
