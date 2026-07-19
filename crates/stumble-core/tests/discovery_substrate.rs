@@ -104,6 +104,7 @@ fn accept_item(tools: &AgentTools, pod: &Pod, suffix: &str, source_url: &str, ta
                     permitted_excerpt: Some("A permitted sample excerpt".into()),
                     summary: Some("A useful public Content Reference".into()),
                     content_type: CandidateContentType::Article,
+                    media_references: Vec::new(),
                     tags,
                     provenance: CandidateProvenance {
                         discovered_at: Utc.with_ymd_and_hms(2026, 7, 17, 12, 0, 0).unwrap(),

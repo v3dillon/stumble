@@ -182,6 +182,7 @@ fn submit_candidate(
                     permitted_excerpt: Some("A permitted recovery excerpt".into()),
                     summary: Some("A detailed resilient systems recovery report".into()),
                     content_type: CandidateContentType::Article,
+                    media_references: Vec::new(),
                     tags: vec!["resilience".into(), "recovery".into()],
                     provenance: CandidateProvenance {
                         discovered_at: task.due_at,
@@ -240,6 +241,7 @@ fn accept_origin_content_item_placement(tools: &AgentTools, pod: &Pod) -> Conten
                     permitted_excerpt: Some("Permitted remote excerpt".into()),
                     summary: Some("Remote resilient systems evidence".into()),
                     content_type: CandidateContentType::Article,
+                    media_references: Vec::new(),
                     tags: vec!["resilience".into(), "recovery".into()],
                     provenance: CandidateProvenance {
                         discovered_at: Utc::now(),
@@ -368,6 +370,7 @@ fn accept_local_candidate(
                     permitted_excerpt: Some("Permitted release-proof excerpt".into()),
                     summary: Some(format!("Independent evidence about {label}")),
                     content_type: CandidateContentType::Article,
+                    media_references: Vec::new(),
                     tags: vec![label.into()],
                     provenance: CandidateProvenance {
                         discovered_at: now,

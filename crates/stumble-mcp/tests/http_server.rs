@@ -459,6 +459,27 @@ async fn chatgpt_can_submit_a_provenance_bearing_link_to_an_authorized_pod() {
         .expect("create private Pod");
     let app = streamable_http_router(tools);
 
+    let listed = app
+        .clone()
+        .oneshot(mcp_request(
+            token.token.expose(),
+            json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list"}),
+        ))
+        .await
+        .expect("list Candidate tools");
+    let listed = response_json(listed).await;
+    let submit_schema = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "submit_candidate")
+        .unwrap();
+    assert_eq!(
+        submit_schema["inputSchema"]["properties"]["media_references"]["items"]["properties"]
+            ["media_type"]["enum"],
+        json!(["image", "video"])
+    );
+
     let response = app
         .oneshot(mcp_request(
             token.token.expose(),
@@ -475,6 +496,10 @@ async fn chatgpt_can_submit_a_provenance_bearing_link_to_an_authorized_pod() {
                         },
                         "summary": "A concrete systems lesson.",
                         "content_type": "article",
+                        "media_references": [{
+                            "media_type": "image",
+                            "url": "https://media.example.com/field-note.png"
+                        }],
                         "tags": ["systems"],
                         "provenance": {
                             "discovered_at": "2026-07-17T22:00:00Z",
@@ -505,6 +530,13 @@ async fn chatgpt_can_submit_a_provenance_bearing_link_to_an_authorized_pod() {
         response["result"]["structuredContent"]["value"]["submission"]["provenance"]
             ["discovery_method"],
         "chatgpt_conversation"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["value"]["submission"]["media_references"],
+        json!([{
+            "media_type": "image",
+            "url": "https://media.example.com/field-note.png"
+        }])
     );
 }
 

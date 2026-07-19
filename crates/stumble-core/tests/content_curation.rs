@@ -112,6 +112,10 @@ fn candidate_request(pod_id: PodId, confidence: f32) -> CandidateSubmissionReque
             permitted_excerpt: Some("Permitted evidence".into()),
             summary: Some("A report worth curating".into()),
             content_type: CandidateContentType::Article,
+            media_references: vec![MediaReference {
+                media_type: MediaReferenceType::Image,
+                url: "https://media.example.com/curation/preview.jpg".into(),
+            }],
             tags: vec!["curation".into()],
             provenance: CandidateProvenance {
                 discovered_at: Utc.with_ymd_and_hms(2026, 7, 17, 10, 0, 0).unwrap(),
@@ -159,6 +163,22 @@ fn manual_curation_queues_every_placement_until_authorized_review() {
     let submitted = tools
         .submit_candidate(&submitter, candidate_request(pod.id, 1.0))
         .unwrap();
+    let mut corroborating = candidate_request(pod.id, 0.8);
+    corroborating.evidence.source_url = "https://example.com/curation".into();
+    corroborating.evidence.harness_idempotency_key = "corroborating-worker".into();
+    corroborating.evidence.client_idempotency_key = "corroborating-client".into();
+    corroborating.evidence.media_references = vec![
+        MediaReference {
+            media_type: MediaReferenceType::Image,
+            url: "https://media.example.com/curation/preview.jpg".into(),
+        },
+        MediaReference {
+            media_type: MediaReferenceType::Video,
+            url: "https://media.example.com/curation/demo.mp4".into(),
+        },
+    ];
+    let corroborated = tools.submit_candidate(&submitter, corroborating).unwrap();
+    assert_eq!(corroborated.candidate.id, submitted.candidate.id);
 
     let curated = tools
         .curate_candidate(&curator, submitted.candidate.id, Utc::now())
@@ -186,12 +206,20 @@ fn manual_curation_queues_every_placement_until_authorized_review() {
     assert_eq!(reviewed.status, PodPlacementStatus::Accepted);
     assert_eq!(reviewed.curation_path, CurationPath::ManualReview);
     assert_eq!(reviewed.audit_history.len(), 2);
+    let accepted = tools.list_content_items_for_pod(&curator, pod.id).unwrap();
+    assert_eq!(accepted.len(), 1);
     assert_eq!(
-        tools
-            .list_content_items_for_pod(&curator, pod.id)
-            .unwrap()
-            .len(),
-        1
+        accepted[0].media_references(),
+        &[
+            MediaReference {
+                media_type: MediaReferenceType::Image,
+                url: "https://media.example.com/curation/preview.jpg".into(),
+            },
+            MediaReference {
+                media_type: MediaReferenceType::Video,
+                url: "https://media.example.com/curation/demo.mp4".into(),
+            }
+        ]
     );
 }
 

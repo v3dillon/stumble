@@ -1242,6 +1242,9 @@ pub struct FeedContentReference {
     pub permitted_description: Option<String>,
     /// Generated local understanding of the reference.
     pub summary: Option<String>,
+    /// Permitted attached-media URL references; no media bytes are retained.
+    #[serde(default)]
+    pub media_references: Vec<MediaReference>,
     /// Source domain used by source-block feedback.
     pub source: String,
     /// Subject tags used by topic-block feedback.
@@ -2067,6 +2070,8 @@ pub struct Submission {
     pub discovered_by_crawler: bool,
     pub submitter_note: Option<String>,
     pub summary: Option<String>,
+    #[serde(default)]
+    pub media_references: Vec<MediaReference>,
     pub tags: Vec<String>,
     pub embedding: Option<Vec<f32>>,
     pub created_at: DateTime<Utc>,
@@ -2242,6 +2247,12 @@ impl ContentItem {
         &self.legacy_record.title
     }
 
+    /// Returns permitted attached-media URLs without implying byte archival.
+    #[must_use]
+    pub fn media_references(&self) -> &[MediaReference] {
+        &self.legacy_record.media_references
+    }
+
     pub(crate) fn into_legacy_record(self) -> Submission {
         self.legacy_record
     }
@@ -2256,6 +2267,8 @@ struct ContentItemWire {
     permitted_description: Option<String>,
     domain: String,
     summary: Option<String>,
+    #[serde(default)]
+    media_references: Vec<MediaReference>,
     tags: Vec<String>,
     created_at: DateTime<Utc>,
     origin_event_id: Option<Uuid>,
@@ -2274,6 +2287,7 @@ impl Serialize for ContentItem {
             permitted_description: self.legacy_record.description.clone(),
             domain: self.legacy_record.domain.clone(),
             summary: self.legacy_record.summary.clone(),
+            media_references: self.legacy_record.media_references.clone(),
             tags: self.legacy_record.tags.clone(),
             created_at: self.legacy_record.created_at,
             origin_event_id: self.legacy_record.origin_event_id,
@@ -2301,6 +2315,7 @@ impl<'de> Deserialize<'de> for ContentItem {
                 discovered_by_crawler: false,
                 submitter_note: None,
                 summary: wire.summary,
+                media_references: wire.media_references,
                 tags: wire.tags,
                 embedding: None,
                 created_at: wire.created_at,
@@ -2532,6 +2547,27 @@ pub enum CandidateContentType {
     Other,
 }
 
+/// Permitted attached-media category supplied by an Agent Harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MediaReferenceType {
+    /// An image available at the referenced source URL.
+    Image,
+    /// A video available at the referenced source URL.
+    Video,
+}
+
+/// Reference-first attached media retained without downloading its bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct MediaReference {
+    /// Typed media category for presentation and policy decisions.
+    pub media_type: MediaReferenceType,
+    /// Permitted HTTP(S) location; Stumble does not archive the target bytes.
+    pub url: String,
+}
+
 /// Harness confidence retained as bounded evidence, never authority.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CandidateConfidence(f32);
@@ -2668,6 +2704,9 @@ pub struct CandidateSubmissionEvidence {
     pub summary: Option<String>,
     /// Coarse external media type.
     pub content_type: CandidateContentType,
+    /// Permitted attached-media URL references; no media bytes are retained.
+    #[serde(default)]
+    pub media_references: Vec<MediaReference>,
     /// Harness-proposed descriptive tags.
     pub tags: Vec<String>,
     /// Evidence describing how the harness found the source.

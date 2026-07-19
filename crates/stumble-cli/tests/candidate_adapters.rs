@@ -38,6 +38,7 @@ fn request(pod_id: PodId) -> CandidateSubmissionRequest {
             permitted_excerpt: Some("Permitted excerpt".into()),
             summary: Some("Adapter parity evidence".into()),
             content_type: CandidateContentType::Article,
+            media_references: Vec::new(),
             tags: vec!["adapters".into()],
             provenance: CandidateProvenance {
                 discovered_at: Utc::now(),

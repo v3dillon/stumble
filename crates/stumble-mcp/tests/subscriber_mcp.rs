@@ -190,6 +190,7 @@ fn publish_item(origin: &AgentTools, pod: Option<&Pod>, source_url: &str, key: &
                     permitted_excerpt: None,
                     summary: Some("Signed federation fixture".into()),
                     content_type: CandidateContentType::Article,
+                    media_references: Vec::new(),
                     tags: vec!["federation".into()],
                     provenance: CandidateProvenance {
                         discovered_at: Utc::now(),

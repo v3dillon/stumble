@@ -93,6 +93,7 @@ fn accept_item(tools: &AgentTools, pod_id: uuid::Uuid, suffix: &str) -> uuid::Uu
                     permitted_excerpt: Some("Permitted evidence".into()),
                     summary: Some("Canonical Content Item".into()),
                     content_type: CandidateContentType::Article,
+                    media_references: Vec::new(),
                     tags: vec!["systems".into()],
                     provenance: CandidateProvenance {
                         discovered_at: Utc::now(),

@@ -53,6 +53,7 @@ fn accepted_item(tools: &AgentTools, ctx: &AuthContext) -> (PodId, ContentItemId
                     permitted_excerpt: None,
                     summary: Some("Adapter parity".into()),
                     content_type: CandidateContentType::Article,
+                    media_references: Vec::new(),
                     tags: vec!["adapters".into()],
                     provenance: CandidateProvenance {
                         discovered_at: chrono::Utc::now(),

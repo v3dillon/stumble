@@ -107,6 +107,10 @@ fn accept_item(tools: &AgentTools, pod: &Pod) {
                     permitted_excerpt: Some("A permitted excerpt".into()),
                     summary: Some("An accepted remote Content Reference".into()),
                     content_type: CandidateContentType::Article,
+                    media_references: vec![MediaReference {
+                        media_type: MediaReferenceType::Image,
+                        url: "https://media.reference.example/remote-report/diagram.jpg".into(),
+                    }],
                     tags: vec!["systems".into()],
                     provenance: CandidateProvenance {
                         discovered_at: Utc.with_ymd_and_hms(2026, 7, 17, 12, 0, 0).unwrap(),
@@ -186,6 +190,23 @@ fn subscribed_home_node_synchronizes_incrementally_and_reads_remote_content_offl
     let snapshot = origin
         .federation_pod_snapshot(&origin_owner, &pod.slug, None)
         .unwrap();
+    let signed_content_item: ContentItem = serde_json::from_value(
+        snapshot
+            .events
+            .iter()
+            .find(|event| event.event_type == "content_item_placed")
+            .unwrap()
+            .payload_json["content_item"]
+            .clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        signed_content_item.media_references(),
+        &[MediaReference {
+            media_type: MediaReferenceType::Image,
+            url: "https://media.reference.example/remote-report/diagram.jpg".into(),
+        }]
+    );
     let replayed_snapshot = snapshot.clone();
     let subscriber = harness(
         &home,
@@ -239,6 +260,23 @@ fn subscribed_home_node_synchronizes_incrementally_and_reads_remote_content_offl
         feed.items[0].content_reference.canonical_url,
         "https://reference.example/remote-report"
     );
+    assert_eq!(
+        feed.items[0].content_reference.media_references,
+        vec![MediaReference {
+            media_type: MediaReferenceType::Image,
+            url: "https://media.reference.example/remote-report/diagram.jpg".into(),
+        }]
+    );
+    let synchronized_pod = home
+        .pod_by_slug("remote-systems", subscriber.tenant_id)
+        .unwrap();
+    let pod_content = home
+        .pod_content_stream(&subscriber, synchronized_pod.id)
+        .unwrap();
+    assert_eq!(
+        pod_content[0].content_item.media_references(),
+        feed.items[0].content_reference.media_references
+    );
     assert_eq!(feed.items[0].placements.len(), 1);
     assert_eq!(
         feed.items[0].placements[0].origin_node_id,
@@ -270,6 +308,10 @@ fn subscribed_home_node_synchronizes_incrementally_and_reads_remote_content_offl
         .get_feed_batch(&subscriber, FeedBatchRequest::new(10).unwrap(), Utc::now())
         .unwrap();
     assert_eq!(offline_feed.items.len(), 1);
+    assert_eq!(
+        offline_feed.items[0].content_reference.media_references,
+        feed.items[0].content_reference.media_references
+    );
 }
 
 #[test]

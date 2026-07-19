@@ -856,6 +856,18 @@ fn candidate_schema() -> Value {
                 "type": "string",
                 "enum": ["article", "video", "audio", "image", "podcast", "repository", "dataset", "other"]
             },
+            "media_references": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "media_type": {"type": "string", "enum": ["image", "video"]},
+                        "url": {"type": "string", "format": "uri"}
+                    },
+                    "required": ["media_type", "url"],
+                    "additionalProperties": false
+                }
+            },
             "tags": {"type": "array", "items": {"type": "string"}},
             "provenance": {
                 "type": "object",

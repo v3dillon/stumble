@@ -236,6 +236,7 @@ mod tests {
             discovered_by_crawler: true,
             submitter_note: None,
             summary: Some(format!("{title} is a test discovery item.")),
+            media_references: Vec::new(),
             tags: tag_text
                 .split_whitespace()
                 .map(ToString::to_string)
@@ -546,6 +547,7 @@ mod tests {
             discovered_by_crawler: false,
             submitter_note: None,
             summary: None,
+            media_references: Vec::new(),
             tags: vec![],
             embedding: None,
             created_at: Utc::now(),
@@ -1094,6 +1096,7 @@ mod tests {
             discovered_by_crawler: false,
             submitter_note: Some("Remote public alien pod link.".to_string()),
             summary: Some("Alien and UAP signal discussion.".to_string()),
+            media_references: Vec::new(),
             tags: vec![
                 "aliens".to_string(),
                 "uap".to_string(),

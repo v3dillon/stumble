@@ -136,6 +136,7 @@ impl Environment {
                         permitted_excerpt: Some("Permitted evidence".into()),
                         summary: Some("A report about reliable systems".into()),
                         content_type: CandidateContentType::Article,
+                        media_references: Vec::new(),
                         tags: vec!["systems".into(), "reliability".into()],
                         provenance: CandidateProvenance {
                             discovered_at: Utc::now(),

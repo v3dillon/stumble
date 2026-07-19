@@ -32,6 +32,16 @@ fn candidate_request(pod_ids: &[PodId]) -> CandidateSubmissionRequest {
             permitted_excerpt: Some("A short, permitted excerpt.".into()),
             summary: Some("How the team diagnosed and repaired the incident.".into()),
             content_type: CandidateContentType::Article,
+            media_references: vec![
+                MediaReference {
+                    media_type: MediaReferenceType::Image,
+                    url: "https://cdn.example.com/report/diagram.png".into(),
+                },
+                MediaReference {
+                    media_type: MediaReferenceType::Video,
+                    url: "https://cdn.example.com/report/demo.mp4".into(),
+                },
+            ],
             tags: vec!["reliability".into(), "incident-review".into()],
             provenance: CandidateProvenance {
                 discovered_at: Utc.with_ymd_and_hms(2026, 7, 17, 9, 0, 0).unwrap(),
@@ -160,6 +170,19 @@ fn interactive_harness_submits_structured_private_multi_pod_candidate() {
         CandidateContentType::Article
     );
     assert_eq!(
+        submitted.submission.evidence.media_references,
+        vec![
+            MediaReference {
+                media_type: MediaReferenceType::Image,
+                url: "https://cdn.example.com/report/diagram.png".into(),
+            },
+            MediaReference {
+                media_type: MediaReferenceType::Video,
+                url: "https://cdn.example.com/report/demo.mp4".into(),
+            },
+        ]
+    );
+    assert_eq!(
         submitted.allowed_actions,
         vec![CandidateAllowedAction::InspectCandidate]
     );
@@ -190,6 +213,48 @@ fn interactive_harness_submits_structured_private_multi_pod_candidate() {
     assert!(!federation_artifact.contains("https://example.com/report"));
     assert!(!federation_artifact.contains("review_state"));
     assert!(!federation_artifact.contains("candidate_id"));
+}
+
+#[test]
+fn omitted_media_references_default_to_an_empty_reference_list() {
+    let mut request = serde_json::to_value(candidate_request(&[uuid::Uuid::now_v7()])).unwrap();
+    request.as_object_mut().unwrap().remove("media_references");
+
+    let request: CandidateSubmissionRequest = serde_json::from_value(request).unwrap();
+
+    assert!(request.evidence.media_references.is_empty());
+}
+
+#[test]
+fn candidate_submission_rejects_unknown_media_reference_types() {
+    let mut request = serde_json::to_value(candidate_request(&[uuid::Uuid::now_v7()])).unwrap();
+    request["media_references"][0]["media_type"] = serde_json::json!("document");
+
+    let result = serde_json::from_value::<CandidateSubmissionRequest>(request);
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn candidate_submission_rejects_media_references_that_are_not_permitted_web_urls() {
+    let tools = AgentTools::new(seed_store());
+    let pod = create_test_pod(&tools, "invalid-media-reference");
+    let harness = candidate_harness(
+        &tools,
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::CandidateSubmission],
+        Some(vec![pod.id]),
+    );
+    let mut request = candidate_request(&[pod.id]);
+    request.evidence.media_references[0].url = "file:///tmp/archived-image.png".into();
+
+    let result = tools.submit_candidate(&harness, request);
+
+    assert!(matches!(
+        result,
+        Err(AgentToolsError::Store(StoreError::Validation(message)))
+            if message == "Candidate Submission media references must use HTTP or HTTPS URLs"
+    ));
 }
 
 #[test]
@@ -232,6 +297,19 @@ fn retries_are_idempotent_and_canonical_deduplication_keeps_independent_evidence
         .inspect_candidate(&first_harness, first.candidate.id)
         .unwrap();
     assert_eq!(inspected.submissions.len(), 2);
+    assert!(inspected.submissions.iter().all(|submission| {
+        submission.evidence.media_references
+            == vec![
+                MediaReference {
+                    media_type: MediaReferenceType::Image,
+                    url: "https://cdn.example.com/report/diagram.png".into(),
+                },
+                MediaReference {
+                    media_type: MediaReferenceType::Video,
+                    url: "https://cdn.example.com/report/demo.mp4".into(),
+                },
+            ]
+    }));
     assert!(inspected.submissions.iter().any(|submission| {
         submission.evidence.proposed_placements[0].reason == "independent corroboration"
             && submission.evidence.proposed_placements[0].confidence

@@ -104,6 +104,7 @@ fn accepted_item(
                     permitted_excerpt: None,
                     summary: Some(format!("A report about {}", tags.join(" "))),
                     content_type: CandidateContentType::Article,
+                    media_references: Vec::new(),
                     tags,
                     provenance: CandidateProvenance {
                         discovered_at: Utc.with_ymd_and_hms(2026, 7, 17, 10, 0, 0).unwrap(),

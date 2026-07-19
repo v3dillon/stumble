@@ -3280,6 +3280,7 @@ impl AgentTools {
                 discovered_by_crawler: request.discovered_by_crawler,
                 submitter_note: request.note,
                 summary: request.description,
+                media_references: Vec::new(),
                 tags: request.tags,
                 embedding: None,
                 created_at: Utc::now(),
@@ -8223,6 +8224,19 @@ fn validate_candidate_submission(
     if let Some(referrer_url) = &evidence.provenance.referrer_url {
         canonicalize_url(referrer_url)?;
     }
+    for media_reference in &evidence.media_references {
+        let url = Url::parse(&media_reference.url).map_err(|_| {
+            StoreError::Validation(
+                "Candidate Submission media references must use HTTP or HTTPS URLs".into(),
+            )
+        })?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            return Err(StoreError::Validation(
+                "Candidate Submission media references must use HTTP or HTTPS URLs".into(),
+            )
+            .into());
+        }
+    }
 
     let mut pod_ids = HashSet::with_capacity(evidence.proposed_placements.len());
     let local_node_id = store.node_for_tenant(ctx.tenant_id)?.id;
@@ -8607,6 +8621,15 @@ fn ensure_content_item(
         .agent_harnesses
         .get(&evidence.submitted_by)
         .map(|harness| harness.user_id);
+    let mut media_references = Vec::new();
+    for media_reference in submissions
+        .iter()
+        .flat_map(|submission| &submission.evidence.media_references)
+    {
+        if !media_references.contains(media_reference) {
+            media_references.push(media_reference.clone());
+        }
+    }
     let item = Submission {
         id: stable_candidate_uuid("content-item", &[&candidate.id.to_string()]),
         tenant_id: candidate.tenant_id,
@@ -8624,6 +8647,7 @@ fn ensure_content_item(
         discovered_by_crawler: false,
         submitter_note: None,
         summary: evidence.evidence.summary.clone(),
+        media_references,
         tags: evidence.evidence.tags.clone(),
         embedding: None,
         created_at: now,
@@ -8909,6 +8933,7 @@ fn feed_content_reference(item: &Submission) -> FeedContentReference {
         title: item.title.clone(),
         permitted_description: item.description.clone(),
         summary: item.summary.clone(),
+        media_references: item.media_references.clone(),
         source: item.domain.clone(),
         tags: item.tags.clone(),
     }
@@ -10406,6 +10431,7 @@ mod federation_projection_tests {
             discovered_by_crawler: false,
             submitter_note: None,
             summary: None,
+            media_references: Vec::new(),
             tags: Vec::new(),
             embedding: None,
             created_at: Utc::now(),

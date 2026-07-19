@@ -94,6 +94,7 @@ fn accepted_public_item(origin: &AgentTools) -> Pod {
                     permitted_excerpt: Some("Permitted HTTP acceptance excerpt".into()),
                     summary: Some("Fetched from a reachable Origin Node".into()),
                     content_type: CandidateContentType::Article,
+                    media_references: Vec::new(),
                     tags: vec!["outbound".into()],
                     provenance: CandidateProvenance {
                         discovered_at: now,

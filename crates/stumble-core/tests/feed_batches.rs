@@ -86,6 +86,7 @@ fn accepted_item(tools: &AgentTools, slug: &str, ordinal: usize) -> (Pod, Conten
                     permitted_excerpt: Some("Permitted excerpt".into()),
                     summary: Some(format!("A useful report about topic-{ordinal}")),
                     content_type: CandidateContentType::Article,
+                    media_references: Vec::new(),
                     tags: vec![format!("topic-{ordinal}")],
                     provenance: CandidateProvenance {
                         discovered_at: Utc.with_ymd_and_hms(2026, 7, 17, 10, 0, 0).unwrap(),
@@ -147,6 +148,7 @@ fn accepted_item_in_pod(tools: &AgentTools, pod: &Pod, ordinal: usize) -> Conten
                     permitted_excerpt: Some("Permitted excerpt".into()),
                     summary: Some(format!("A useful report about pod-topic-{ordinal}")),
                     content_type: CandidateContentType::Article,
+                    media_references: Vec::new(),
                     tags: vec![format!("pod-topic-{ordinal}")],
                     provenance: CandidateProvenance {
                         discovered_at: Utc.with_ymd_and_hms(2026, 7, 17, 10, 0, 0).unwrap(),
