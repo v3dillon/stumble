@@ -26,18 +26,15 @@ pub(crate) fn record_interest_seed(
             provenance: provenance.clone(),
         })
         .collect::<Vec<_>>();
-    evidence.sort_by(|left, right| {
-        taste_signal_key(&left.signal).cmp(&taste_signal_key(&right.signal))
-    });
+    evidence.sort_by(|left, right| left.signal.key().cmp(&right.signal.key()));
     if let Some(seed) = store.interest_seeds.get_mut(&key) {
         for item in evidence {
             if !seed.evidence.contains(&item) {
                 seed.evidence.push(item);
             }
         }
-        seed.evidence.sort_by(|left, right| {
-            taste_signal_key(&left.signal).cmp(&taste_signal_key(&right.signal))
-        });
+        seed.evidence
+            .sort_by(|left, right| left.signal.key().cmp(&right.signal.key()));
         return;
     }
     store.interest_seeds.insert(
@@ -143,32 +140,22 @@ pub(crate) fn taste_profile_projections(
     tenant_id: Option<TenantId>,
     preferences: Option<&UserPreferences>,
 ) -> TasteProfileProjections {
-    let mut projections = taste_signal_aggregates(store, user_id, tenant_id)
-        .into_iter()
-        .map(
-            |(signal, aggregate)| match signal.source_affinity() {
-                Some(source_signal) => TasteProfileProjection::Source(
-                    aggregate.source_affinity(source_signal, preferences),
-                ),
-                None => {
-                    let explicitly_blocked = matches!(&signal, LearnedTasteSignal::Topic(topic)
-                        if preferences.is_some_and(|preferences| preferences.blocked_topics.iter().any(|blocked| blocked.eq_ignore_ascii_case(topic))));
-                    TasteProfileProjection::Learned(
-                        aggregate.learned_weight(signal, explicitly_blocked),
-                    )
-                }
-            },
-        )
-        .collect::<Vec<_>>();
-    projections.sort_by(|left, right| left.key().cmp(&right.key()));
     let mut source_affinities = Vec::new();
     let mut learned = Vec::new();
-    for projection in projections {
-        match projection {
-            TasteProfileProjection::Source(affinity) => source_affinities.push(affinity),
-            TasteProfileProjection::Learned(weight) => learned.push(weight),
+    for (signal, aggregate) in taste_signal_aggregates(store, user_id, tenant_id) {
+        match signal.source_affinity() {
+            Some(source_signal) => {
+                source_affinities.push(aggregate.source_affinity(source_signal, preferences));
+            }
+            None => {
+                let explicitly_blocked = matches!(&signal, LearnedTasteSignal::Topic(topic)
+                    if preferences.is_some_and(|preferences| preferences.blocked_topics.iter().any(|blocked| blocked.eq_ignore_ascii_case(topic))));
+                learned.push(aggregate.learned_weight(signal, explicitly_blocked));
+            }
         }
     }
+    source_affinities.sort_by(|left, right| left.signal.key().cmp(&right.signal.key()));
+    learned.sort_by(|left, right| left.signal.key().cmp(&right.signal.key()));
     TasteProfileProjections {
         learned,
         source_affinities,
@@ -235,20 +222,6 @@ impl TasteSignalAggregate {
         }
         let net = i64::from(supporting) - i64::from(self.opposing_feedback);
         f32::from(i16::try_from(net.clamp(-6, 6)).unwrap_or_default()) * 0.5
-    }
-}
-
-enum TasteProfileProjection {
-    Source(SourceAffinity),
-    Learned(LearnedTasteWeight),
-}
-
-impl TasteProfileProjection {
-    fn key(&self) -> (&str, &str) {
-        match self {
-            Self::Source(affinity) => affinity.signal.key(),
-            Self::Learned(weight) => weight.signal.key(),
-        }
     }
 }
 
@@ -320,8 +293,7 @@ pub(crate) fn reset_interest_seed_evidence(
         .filter(|seed| seed.user_id == user_id && seed.tenant_id == tenant_id)
     {
         if let Some(signal) = signal {
-            seed.evidence
-                .retain(|evidence| !taste_signals_match(&evidence.signal, signal));
+            seed.evidence.retain(|evidence| evidence.signal != *signal);
             if seed.evidence.is_empty() {
                 seed.retracted_at.get_or_insert_with(chrono::Utc::now);
             }
@@ -329,14 +301,6 @@ pub(crate) fn reset_interest_seed_evidence(
             seed.retracted_at.get_or_insert_with(chrono::Utc::now);
         }
     }
-}
-
-pub(crate) fn taste_signal_key(signal: &LearnedTasteSignal) -> (&str, &str) {
-    signal.key()
-}
-
-pub(crate) fn taste_signals_match(left: &LearnedTasteSignal, right: &LearnedTasteSignal) -> bool {
-    left == right
 }
 
 #[cfg(test)]
@@ -399,6 +363,59 @@ mod tests {
         assert_eq!(
             store.interest_seeds[&(target_user, candidate_id)].tenant_id,
             Some(submission_tenant)
+        );
+    }
+
+    #[test]
+    fn taste_profile_result_vectors_are_sorted_independently() {
+        let user_id = uuid::Uuid::now_v7();
+        let candidate_id = uuid::Uuid::now_v7().into();
+        let provenance = CandidateProvenance {
+            discovered_at: Utc::now(),
+            discovery_method: "test".into(),
+            referrer_url: None,
+        };
+        let mut store = InMemoryStore::default();
+        store.interest_seeds.insert(
+            (user_id, candidate_id),
+            InterestSeed {
+                user_id,
+                tenant_id: None,
+                candidate_id,
+                evidence: vec![
+                    LearnedTasteSignal::Topic("zulu".into()),
+                    LearnedTasteSignal::Source("z.example".into()),
+                    LearnedTasteSignal::Topic("alpha".into()),
+                    LearnedTasteSignal::AuthorOrAccount("beta".into()),
+                ]
+                .into_iter()
+                .map(|signal| InterestSeedSignalEvidence {
+                    signal,
+                    provenance: provenance.clone(),
+                })
+                .collect(),
+                created_at: Utc::now(),
+                retracted_at: None,
+            },
+        );
+
+        let projections = taste_profile_projections(&store, user_id, None, None);
+
+        assert_eq!(
+            projections
+                .learned
+                .iter()
+                .map(|weight| weight.signal.key())
+                .collect::<Vec<_>>(),
+            vec![("topic", "alpha"), ("topic", "zulu")]
+        );
+        assert_eq!(
+            projections
+                .source_affinities
+                .iter()
+                .map(|affinity| affinity.signal.key())
+                .collect::<Vec<_>>(),
+            vec![("author_or_account", "beta"), ("source", "z.example")]
         );
     }
 }

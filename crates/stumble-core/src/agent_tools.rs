@@ -6,7 +6,6 @@ use crate::feed_mix::{
 use crate::interest_seeds::{
     candidate_submission_taste_signals, interest_seed_evidence, record_interest_seed,
     reset_interest_seed_evidence, source_affinity_is_blocked, taste_profile_projections,
-    taste_signal_key, taste_signals_match,
 };
 use crate::ranking::{rank_discovery, RankingInput};
 use crate::signing::{
@@ -5685,7 +5684,7 @@ impl AgentTools {
             request
                 .signal
                 .as_ref()
-                .is_some_and(|signal| !taste_signals_match(signal, &evidence.signal))
+                .is_some_and(|signal| signal != &evidence.signal)
         });
         reset_interest_seed_evidence(
             &mut projected,
@@ -9717,7 +9716,7 @@ fn feed_attention_value(
             weight.weight
         };
         learned_value += applied_weight;
-        let (signal_kind, signal_value) = taste_signal_key(&weight.signal);
+        let (signal_kind, signal_value) = weight.signal.key();
         if explicit_interest_matches && weight.weight < 0.0 {
             learned_reasons.push(format!(
                 "Explicit interest '{signal_value}' overrode learned {signal_kind} '{signal_value}' aversion from {} opposing signals",
