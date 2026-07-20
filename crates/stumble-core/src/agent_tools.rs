@@ -2820,13 +2820,10 @@ impl AgentTools {
             .store
             .read()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
-        let can_execute_personal = authorize_personal_discovery_execution(&store, ctx).is_ok();
-        let can_execute_pod =
-            authorize_harness(&store, ctx, HarnessCapability::DiscoveryTasks, None).is_ok();
-        if !can_execute_personal && !can_execute_pod {
-            return Err(AgentToolsError::Forbidden {
-                reason: "harness grant lacks discovery task execution authority".into(),
-            });
+        let personal_execution = authorize_personal_discovery_execution(&store, ctx);
+        let pod_execution = authorize_harness(&store, ctx, HarnessCapability::DiscoveryTasks, None);
+        if let (Err(_), Err(error)) = (personal_execution, pod_execution) {
+            return Err(error);
         }
         Ok(store
             .discovery_tasks
