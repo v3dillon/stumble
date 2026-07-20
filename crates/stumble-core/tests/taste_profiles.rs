@@ -413,9 +413,18 @@ fn add_to_pod_updates_local_learning_and_user_can_reset_some_or_all_weights() {
             Utc::now(),
         )
         .unwrap();
+    tools
+        .add_content_item_to_pod(
+            &user,
+            AddContentItemToPodRequest::new(item_id, target.id, None).unwrap(),
+            Utc::now(),
+        )
+        .unwrap();
     let learned = tools.taste_profile(&user).unwrap();
     assert!(learned.learned.iter().any(|weight| {
         weight.signal == LearnedTasteSignal::Topic("systems".into())
+            && weight.weight == 0.0
+            && weight.supporting_signals == 1
             && weight.evidence_summary.len() == 1
             && weight.evidence_summary[0].kind == LearnedTasteEvidenceKind::AddToPod
             && weight.evidence_summary[0].count == 1

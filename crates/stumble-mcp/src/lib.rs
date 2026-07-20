@@ -389,7 +389,7 @@ impl McpToolRouter {
         let definition = tool_definition(&call.tool)
             .ok_or_else(|| anyhow::anyhow!("unknown MCP tool {}", call.tool))?;
         if definition.handler == ToolHandlerKind::Async {
-            if let Some(capability) = definition.capability {
+            if let Some(capability) = definition.availability.capability() {
                 self.require_capability_on_blocking(capability).await?;
             }
         }

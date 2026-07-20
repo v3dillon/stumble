@@ -112,6 +112,7 @@ async fn feedback_catalog_advertises_interest_seed_retraction() {
         .names()
         .iter()
         .any(|name| name == "retract_interest_seed"));
+    assert!(tools.names().iter().any(|name| name == "get_taste_profile"));
 }
 
 #[tokio::test]
@@ -135,6 +136,7 @@ async fn unattended_feedback_catalog_omits_interactive_private_tools() {
 
     assert!(!names.iter().any(|name| name == "record_feed_feedback"));
     assert!(!names.iter().any(|name| name == "retract_interest_seed"));
+    assert!(!names.iter().any(|name| name == "get_taste_profile"));
 }
 
 #[tokio::test]

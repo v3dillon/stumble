@@ -25,7 +25,7 @@ stumble
 ├── feed
 │   ├── batch    get | complete
 │   ├── feedback record
-│   └── taste    show | set | reset
+│   └── taste    show | set | reset | retract
 └── sync
     ├── peer list | add | remove
     └── pod  run | status

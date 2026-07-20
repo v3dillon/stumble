@@ -1697,27 +1697,36 @@ impl AgentTools {
     ///
     /// # Errors
     ///
-    /// Returns an error when the harness is unattended, revoked, scoped when
-    /// `unscoped` is required, lacks Feedback authority, or the lock is poisoned.
-    pub fn require_interactive_feedback(
+    /// Returns an error when the harness is unattended, revoked, lacks Feedback
+    /// authority, or the lock is poisoned.
+    pub fn require_interactive_feedback(&self, ctx: &AuthContext) -> Result<(), AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Feedback, None)?;
+        authorize_interactive_user_action(
+            &store,
+            ctx,
+            "Feedback requires an interactive User action",
+        )
+    }
+
+    /// Verifies unscoped interactive authority for private Taste Profile adapters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the harness is unattended, revoked, Pod-scoped,
+    /// lacks Feedback authority, or the lock is poisoned.
+    pub fn require_unscoped_interactive_feedback(
         &self,
         ctx: &AuthContext,
-        unscoped: bool,
     ) -> Result<(), AgentToolsError> {
         let store = self
             .store
             .read()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
-        if unscoped {
-            authorize_taste_profile(&store, ctx)
-        } else {
-            authorize_harness(&store, ctx, HarnessCapability::Feedback, None)?;
-            authorize_interactive_user_action(
-                &store,
-                ctx,
-                "Feedback requires an interactive User action",
-            )
-        }
+        authorize_taste_profile(&store, ctx)
     }
 
     /// Creates an expiring proposal without applying its sensitive change.

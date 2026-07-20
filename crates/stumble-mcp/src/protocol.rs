@@ -404,19 +404,19 @@ fn tool_is_available(
     context: &AuthContext,
     definition: &crate::registry::ToolDefinition,
 ) -> bool {
-    use crate::registry::McpTool;
+    use crate::registry::ToolAvailability;
 
-    match definition.tool {
-        McpTool::RecordFeedFeedback => tools.require_interactive_feedback(context, false).is_ok(),
-        McpTool::GetTasteProfile
-        | McpTool::UpdateTasteProfile
-        | McpTool::ResetLearnedTaste
-        | McpTool::RetractInterestSeed => tools.require_interactive_feedback(context, true).is_ok(),
-        _ => definition.capability.is_none_or(|capability| {
-            tools
-                .require_harness_capability(context, capability)
-                .is_ok()
-        }),
+    match definition.availability {
+        ToolAvailability::Public => true,
+        ToolAvailability::CapabilityOnly(capability) => tools
+            .require_harness_capability(context, capability)
+            .is_ok(),
+        ToolAvailability::InteractiveFeedback => {
+            tools.require_interactive_feedback(context).is_ok()
+        }
+        ToolAvailability::UnscopedInteractiveFeedback => {
+            tools.require_unscoped_interactive_feedback(context).is_ok()
+        }
     }
 }
 
