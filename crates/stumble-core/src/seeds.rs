@@ -60,6 +60,7 @@ pub fn seed_store() -> InMemoryStore {
                 ],
                 blocked_topics: vec!["politics".to_string()],
                 blocked_sources: vec![],
+                blocked_source_affinities: vec![],
                 preferred_brief_length: 7,
                 preferred_discovery_mode: DiscoveryMode::DeepMatch,
                 recurrence_penalty_days: RecurrencePenaltyDays::default(),

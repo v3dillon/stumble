@@ -278,9 +278,7 @@ fn feed_batch_result(
 }
 
 fn taste_profile_result(profile: TasteProfile) -> Result<Value, (ErrorBody, ExitStatusCategory)> {
-    let mut value = serde_json::to_value(profile).map_err(internal_error)?;
-    value["allowed_actions"] = json!(["set", "reset"]);
-    Ok(value)
+    serde_json::to_value(profile).map_err(internal_error)
 }
 
 fn discovery_lease(seconds: u64) -> Result<DiscoveryLeaseSeconds, (ErrorBody, ExitStatusCategory)> {

@@ -84,6 +84,14 @@ fn accepted_public_item(origin: &AgentTools) -> Pod {
         .submit_candidate(
             &submitter,
             CandidateSubmissionRequest {
+                target: CandidateSubmissionRequestTarget::PodPlacements {
+                    placements: vec![ProposedCandidatePlacement {
+                        pod_id: pod.id,
+                        reason: "Proves direct addressing".into(),
+                        confidence: CandidateConfidence::new(0.95).unwrap(),
+                    }],
+                    task_context: None,
+                },
                 evidence: CandidateSubmissionEvidence {
                     source_url: "https://reference.example/outbound-only".into(),
                     source_metadata: CandidateSourceMetadata {
@@ -101,12 +109,6 @@ fn accepted_public_item(origin: &AgentTools) -> Pod {
                         discovery_method: "browser_search".into(),
                         referrer_url: None,
                     },
-                    proposed_placements: vec![ProposedCandidatePlacement {
-                        pod_id: pod.id,
-                        reason: "Proves direct addressing".into(),
-                        confidence: CandidateConfidence::new(0.95).unwrap(),
-                    }],
-                    task_context: None,
                     harness_idempotency_key: "direct-http-worker".into(),
                     client_idempotency_key: "direct-http-client".into(),
                 },

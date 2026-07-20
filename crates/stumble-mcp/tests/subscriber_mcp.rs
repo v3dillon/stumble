@@ -138,6 +138,14 @@ fn publish_item(origin: &AgentTools, pod: Option<&Pod>, source_url: &str, key: &
         .submit_candidate(
             &submitter,
             CandidateSubmissionRequest {
+                target: CandidateSubmissionRequestTarget::PodPlacements {
+                    placements: vec![ProposedCandidatePlacement {
+                        pod_id: pod.id,
+                        reason: "Subscriber MCP behavior".into(),
+                        confidence: CandidateConfidence::new(1.0).expect("valid confidence"),
+                    }],
+                    task_context: None,
+                },
                 evidence: CandidateSubmissionEvidence {
                     source_url: source_url.into(),
                     source_metadata: CandidateSourceMetadata {
@@ -155,12 +163,6 @@ fn publish_item(origin: &AgentTools, pod: Option<&Pod>, source_url: &str, key: &
                         discovery_method: "test_harness".into(),
                         referrer_url: None,
                     },
-                    proposed_placements: vec![ProposedCandidatePlacement {
-                        pod_id: pod.id,
-                        reason: "Subscriber MCP behavior".into(),
-                        confidence: CandidateConfidence::new(1.0).expect("valid confidence"),
-                    }],
-                    task_context: None,
                     harness_idempotency_key: format!("harness-{key}"),
                     client_idempotency_key: format!("client-{key}"),
                 },

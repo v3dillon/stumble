@@ -90,6 +90,13 @@ pub(super) fn execute(command: FeedWorkflow, tools: &AgentTools, actor: &AuthCon
                     .map_err(agent_tools_error)?;
                 taste_profile_result(profile)
             }
+            TasteWorkflow::Retract(args) => {
+                let candidate_id = parse_id(&args.candidate_id)?;
+                let profile = tools
+                    .retract_interest_seed(actor, candidate_id)
+                    .map_err(agent_tools_error)?;
+                taste_profile_result(profile)
+            }
         },
     }
 }

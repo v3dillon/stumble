@@ -4,8 +4,8 @@ use std::{fs, path::PathBuf, process::Command};
 use stumble_core::{
     AgentHarnessKind, AgentTools, CandidateConfidence, CandidateContentType, CandidateProvenance,
     CandidateSourceMetadata, CandidateSubmissionEvidence, CandidateSubmissionRequest,
-    CurationPolicy, HarnessCapability, PlacementReviewDecision, ProposedCandidatePlacement,
-    RegisterAgentHarnessRequest,
+    CandidateSubmissionRequestTarget, CurationPolicy, HarnessCapability, PlacementReviewDecision,
+    ProposedCandidatePlacement, RegisterAgentHarnessRequest,
 };
 
 struct Environment {
@@ -83,6 +83,14 @@ fn accept_item(tools: &AgentTools, pod_id: uuid::Uuid, suffix: &str) -> uuid::Uu
         .submit_candidate(
             &actor,
             CandidateSubmissionRequest {
+                target: CandidateSubmissionRequestTarget::PodPlacements {
+                    placements: vec![ProposedCandidatePlacement {
+                        pod_id,
+                        reason: "Directly concerns the Pod subject".into(),
+                        confidence: CandidateConfidence::new(0.95).unwrap(),
+                    }],
+                    task_context: None,
+                },
                 evidence: CandidateSubmissionEvidence {
                     source_url: format!("https://reference.example/{suffix}"),
                     source_metadata: CandidateSourceMetadata {
@@ -100,12 +108,6 @@ fn accept_item(tools: &AgentTools, pod_id: uuid::Uuid, suffix: &str) -> uuid::Uu
                         discovery_method: "browser_search".into(),
                         referrer_url: Some("https://search.example/results".into()),
                     },
-                    proposed_placements: vec![ProposedCandidatePlacement {
-                        pod_id,
-                        reason: "Directly concerns the Pod subject".into(),
-                        confidence: CandidateConfidence::new(0.95).unwrap(),
-                    }],
-                    task_context: None,
                     harness_idempotency_key: format!("worker-{suffix}"),
                     client_idempotency_key: format!("client-{suffix}"),
                 },

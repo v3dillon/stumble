@@ -3,6 +3,12 @@ use crate::feed_mix::{
     compare_feed_candidates, compose_feed_candidates, content_matches_any_topic,
     normalized_intent_topics, DeliveryRecord, RankedFeedCandidate,
 };
+use crate::interest_seeds::{
+    candidate_submission_taste_signals, interest_seed_evidence, record_interest_seed,
+    reset_interest_seed_evidence, source_affinity_is_blocked, source_affinity_key,
+    source_affinity_signals_match, taste_profile_projections, taste_signal_key,
+    taste_signals_match,
+};
 use crate::ranking::{rank_discovery, RankingInput};
 use crate::signing::{
     hash_api_token, new_plaintext_api_token, sign_pod_announcement, sign_pod_endorsement,
@@ -199,14 +205,13 @@ impl AgentTools {
             .filter(|item| !content_matches_any_topic(item, &avoid_topics))
             .filter(|item| {
                 preferences.is_none_or(|preferences| {
-                    !preferences
-                        .blocked_sources
-                        .iter()
-                        .any(|source| source.eq_ignore_ascii_case(&item.domain))
-                        && !preferences.blocked_topics.iter().any(|topic| {
-                            item.tags.iter().any(|tag| tag.eq_ignore_ascii_case(topic))
-                                || item.title.to_lowercase().contains(&topic.to_lowercase())
-                        })
+                    !source_affinity_is_blocked(
+                        preferences,
+                        &SourceAffinitySignal::Source(item.domain.clone()),
+                    ) && !preferences.blocked_topics.iter().any(|topic| {
+                        item.tags.iter().any(|tag| tag.eq_ignore_ascii_case(topic))
+                            || item.title.to_lowercase().contains(&topic.to_lowercase())
+                    })
                 })
             })
             .filter_map(|item| {
@@ -497,6 +502,7 @@ impl AgentTools {
                         interests: vec![],
                         blocked_topics: vec![],
                         blocked_sources: vec![],
+                        blocked_source_affinities: vec![],
                         preferred_brief_length: 7,
                         preferred_discovery_mode: DiscoveryMode::DeepMatch,
                         recurrence_penalty_days: RecurrencePenaltyDays::default(),
@@ -3381,13 +3387,32 @@ impl AgentTools {
                 )
                 .into(),
                 tenant_id: ctx.tenant_id,
-                source_url: request.evidence.source_url.clone(),
+                source_url: canonical_url.clone(),
                 canonical_url,
                 review_state: CandidateReviewState::Pending,
                 created_at: Utc::now(),
             });
         projected.candidates.insert(candidate.id, candidate.clone());
 
+        let target = match &request.target {
+            CandidateSubmissionRequestTarget::User {
+                learn,
+                interest_seed_metadata,
+            } => CandidateSubmissionTarget::User {
+                user_id: ctx
+                    .user_id
+                    .expect("User submission operation was validated"),
+                learn: *learn,
+                interest_seed_metadata: interest_seed_metadata.clone(),
+            },
+            CandidateSubmissionRequestTarget::PodPlacements {
+                placements,
+                task_context,
+            } => CandidateSubmissionTarget::PodPlacements {
+                placements: placements.clone(),
+                task_context: *task_context,
+            },
+        };
         let submission = CandidateSubmission {
             id: stable_candidate_uuid(
                 "candidate-submission",
@@ -3401,12 +3426,16 @@ impl AgentTools {
             candidate_id: candidate.id,
             tenant_id: ctx.tenant_id,
             submitted_by: harness_id,
+            target,
             evidence: request.evidence,
             created_at: Utc::now(),
         };
         projected
             .candidate_submissions
             .insert(submission.id, submission.clone());
+        if submission.target.learning_enabled() {
+            record_interest_seed(&mut projected, ctx, &candidate, &submission)?;
+        }
         enrich_accepted_content_item(&mut projected, ctx, &candidate)?;
         record_harness_write(
             &mut projected,
@@ -3433,6 +3462,7 @@ impl AgentTools {
             .store
             .read()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let harness = harness_for_context(&store, ctx)?;
         let mut candidates = Vec::new();
         for candidate in store
             .candidates
@@ -3443,8 +3473,9 @@ impl AgentTools {
                 .candidate_submissions
                 .values()
                 .filter(|submission| submission.candidate_id == candidate.id)
-                .flat_map(|submission| &submission.evidence.proposed_placements)
-                .all(|placement| candidate_placement_is_visible(&store, ctx, placement.pod_id));
+                .any(|submission| {
+                    candidate_submission_is_visible(&store, ctx, harness, submission)
+                });
             if visible {
                 candidates.push(candidate.clone());
             }
@@ -3473,52 +3504,65 @@ impl AgentTools {
             .filter(|candidate| candidate.tenant_id == ctx.tenant_id)
             .cloned()
             .ok_or_else(|| StoreError::NotFound("Candidate".into()))?;
+        let harness = harness_for_context(&store, ctx)?;
         let mut submissions: Vec<_> = store
             .candidate_submissions
             .values()
-            .filter(|submission| submission.candidate_id == candidate_id)
+            .filter(|submission| {
+                submission.candidate_id == candidate_id
+                    && candidate_submission_is_visible(&store, ctx, harness, submission)
+            })
             .cloned()
             .collect();
-        for submission in &submissions {
-            for placement in &submission.evidence.proposed_placements {
-                if !candidate_placement_is_visible(&store, ctx, placement.pod_id) {
-                    return Err(AgentToolsError::Forbidden {
-                        reason: format!(
-                            "harness grant cannot inspect Candidate evidence for Pod {}",
-                            placement.pod_id
-                        ),
-                    });
-                }
-            }
+        if submissions.is_empty() {
+            return Err(AgentToolsError::Forbidden {
+                reason: "Harness Grant cannot inspect this Candidate evidence".into(),
+            });
         }
         submissions.sort_by_key(|submission| (submission.created_at, submission.id));
         let mut placements: Vec<_> = store
             .pod_placements
             .values()
-            .filter(|placement| placement.candidate_id == candidate_id)
+            .filter(|placement| {
+                placement.candidate_id == candidate_id
+                    && candidate_placement_is_visible(&store, ctx, placement.pod_id)
+            })
             .cloned()
             .collect();
         placements.sort_by_key(|placement| placement.pod_id);
         let proposal_pod_ids: HashSet<_> = submissions
             .iter()
-            .flat_map(|submission| &submission.evidence.proposed_placements)
+            .flat_map(|submission| submission.target.placements())
             .map(|placement| placement.pod_id)
             .collect();
-        let harness = harness_for_context(&store, ctx)?;
         let can_curate_all = harness.is_some()
             && proposal_pod_ids
                 .iter()
                 .all(|pod_id| authorize_local_pod_curation(&store, ctx, *pod_id).is_ok());
         let mut allowed_actions = Vec::new();
-        let can_submit_evidence = proposal_pod_ids.iter().all(|pod_id| {
-            authorize_harness(
-                &store,
-                ctx,
-                HarnessCapability::CandidateSubmission,
-                Some(*pod_id),
-            )
-            .is_ok()
-        });
+        let can_submit_evidence = !submissions.is_empty()
+            && submissions
+                .iter()
+                .all(|submission| match submission.target {
+                    CandidateSubmissionTarget::User { user_id, .. } => {
+                        harness.is_some_and(|harness| {
+                            harness.kind == AgentHarnessKind::Interactive
+                                && harness.grant.pod_ids.is_none()
+                                && ctx.user_id == Some(user_id)
+                        })
+                    }
+                    CandidateSubmissionTarget::PodPlacements { ref placements, .. } => {
+                        placements.iter().all(|placement| {
+                            authorize_harness(
+                                &store,
+                                ctx,
+                                HarnessCapability::CandidateSubmission,
+                                Some(placement.pod_id),
+                            )
+                            .is_ok()
+                        })
+                    }
+                });
         if harness.is_some() && can_submit_evidence {
             allowed_actions.push(CandidateAllowedAction::SubmitCandidateEvidence);
         }
@@ -3673,7 +3717,16 @@ impl AgentTools {
                 .unwrap_or(PodPlacementStatus::Pending);
             let curation_path = automatic_path.unwrap_or(CurationPath::CandidateProposal);
             let content_item_id = if status == PodPlacementStatus::Accepted {
-                Some(ensure_content_item(&mut store, &candidate, &submissions, now)?.id())
+                Some(
+                    ensure_content_item(
+                        &mut store,
+                        &candidate,
+                        &submissions,
+                        &proposal.source_submission_ids,
+                        now,
+                    )?
+                    .id(),
+                )
             } else {
                 None
             };
@@ -3759,7 +3812,16 @@ impl AgentTools {
         };
         let actor = curation_actor(ctx);
         let content_item_id = if status == PodPlacementStatus::Accepted {
-            Some(ensure_content_item(&mut store, &candidate, &submissions, now)?.id())
+            Some(
+                ensure_content_item(
+                    &mut store,
+                    &candidate,
+                    &submissions,
+                    &current.source_submission_ids,
+                    now,
+                )?
+                .id(),
+            )
         } else {
             None
         };
@@ -3812,6 +3874,7 @@ impl AgentTools {
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         authorize_local_pod_curation(&store, ctx, request.pod_id)?;
+        let harness = harness_for_context(&store, ctx)?;
         let candidate = store
             .candidates
             .get(&candidate_id)
@@ -3843,9 +3906,30 @@ impl AgentTools {
         } else {
             CurationPath::RoutingAgent
         };
-        let submissions = candidate_submissions_for(&store, candidate_id);
+        let submissions = candidate_submissions_for(&store, candidate_id)
+            .into_iter()
+            .filter(|submission| {
+                matches!(
+                    submission.target,
+                    CandidateSubmissionTarget::PodPlacements { .. }
+                ) && candidate_submission_is_visible(&store, ctx, harness, submission)
+            })
+            .collect::<Vec<_>>();
+        let source_submission_ids = submissions
+            .iter()
+            .map(|submission| submission.id)
+            .collect::<Vec<_>>();
         let content_item_id = if accepted {
-            Some(ensure_content_item(&mut store, &candidate, &submissions, now)?.id())
+            Some(
+                ensure_content_item(
+                    &mut store,
+                    &candidate,
+                    &submissions,
+                    &source_submission_ids,
+                    now,
+                )?
+                .id(),
+            )
         } else {
             None
         };
@@ -3855,7 +3939,7 @@ impl AgentTools {
             content_item_id,
             reason: request.reason,
             confidence: request.confidence,
-            source_submission_ids: submissions.iter().map(|submission| submission.id).collect(),
+            source_submission_ids,
             origin_placements: Vec::new(),
             origin_withdrawals: Vec::new(),
             status,
@@ -5315,6 +5399,7 @@ impl AgentTools {
                 interests: vec![],
                 blocked_topics: vec![],
                 blocked_sources: vec![],
+                blocked_source_affinities: vec![],
                 preferred_brief_length: 7,
                 preferred_discovery_mode: DiscoveryMode::DeepMatch,
                 recurrence_penalty_days: RecurrencePenaltyDays::default(),
@@ -5345,6 +5430,7 @@ impl AgentTools {
                 interests: vec![],
                 blocked_topics: vec![],
                 blocked_sources: vec![],
+                blocked_source_affinities: vec![],
                 preferred_brief_length: 7,
                 preferred_discovery_mode: DiscoveryMode::DeepMatch,
                 recurrence_penalty_days: RecurrencePenaltyDays::default(),
@@ -5382,6 +5468,7 @@ impl AgentTools {
                 interests: vec![],
                 blocked_topics: vec![],
                 blocked_sources: vec![],
+                blocked_source_affinities: vec![],
                 preferred_brief_length: 7,
                 preferred_discovery_mode: DiscoveryMode::DeepMatch,
                 recurrence_penalty_days: RecurrencePenaltyDays::default(),
@@ -5428,6 +5515,17 @@ impl AgentTools {
             StoreError::Validation("Taste Profile requires an authenticated User".into())
         })?;
         let preferences = store.user_preferences.get(&(user_id, ctx.tenant_id));
+        let interest_seed_evidence = interest_seed_evidence(&store, user_id, ctx.tenant_id);
+        let projections = taste_profile_projections(&store, user_id, ctx.tenant_id, preferences);
+        let mut allowed_actions = vec![
+            TasteProfileAllowedAction::Set,
+            TasteProfileAllowedAction::Reset,
+        ];
+        if interest_seed_evidence.active_seed_count > 0
+            && authorize_interest_seed_retraction(&store, ctx).is_ok()
+        {
+            allowed_actions.push(TasteProfileAllowedAction::Retract);
+        }
         Ok(TasteProfile {
             user_id,
             tenant_id: ctx.tenant_id,
@@ -5441,14 +5539,55 @@ impl AgentTools {
                 blocked_sources: preferences
                     .map(|preferences| preferences.blocked_sources.clone())
                     .unwrap_or_default(),
+                blocked_source_affinities: preferences
+                    .map(|preferences| preferences.blocked_source_affinities.clone())
+                    .unwrap_or_default(),
                 recurrence_penalty_days: preferences
                     .map_or_else(RecurrencePenaltyDays::default, |preferences| {
                         preferences.recurrence_penalty_days
                     })
                     .get(),
             },
-            learned: learned_taste_weights(&store, user_id, ctx.tenant_id),
+            learned: projections.learned,
+            interest_seed_evidence,
+            source_affinities: projections.source_affinities,
+            allowed_actions,
         })
+    }
+
+    /// Retracts one canonical submission's learning contribution without deleting content.
+    pub fn retract_interest_seed(
+        &self,
+        ctx: &AuthContext,
+        candidate_id: CandidateId,
+    ) -> Result<TasteProfile, AgentToolsError> {
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Interest Seed retraction requires an authenticated User".into())
+        })?;
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_interest_seed_retraction(&store, ctx)?;
+        let mut projected = store.clone();
+        let seed = projected
+            .interest_seeds
+            .get_mut(&(user_id, candidate_id))
+            .filter(|seed| seed.tenant_id == ctx.tenant_id)
+            .ok_or_else(|| StoreError::NotFound("Interest Seed".into()))?;
+        if seed.retracted_at.is_none() {
+            seed.retracted_at = Some(Utc::now());
+            record_harness_write(
+                &mut projected,
+                ctx,
+                HarnessWriteOperation::RetractInterestSeed,
+                None,
+            );
+            self.persist_locked(&mut projected)?;
+            *store = projected;
+        }
+        drop(store);
+        self.taste_profile(ctx)
     }
 
     /// Replaces any supplied explicit Taste Profile settings.
@@ -5482,6 +5621,7 @@ impl AgentTools {
                 interests: Vec::new(),
                 blocked_topics: Vec::new(),
                 blocked_sources: Vec::new(),
+                blocked_source_affinities: Vec::new(),
                 preferred_brief_length: 7,
                 preferred_discovery_mode: DiscoveryMode::DeepMatch,
                 recurrence_penalty_days: RecurrencePenaltyDays::default(),
@@ -5494,6 +5634,10 @@ impl AgentTools {
         }
         if let Some(blocked_sources) = request.blocked_sources {
             preferences.blocked_sources = normalize_unique_case_insensitive(blocked_sources);
+        }
+        if let Some(blocked_source_affinities) = request.blocked_source_affinities {
+            preferences.blocked_source_affinities =
+                normalize_source_affinity_signals(blocked_source_affinities);
         }
         if let Some(recurrence_penalty_days) = request.recurrence_penalty_days {
             preferences.recurrence_penalty_days = recurrence_penalty_days;
@@ -5528,22 +5672,30 @@ impl AgentTools {
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         authorize_taste_profile(&store, ctx)?;
-        store.taste_learning_evidence.retain(|evidence| {
+        let mut projected = store.clone();
+        projected.taste_learning_evidence.retain(|evidence| {
             if evidence.user_id != user_id || evidence.tenant_id != ctx.tenant_id {
                 return true;
             }
             request
                 .signal
                 .as_ref()
-                .is_some_and(|signal| signal != &evidence.signal)
+                .is_some_and(|signal| !taste_signals_match(signal, &evidence.signal))
         });
+        reset_interest_seed_evidence(
+            &mut projected,
+            user_id,
+            ctx.tenant_id,
+            request.signal.as_ref(),
+        );
         record_harness_write(
-            &mut store,
+            &mut projected,
             ctx,
             HarnessWriteOperation::ResetLearnedTaste,
             None,
         );
-        self.persist_locked(&mut store)?;
+        self.persist_locked(&mut projected)?;
+        *store = projected;
         drop(store);
         self.taste_profile(ctx)
     }
@@ -7863,6 +8015,40 @@ fn normalize_unique_case_insensitive(values: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+fn normalize_source_affinity_signals(
+    values: Vec<SourceAffinitySignal>,
+) -> Vec<SourceAffinitySignal> {
+    let mut output = Vec::new();
+    for signal in values {
+        let normalized = match signal {
+            SourceAffinitySignal::Source(value) => {
+                SourceAffinitySignal::Source(value.trim().to_string())
+            }
+            SourceAffinitySignal::Publisher(value) => {
+                SourceAffinitySignal::Publisher(value.trim().to_string())
+            }
+            SourceAffinitySignal::AuthorOrAccount(value) => {
+                SourceAffinitySignal::AuthorOrAccount(value.trim().to_string())
+            }
+            SourceAffinitySignal::Community(value) => {
+                SourceAffinitySignal::Community(value.trim().to_string())
+            }
+            SourceAffinitySignal::ReferrerContext(value) => {
+                SourceAffinitySignal::ReferrerContext(value.trim().to_string())
+            }
+        };
+        if source_affinity_key(&normalized).1.is_empty()
+            || output
+                .iter()
+                .any(|existing| source_affinity_signals_match(existing, &normalized))
+        {
+            continue;
+        }
+        output.push(normalized);
+    }
+    output
+}
+
 fn route_text(request: &RouteLinkRequest) -> String {
     format!(
         "{} {} {} {}",
@@ -8166,6 +8352,33 @@ fn candidate_placement_is_visible(store: &InMemoryStore, ctx: &AuthContext, pod_
         || authorize_local_pod_curation(store, ctx, pod_id).is_ok()
 }
 
+fn candidate_submission_is_visible(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    harness: Option<&AgentHarness>,
+    submission: &CandidateSubmission,
+) -> bool {
+    match submission.target {
+        CandidateSubmissionTarget::User { user_id, .. } => {
+            ctx.user_id == Some(user_id)
+                && harness.is_some_and(|harness| {
+                    harness.kind == AgentHarnessKind::Interactive
+                        && harness.grant.pod_ids.is_none()
+                        && harness
+                            .grant
+                            .capabilities
+                            .contains(&HarnessCapability::CandidateSubmission)
+                })
+        }
+        CandidateSubmissionTarget::PodPlacements { ref placements, .. } => {
+            !placements.is_empty()
+                && placements
+                    .iter()
+                    .all(|placement| candidate_placement_is_visible(store, ctx, placement.pod_id))
+        }
+    }
+}
+
 fn agent_harness_view(
     store: &InMemoryStore,
     harness: &AgentHarness,
@@ -8198,6 +8411,21 @@ fn authorize_taste_profile(
     if harness_for_context(store, ctx)?.is_some_and(|harness| harness.grant.pod_ids.is_some()) {
         return Err(AgentToolsError::Forbidden {
             reason: "Taste Profile access requires an unscoped feedback grant".into(),
+        });
+    }
+    Ok(())
+}
+
+fn authorize_interest_seed_retraction(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+) -> Result<(), AgentToolsError> {
+    authorize_taste_profile(store, ctx)?;
+    if harness_for_context(store, ctx)?
+        .is_some_and(|harness| harness.kind != AgentHarnessKind::Interactive)
+    {
+        return Err(AgentToolsError::Forbidden {
+            reason: "Interest Seed retraction requires an interactive User action".into(),
         });
     }
     Ok(())
@@ -8246,11 +8474,20 @@ fn validate_candidate_submission(
         )
         .into());
     }
-    if evidence.proposed_placements.is_empty() {
-        return Err(StoreError::Validation(
-            "Candidate Submission requires at least one proposed Pod Placement".into(),
-        )
-        .into());
+    let harness =
+        harness_for_context(store, ctx)?.ok_or(AgentToolsError::CandidateHarnessRequired)?;
+    authorize_harness(store, ctx, HarnessCapability::CandidateSubmission, None)?;
+    if matches!(
+        request.target,
+        CandidateSubmissionRequestTarget::User { .. }
+    ) && (harness.kind != AgentHarnessKind::Interactive
+        || harness.grant.pod_ids.is_some()
+        || ctx.user_id.is_none())
+    {
+        return Err(AgentToolsError::Forbidden {
+            reason: "User-targeted Candidate Submission requires an unscoped interactive grant"
+                .into(),
+        });
     }
     let canonical_source_url = canonicalize_url(&evidence.source_url)?;
     if let Some(referrer_url) = &evidence.provenance.referrer_url {
@@ -8276,15 +8513,42 @@ fn validate_candidate_submission(
                                 candidate.tenant_id == ctx.tenant_id
                                     && candidate.canonical_url == canonical_source_url
                             })
+                            && candidate_submission_is_visible(
+                                store,
+                                ctx,
+                                Some(harness),
+                                submission,
+                            )
+                            && matches!(
+                                (&request.target, &submission.target),
+                                (
+                                    CandidateSubmissionRequestTarget::User { .. },
+                                    CandidateSubmissionTarget::User { .. },
+                                ) | (
+                                    CandidateSubmissionRequestTarget::PodPlacements { .. },
+                                    CandidateSubmissionTarget::PodPlacements { .. },
+                                )
+                            )
                     })
                     .flat_map(|submission| &submission.evidence.media_references),
             )
             .chain(&evidence.media_references),
     )?;
 
-    let mut pod_ids = HashSet::with_capacity(evidence.proposed_placements.len());
+    let placements = request.target.placements();
+    if matches!(
+        request.target,
+        CandidateSubmissionRequestTarget::PodPlacements { .. }
+    ) && placements.is_empty()
+    {
+        return Err(StoreError::Validation(
+            "Pod-targeted Candidate Submission requires at least one placement".into(),
+        )
+        .into());
+    }
+    let mut pod_ids = HashSet::with_capacity(placements.len());
     let local_node_id = store.node_for_tenant(ctx.tenant_id)?.id;
-    for placement in &evidence.proposed_placements {
+    for placement in placements {
         if !pod_ids.insert(placement.pod_id) {
             return Err(StoreError::Validation(
                 "Candidate Submission cannot propose the same Pod twice".into(),
@@ -8337,7 +8601,7 @@ fn validate_candidate_task_context(
     harness: &AgentHarness,
     request: &CandidateSubmissionRequest,
 ) -> Result<(), AgentToolsError> {
-    match request.evidence.task_context {
+    match request.target.task_context() {
         Some(task_context) => {
             let task = store
                 .discovery_tasks
@@ -8354,8 +8618,8 @@ fn validate_candidate_task_context(
                 return Err(AgentToolsError::CandidatePackageVersionMismatch);
             }
             if !request
-                .evidence
-                .proposed_placements
+                .target
+                .placements()
                 .iter()
                 .any(|placement| placement.pod_id == pod_id)
             {
@@ -8406,7 +8670,31 @@ fn candidate_submission_matches_request(
     submission: &CandidateSubmission,
     request: &CandidateSubmissionRequest,
 ) -> bool {
-    submission.evidence == request.evidence
+    let target_matches = match (&submission.target, &request.target) {
+        (
+            CandidateSubmissionTarget::User {
+                learn: stored_learn,
+                interest_seed_metadata: stored_metadata,
+                ..
+            },
+            CandidateSubmissionRequestTarget::User {
+                learn: requested_learn,
+                interest_seed_metadata: requested_metadata,
+            },
+        ) => stored_learn == requested_learn && stored_metadata == requested_metadata,
+        (
+            CandidateSubmissionTarget::PodPlacements {
+                placements: stored,
+                task_context: stored_task,
+            },
+            CandidateSubmissionRequestTarget::PodPlacements {
+                placements: requested,
+                task_context: requested_task,
+            },
+        ) => stored == requested && stored_task == requested_task,
+        _ => false,
+    };
+    target_matches && submission.evidence == request.evidence
 }
 
 fn stable_candidate_uuid(namespace: &str, parts: &[&str]) -> Uuid {
@@ -8617,7 +8905,7 @@ fn merged_candidate_proposals(
 ) -> Result<Vec<MergedCandidateProposal>, AgentToolsError> {
     let mut proposals: BTreeMap<PodId, MergedCandidateProposal> = BTreeMap::new();
     for submission in submissions {
-        for placement in &submission.evidence.proposed_placements {
+        for placement in submission.target.placements() {
             let rationale = CurationRationale::new(placement.reason.clone())?;
             let entry =
                 proposals
@@ -8647,8 +8935,8 @@ fn trusted_placement_confidence(
         .iter()
         .filter(|submission| {
             submission
-                .evidence
-                .task_context
+                .target
+                .task_context()
                 .and_then(|context| store.discovery_tasks.get(&context.task_id))
                 .is_some_and(|task| {
                     task.target
@@ -8656,7 +8944,7 @@ fn trusted_placement_confidence(
                         .is_some_and(|(task_pod_id, _)| task_pod_id == pod_id)
                 })
         })
-        .flat_map(|submission| &submission.evidence.proposed_placements)
+        .flat_map(|submission| submission.target.placements())
         .filter(|placement| placement.pod_id == pod_id)
         .map(|placement| placement.confidence)
         .max_by(|left, right| left.value().total_cmp(&right.value()))
@@ -8666,6 +8954,7 @@ fn ensure_content_item(
     store: &mut InMemoryStore,
     candidate: &Candidate,
     submissions: &[CandidateSubmission],
+    authorized_submission_ids: &[CandidateSubmissionId],
     now: chrono::DateTime<Utc>,
 ) -> Result<ContentItem, AgentToolsError> {
     if let Some(existing) = store
@@ -8679,8 +8968,13 @@ fn ensure_content_item(
         return Ok(ContentItem::from(&existing));
     }
     let evidence = submissions
-        .first()
-        .ok_or_else(|| StoreError::Validation("Candidate has no submission evidence".into()))?;
+        .iter()
+        .find(|submission| authorized_submission_ids.contains(&submission.id))
+        .ok_or_else(|| {
+            StoreError::Validation(
+                "Candidate placement has no explicitly authorized submission evidence".into(),
+            )
+        })?;
     let domain = Url::parse(&candidate.canonical_url)
         .map_err(|error| AgentToolsError::BadUrl(error.to_string()))?
         .domain()
@@ -8693,12 +8987,13 @@ fn ensure_content_item(
     let media_references = resolve_media_for_store(
         submissions
             .iter()
+            .filter(|submission| authorized_submission_ids.contains(&submission.id))
             .flat_map(|submission| &submission.evidence.media_references),
     )?;
     let item = Submission {
         id: stable_candidate_uuid("content-item", &[&candidate.id.to_string()]),
         tenant_id: candidate.tenant_id,
-        url: candidate.source_url.clone(),
+        url: evidence.evidence.source_url.clone(),
         canonical_url: candidate.canonical_url.clone(),
         title: evidence
             .evidence
@@ -8743,12 +9038,26 @@ fn enrich_accepted_content_item(
         .ok_or_else(|| StoreError::NotFound("Content Item".into()))?
         .media_references
         .clone();
+    let content_item_id = ContentItemId::from(item_id);
+    let accepted_pod_ids = store
+        .accepted_placement_projections
+        .values()
+        .filter(|placement| placement.content_item_id == content_item_id)
+        .map(|placement| placement.pod_id)
+        .collect::<HashSet<_>>();
     let resolved = resolve_media_for_store(
         existing_media.iter().chain(
             store
                 .candidate_submissions
                 .values()
-                .filter(|submission| submission.candidate_id == candidate.id)
+                .filter(|submission| {
+                    submission.candidate_id == candidate.id
+                        && submission
+                            .target
+                            .placements()
+                            .iter()
+                            .any(|placement| accepted_pod_ids.contains(&placement.pod_id))
+                })
                 .flat_map(|submission| &submission.evidence.media_references),
         ),
     )?;
@@ -8761,7 +9070,6 @@ fn enrich_accepted_content_item(
     }
     item.media_references = resolved;
 
-    let content_item_id = ContentItemId::from(item_id);
     let node = store.node_for_tenant(ctx.tenant_id)?;
     let mut pods = store
         .accepted_placement_projections
@@ -9368,19 +9676,28 @@ fn feed_attention_value(
     let feedback =
         if state.saved { 2.0 } else { 0.0 } + if state.more_like_this { 1.0 } else { 0.0 };
     let quality = u16::try_from(placement_count).map_or(f32::from(u16::MAX), f32::from) * 0.25;
-    let learned = if scoped_pod_ids.is_none() {
-        learned_taste_weights(store, user_id, item.tenant_id)
+    let projections = if scoped_pod_ids.is_none() {
+        Some(taste_profile_projections(
+            store,
+            user_id,
+            item.tenant_id,
+            preferences,
+        ))
     } else {
-        Vec::new()
+        None
     };
     let mut learned_value = 0.0;
     let mut learned_reasons = Vec::new();
-    for weight in learned.iter().filter(|weight| weight.weight != 0.0) {
+    for weight in projections
+        .iter()
+        .flat_map(|projections| &projections.learned)
+        .filter(|weight| weight.weight != 0.0)
+    {
         let matches = match &weight.signal {
             LearnedTasteSignal::Topic(topic) => {
                 item.tags.iter().any(|tag| tag.eq_ignore_ascii_case(topic))
             }
-            LearnedTasteSignal::Source(source) => item.domain.eq_ignore_ascii_case(source),
+            _ => false,
         };
         if !matches {
             continue;
@@ -9392,7 +9709,7 @@ fn feed_attention_value(
                     .iter()
                     .any(|interest| interest.eq_ignore_ascii_case(topic))
             }),
-            LearnedTasteSignal::Source(_) => false,
+            _ => false,
         };
         let applied_weight = if explicit_interest_matches {
             weight.weight.max(0.0)
@@ -9417,6 +9734,36 @@ fn feed_attention_value(
                 weight.supporting_signals, weight.opposing_signals
             ));
         }
+    }
+    for affinity in projections
+        .iter()
+        .flat_map(|projections| &projections.source_affinities)
+        .filter(|affinity| affinity.weight != 0.0)
+    {
+        let matches = match &affinity.signal {
+            SourceAffinitySignal::Source(source) => item.domain.eq_ignore_ascii_case(source),
+            SourceAffinitySignal::Publisher(_)
+            | SourceAffinitySignal::AuthorOrAccount(_)
+            | SourceAffinitySignal::Community(_)
+            | SourceAffinitySignal::ReferrerContext(_) => false,
+        };
+        if !matches {
+            continue;
+        }
+        learned_value += affinity.weight;
+        let (signal_kind, signal_value) = source_affinity_key(&affinity.signal);
+        let supporting = affinity
+            .supporting_seeds
+            .saturating_add(affinity.supporting_feedback);
+        let (direction, evidence_count) = if affinity.weight > 0.0 {
+            ("affinity increased value", supporting)
+        } else {
+            ("aversion reduced value", affinity.opposing_feedback)
+        };
+        learned_reasons.push(format!(
+            "Learned {signal_kind} '{signal_value}' {direction} from {evidence_count} relevant signals ({supporting} supporting, {} opposing)",
+            affinity.opposing_feedback
+        ));
     }
     let score = 1.0 + relevance + quality + timeliness + feedback + learned_value;
     let mut reasons = vec![format!(
@@ -9474,6 +9821,16 @@ fn record_taste_learning_evidence(
     direction: TasteEvidenceDirection,
     now: chrono::DateTime<Utc>,
 ) {
+    let content_item_id = ContentItemId::from(item.id);
+    let accepted_submission_ids = store
+        .pod_placements
+        .values()
+        .filter(|placement| {
+            placement.status == PodPlacementStatus::Accepted
+                && placement.content_item_id == Some(content_item_id)
+        })
+        .flat_map(|placement| placement.source_submission_ids.iter().copied())
+        .collect::<HashSet<_>>();
     let mut signals = HashSet::new();
     signals.insert(LearnedTasteSignal::Source(item.domain.to_lowercase()));
     signals.extend(
@@ -9481,6 +9838,26 @@ fn record_taste_learning_evidence(
             .iter()
             .map(|tag| LearnedTasteSignal::Topic(tag.to_lowercase())),
     );
+    for candidate in store.candidates.values().filter(|candidate| {
+        candidate.tenant_id == tenant_id && candidate.canonical_url == item.canonical_url
+    }) {
+        for submission in store
+            .candidate_submissions
+            .values()
+            .filter(|submission| submission.candidate_id == candidate.id)
+            .filter(|submission| match submission.target {
+                CandidateSubmissionTarget::User {
+                    user_id: target_user,
+                    ..
+                } => target_user == user_id,
+                CandidateSubmissionTarget::PodPlacements { .. } => {
+                    accepted_submission_ids.contains(&submission.id)
+                }
+            })
+        {
+            signals.extend(candidate_submission_taste_signals(candidate, submission));
+        }
+    }
     store
         .taste_learning_evidence
         .extend(signals.into_iter().map(|signal| TasteLearningEvidence {
@@ -9510,70 +9887,6 @@ fn record_add_to_pod_learning(
             TasteEvidenceDirection::Supporting,
             now,
         );
-    }
-}
-
-fn learned_taste_weights(
-    store: &InMemoryStore,
-    user_id: UserId,
-    tenant_id: Option<TenantId>,
-) -> Vec<LearnedTasteWeight> {
-    let mut grouped: HashMap<LearnedTasteSignal, Vec<&TasteLearningEvidence>> = HashMap::new();
-    for evidence in store
-        .taste_learning_evidence
-        .iter()
-        .filter(|evidence| evidence.user_id == user_id && evidence.tenant_id == tenant_id)
-    {
-        grouped
-            .entry(evidence.signal.clone())
-            .or_default()
-            .push(evidence);
-    }
-    let mut weights = grouped
-        .into_iter()
-        .map(|(signal, evidence)| {
-            let supporting_signals = evidence
-                .iter()
-                .filter(|evidence| evidence.direction == TasteEvidenceDirection::Supporting)
-                .count();
-            let opposing_signals = evidence.len().saturating_sub(supporting_signals);
-            let net = i64::try_from(supporting_signals).unwrap_or(i64::MAX)
-                - i64::try_from(opposing_signals).unwrap_or(i64::MAX);
-            let weight = if evidence.len() < 2 {
-                0.0
-            } else {
-                let bounded_net = i16::try_from(net.clamp(-6, 6)).unwrap_or_default();
-                f32::from(bounded_net) * 0.5
-            };
-            let mut evidence_counts = HashMap::new();
-            for item in evidence {
-                let count = evidence_counts.entry(item.kind).or_insert(0_u32);
-                *count = count.saturating_add(1);
-            }
-            let mut evidence_summary = evidence_counts
-                .into_iter()
-                .map(|(kind, count)| LearnedTasteEvidenceSummary { kind, count })
-                .collect::<Vec<_>>();
-            evidence_summary.sort_by_key(|summary| summary.kind);
-            LearnedTasteWeight {
-                signal,
-                weight,
-                supporting_signals: u32::try_from(supporting_signals).unwrap_or(u32::MAX),
-                opposing_signals: u32::try_from(opposing_signals).unwrap_or(u32::MAX),
-                evidence_summary,
-            }
-        })
-        .collect::<Vec<_>>();
-    weights.sort_by(|left, right| {
-        taste_signal_key(&left.signal).cmp(&taste_signal_key(&right.signal))
-    });
-    weights
-}
-
-fn taste_signal_key(signal: &LearnedTasteSignal) -> (&str, &str) {
-    match signal {
-        LearnedTasteSignal::Topic(value) => ("topic", value),
-        LearnedTasteSignal::Source(value) => ("source", value),
     }
 }
 
@@ -9647,10 +9960,10 @@ fn feed_feedback_state(
         less_like_this: has_feedback(FeedbackKind::NotForMe),
         dismissed: has_feedback(FeedbackKind::Dismissed),
         source_blocked: preferences.is_some_and(|(item, preferences)| {
-            preferences
-                .blocked_sources
-                .iter()
-                .any(|source| source.eq_ignore_ascii_case(&item.domain))
+            source_affinity_is_blocked(
+                preferences,
+                &SourceAffinitySignal::Source(item.domain.clone()),
+            )
         }),
         topic_blocked: preferences.is_some_and(|(item, preferences)| {
             preferences

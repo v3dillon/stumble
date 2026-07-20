@@ -33,6 +33,7 @@ pub(crate) enum McpTool {
     GetTasteProfile,
     UpdateTasteProfile,
     ResetLearnedTaste,
+    RetractInterestSeed,
     RegisterAgentHarness,
     RevokeAgentHarness,
     CreatePendingProposal,
@@ -91,6 +92,7 @@ pub(crate) fn definitions() -> &'static [ToolDefinition] {
         d(Tool::GetTasteProfile, "get_taste_profile", Some(Capability::FeedRead), empty_schema(), Blocking, hidden("Get Taste Profile", "Read the private inspectable Taste Profile.", true, false)),
         d(Tool::UpdateTasteProfile, "update_taste_profile", Some(Capability::Feedback), update_taste_schema(), Blocking, hidden("Update Taste Profile", "Update explicit private Taste Profile settings.", false, false)),
         d(Tool::ResetLearnedTaste, "reset_learned_taste", Some(Capability::Feedback), reset_taste_schema(), Blocking, hidden("Reset Learned Taste", "Reset learned private Taste Profile weights.", false, true)),
+        d(Tool::RetractInterestSeed, "retract_interest_seed", Some(Capability::Feedback), uuid_schema("candidate_id"), Blocking, published(21, "Retract Interest Seed", "Retract one submitted reference's private learning contribution without deleting the reference.", false, true)),
         d(Tool::RegisterAgentHarness, "register_agent_harness", Some(Capability::Administration), register_harness_schema(), Blocking, hidden("Register Agent Harness", "Register a scoped Agent Harness grant.", false, false)),
         d(Tool::RevokeAgentHarness, "revoke_agent_harness", Some(Capability::Administration), uuid_schema("harness_id"), Blocking, hidden("Revoke Agent Harness", "Revoke an Agent Harness grant.", false, true)),
         d(Tool::CreatePendingProposal, "create_pending_proposal", Some(Capability::PodCuration), pending_proposal_schema(), Blocking, hidden("Create Pending Proposal", "Propose a sensitive change for independent approval.", false, false)),
@@ -261,6 +263,18 @@ fn update_taste_schema() -> Value {
             "interests": {"type": "array", "items": {"type": "string"}},
             "blocked_topics": {"type": "array", "items": {"type": "string"}},
             "blocked_sources": {"type": "array", "items": {"type": "string"}},
+            "blocked_source_affinities": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"enum": ["source", "publisher", "author_or_account", "community", "referrer_context"]},
+                        "value": {"type": "string"}
+                    },
+                    "required": ["kind", "value"],
+                    "additionalProperties": false
+                }
+            },
             "recurrence_penalty_days": {"type": "integer", "minimum": 0, "maximum": 36500}
         }),
         &[],
@@ -351,23 +365,25 @@ fn candidate_schema() -> Value {
     object_schema(
         json!({
             "source_url": {"type": "string", "format": "uri"},
+            "target": {"oneOf": [
+                {"type": "object", "properties": {"kind": {"const": "user"}, "learn": {"type": "boolean", "default": true}, "interest_seed_metadata": {"type": "object", "properties": {"publisher": {"type": ["string", "null"]}, "community": {"type": ["string", "null"]}}, "additionalProperties": false}}, "required": ["kind"], "additionalProperties": false},
+                {"type": "object", "properties": {"kind": {"const": "pod_placements"}, "placements": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"pod_id": uuid(), "reason": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}}, "required": ["pod_id", "reason", "confidence"], "additionalProperties": false}}, "task_context": {"type": ["object", "null"], "properties": {"task_id": uuid(), "package_version": {"type": "integer", "minimum": 1}}, "required": ["task_id", "package_version"], "additionalProperties": false}}, "required": ["kind", "placements"], "additionalProperties": false}
+            ]},
             "source_metadata": {"type": "object", "properties": {"title": {"type": ["string", "null"]}, "author": {"type": ["string", "null"]}, "published_at": {"type": ["string", "null"], "format": "date-time"}}, "additionalProperties": false},
             "permitted_excerpt": {"type": ["string", "null"]}, "summary": {"type": ["string", "null"]},
             "content_type": {"type": "string", "enum": ["article", "video", "audio", "image", "podcast", "repository", "dataset", "other"]},
             "media_references": {"type": "array", "items": {"type": "object", "properties": {"media_type": {"type": "string", "enum": ["image", "video"]}, "url": {"type": "string", "format": "uri"}}, "required": ["media_type", "url"], "additionalProperties": false}},
             "tags": {"type": "array", "items": {"type": "string"}},
             "provenance": {"type": "object", "properties": {"discovered_at": {"type": "string", "format": "date-time"}, "discovery_method": {"type": "string"}, "referrer_url": {"type": ["string", "null"]}}, "required": ["discovered_at", "discovery_method"], "additionalProperties": false},
-            "proposed_placements": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"pod_id": uuid(), "reason": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}}, "required": ["pod_id", "reason", "confidence"], "additionalProperties": false}},
-            "task_context": {"type": ["object", "null"], "properties": {"task_id": uuid(), "package_version": {"type": "integer", "minimum": 1}}, "required": ["task_id", "package_version"], "additionalProperties": false},
             "harness_idempotency_key": {"type": "string"}, "client_idempotency_key": {"type": "string"}
         }),
         &[
             "source_url",
+            "target",
             "source_metadata",
             "content_type",
             "tags",
             "provenance",
-            "proposed_placements",
             "harness_idempotency_key",
             "client_idempotency_key",
         ],

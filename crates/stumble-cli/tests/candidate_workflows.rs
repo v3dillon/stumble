@@ -163,12 +163,15 @@ impl Environment {
                 "discovery_method": "interactive_browser",
                 "referrer_url": "https://search.example/results"
             },
-            "proposed_placements": placements.iter().map(|(pod_id, reason, confidence)| json!({
-                "pod_id": pod_id,
-                "reason": reason,
-                "confidence": confidence
-            })).collect::<Vec<_>>(),
-            "task_context": null
+            "target": {
+                "kind": "pod_placements",
+                "placements": placements.iter().map(|(pod_id, reason, confidence)| json!({
+                    "pod_id": pod_id,
+                    "reason": reason,
+                    "confidence": confidence
+                })).collect::<Vec<_>>(),
+                "task_context": null
+            },
         })
     }
 }
@@ -386,7 +389,7 @@ fn evaluation_routing_and_review_keep_placements_independent_and_content_identit
         "interactive_browser"
     );
     assert_eq!(
-        shown["data"]["submissions"][0]["proposed_placements"][0]["reason"],
+        shown["data"]["submissions"][0]["target"]["placements"][0]["reason"],
         "Manual Pod evidence"
     );
     assert_eq!(shown["data"]["placements"].as_array().unwrap().len(), 3);

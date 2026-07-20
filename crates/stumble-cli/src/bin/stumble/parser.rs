@@ -211,6 +211,7 @@ pub(super) enum TasteWorkflow {
     Show,
     Set(InputArgs),
     Reset(OptionalInputArgs),
+    Retract(CandidateIdArgs),
 }
 
 #[derive(Subcommand)]

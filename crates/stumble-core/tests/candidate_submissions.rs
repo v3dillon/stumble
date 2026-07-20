@@ -1,130 +1,26 @@
-use chrono::{TimeZone, Utc};
+mod support;
+
+use chrono::Utc;
 use stumble_core::*;
+use support::{
+    candidate_harness, candidate_submission_request as candidate_request,
+    create_candidate_test_pod as create_test_pod, media_reference as media,
+};
 
-fn media(media_type: MediaReferenceType, url: &str) -> MediaReference {
-    MediaReference::new(media_type, url).unwrap()
+fn set_task_context(request: &mut CandidateSubmissionRequest, context: CandidateTaskContext) {
+    let CandidateSubmissionRequestTarget::PodPlacements { task_context, .. } = &mut request.target
+    else {
+        panic!("test request must target Pod placements");
+    };
+    *task_context = Some(context);
 }
 
-struct TestDataDir(std::path::PathBuf);
-
-impl TestDataDir {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "stumble-candidate-submissions-{}",
-            uuid::Uuid::now_v7()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TestDataDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn candidate_request(pod_ids: &[PodId]) -> CandidateSubmissionRequest {
-    CandidateSubmissionRequest {
-        evidence: CandidateSubmissionEvidence {
-            source_url: "https://example.com/report?utm_source=feed#section".into(),
-            source_metadata: CandidateSourceMetadata {
-                title: Some("A careful incident report".into()),
-                author: Some("Example Engineering".into()),
-                published_at: Some(Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap()),
-            },
-            permitted_excerpt: Some("A short, permitted excerpt.".into()),
-            summary: Some("How the team diagnosed and repaired the incident.".into()),
-            content_type: CandidateContentType::Article,
-            media_references: vec![
-                media(
-                    MediaReferenceType::Image,
-                    "https://cdn.example.com/report/diagram.png",
-                ),
-                media(
-                    MediaReferenceType::Video,
-                    "https://cdn.example.com/report/demo.mp4",
-                ),
-            ],
-            tags: vec!["reliability".into(), "incident-review".into()],
-            provenance: CandidateProvenance {
-                discovered_at: Utc.with_ymd_and_hms(2026, 7, 17, 9, 0, 0).unwrap(),
-                discovery_method: "browser_search".into(),
-                referrer_url: Some("https://search.example/results?q=incident".into()),
-            },
-            proposed_placements: pod_ids
-                .iter()
-                .enumerate()
-                .map(|(index, pod_id)| ProposedCandidatePlacement {
-                    pod_id: *pod_id,
-                    reason: format!("placement reason {index}"),
-                    confidence: CandidateConfidence::new(0.8 - index as f32 * 0.1).unwrap(),
-                })
-                .collect(),
-            task_context: None,
-            harness_idempotency_key: "worker-run-42".into(),
-            client_idempotency_key: "client-request-42".into(),
-        },
-    }
-}
-
-fn candidate_harness(
-    tools: &AgentTools,
-    kind: AgentHarnessKind,
-    capabilities: Vec<HarnessCapability>,
-    pod_ids: Option<Vec<PodId>>,
-) -> AuthContext {
-    let issued = tools
-        .register_agent_harness(
-            &tools.default_auth_context().unwrap(),
-            RegisterAgentHarnessRequest {
-                label: "candidate worker".into(),
-                kind,
-                capabilities,
-                pod_ids,
-            },
-        )
-        .unwrap();
-    tools
-        .authenticate_token(issued.token.expose())
-        .unwrap()
-        .unwrap()
-}
-
-fn create_test_pod(tools: &AgentTools, slug: &str) -> Pod {
-    let owner = tools.default_auth_context().unwrap();
-    let proposer = candidate_harness(
-        tools,
-        AgentHarnessKind::Interactive,
-        vec![HarnessCapability::PodCuration],
-        None,
-    );
-    let approver = candidate_harness(
-        tools,
-        AgentHarnessKind::Interactive,
-        vec![HarnessCapability::Approval],
-        None,
-    );
-    let now = Utc::now();
-    let proposal = tools
-        .create_pending_proposal(
-            &proposer,
-            SensitiveChange::CreatePublicPod {
-                request: CreatePodRequest {
-                    name: slug.into(),
-                    slug: slug.into(),
-                    description: "Candidate acceptance Pod".into(),
-                    visibility: Visibility::Public,
-                },
-            },
-            now,
-            now + chrono::Duration::hours(1),
-        )
-        .unwrap();
-    tools
-        .approve_pending_proposal(&approver, proposal.id, now)
-        .unwrap();
-    tools.pod_by_slug(slug, owner.tenant_id).unwrap()
+fn task_context_mut(request: &mut CandidateSubmissionRequest) -> &mut CandidateTaskContext {
+    let CandidateSubmissionRequestTarget::PodPlacements { task_context, .. } = &mut request.target
+    else {
+        panic!("test request must target Pod placements");
+    };
+    task_context.as_mut().unwrap()
 }
 
 #[test]
@@ -155,7 +51,11 @@ fn interactive_harness_submits_structured_private_multi_pod_candidate() {
         submitted.candidate.review_state,
         CandidateReviewState::Pending
     );
-    assert_eq!(submitted.submission.evidence.proposed_placements.len(), 2);
+    assert_eq!(submitted.submission.target.placements().len(), 2);
+    assert_eq!(
+        submitted.submission.target.acquisition_origin(),
+        CandidateAcquisitionOrigin::AgentDiscovery
+    );
     assert_eq!(
         submitted
             .submission
@@ -227,6 +127,64 @@ fn omitted_media_references_default_to_an_empty_reference_list() {
     let request: CandidateSubmissionRequest = serde_json::from_value(request).unwrap();
 
     assert!(request.evidence.media_references.is_empty());
+}
+
+#[test]
+fn interactive_harness_kind_alone_never_marks_a_pod_operation_as_user_learning() {
+    let tools = AgentTools::new(seed_store());
+    let pod = create_test_pod(&tools, "explicit-user-operation");
+    let submitter = candidate_harness(
+        &tools,
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::CandidateSubmission],
+        Some(vec![pod.id]),
+    );
+    let submitted = tools
+        .submit_candidate(&submitter, candidate_request(&[pod.id]))
+        .unwrap();
+
+    assert_eq!(
+        submitted.submission.target.acquisition_origin(),
+        CandidateAcquisitionOrigin::AgentDiscovery
+    );
+    assert!(!submitted.submission.target.learning_enabled());
+
+    let profile_reader = candidate_harness(
+        &tools,
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::Feedback],
+        None,
+    );
+    assert_eq!(
+        tools
+            .taste_profile(&profile_reader)
+            .unwrap()
+            .interest_seed_evidence
+            .active_seed_count,
+        0
+    );
+}
+
+#[test]
+fn pod_target_rejects_an_empty_placement_collection() {
+    let tools = AgentTools::new(seed_store());
+    let submitter = candidate_harness(
+        &tools,
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::CandidateSubmission],
+        None,
+    );
+    let mut request = candidate_request(&[]);
+    request.target = CandidateSubmissionRequestTarget::PodPlacements {
+        placements: Vec::new(),
+        task_context: None,
+    };
+
+    assert!(matches!(
+        tools.submit_candidate(&submitter, request),
+        Err(AgentToolsError::Store(StoreError::Validation(message)))
+            if message.contains("at least one placement")
+    ));
 }
 
 #[test]
@@ -336,6 +294,95 @@ fn canonical_media_identity_deduplicates_and_rejects_type_conflicts() {
 }
 
 #[test]
+fn canonical_deduplication_never_promotes_private_user_evidence_to_a_pod() {
+    let tools = AgentTools::new(seed_store());
+    let user = candidate_harness(
+        &tools,
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::CandidateSubmission],
+        None,
+    );
+    let mut private_request = candidate_request(&[]);
+    private_request.evidence.source_url =
+        "https://example.com/report?utm_source=private-secret#personal".into();
+    private_request.evidence.source_metadata.title = Some("private-title-needle".into());
+    private_request.evidence.media_references = vec![media(
+        MediaReferenceType::Image,
+        "https://private.example/private-media-needle.png",
+    )];
+    let private = tools.submit_candidate(&user, private_request).unwrap();
+
+    let pod = create_test_pod(&tools, "canonical-url-privacy");
+    let pod_harness = candidate_harness(
+        &tools,
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::CandidateSubmission],
+        Some(vec![pod.id]),
+    );
+    let mut pod_request = candidate_request(&[pod.id]);
+    pod_request.evidence.source_url = "https://example.com/report".into();
+    pod_request.evidence.harness_idempotency_key = "pod-visible-worker".into();
+    pod_request.evidence.client_idempotency_key = "pod-visible-client".into();
+    let pod_submission = tools.submit_candidate(&pod_harness, pod_request).unwrap();
+
+    assert_eq!(pod_submission.candidate.id, private.candidate.id);
+    let inspected = tools
+        .inspect_candidate(&pod_harness, private.candidate.id)
+        .unwrap();
+    assert_eq!(inspected.candidate.source_url, "https://example.com/report");
+    assert_eq!(inspected.submissions.len(), 1);
+    assert!(!serde_json::to_string(&inspected)
+        .unwrap()
+        .contains("private-secret"));
+
+    let curator = candidate_harness(
+        &tools,
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::PodCuration],
+        Some(vec![pod.id]),
+    );
+    tools
+        .curate_candidate(&curator, private.candidate.id, Utc::now())
+        .unwrap();
+    tools
+        .review_candidate_placement(
+            &curator,
+            private.candidate.id,
+            pod.id,
+            PlacementReviewDecision::Accept,
+            Some(CurationRationale::new("Pod evidence reviewed").unwrap()),
+            Utc::now(),
+        )
+        .unwrap();
+
+    let mut later_private = candidate_request(&[]);
+    later_private.evidence.source_url =
+        "https://example.com/report?utm_source=later-private".into();
+    later_private.evidence.source_metadata.title = Some("later-private-title".into());
+    later_private.evidence.media_references = vec![media(
+        MediaReferenceType::Image,
+        "https://private.example/later-private-media.png",
+    )];
+    later_private.evidence.harness_idempotency_key = "later-private-worker".into();
+    later_private.evidence.client_idempotency_key = "later-private-client".into();
+    tools.submit_candidate(&user, later_private).unwrap();
+
+    let public_projection = serde_json::to_string(&(
+        tools.list_content_items_for_pod(&curator, pod.id).unwrap(),
+        tools.federation_pod_events(&curator, &pod.slug).unwrap(),
+    ))
+    .unwrap();
+    for private_needle in [
+        "private-secret",
+        "private-title-needle",
+        "private-media-needle",
+        "later-private",
+    ] {
+        assert!(!public_projection.contains(private_needle));
+    }
+}
+
+#[test]
 fn retries_are_idempotent_and_canonical_deduplication_keeps_independent_evidence() {
     let tools = AgentTools::new(seed_store());
     let pod = create_test_pod(&tools, "deduplicated-candidates");
@@ -361,9 +408,13 @@ fn retries_are_idempotent_and_canonical_deduplication_keeps_independent_evidence
     independent_request.evidence.source_url = "https://example.com/report".into();
     independent_request.evidence.harness_idempotency_key = "another-worker-run".into();
     independent_request.evidence.client_idempotency_key = "another-client-request".into();
-    independent_request.evidence.proposed_placements[0].reason = "independent corroboration".into();
-    independent_request.evidence.proposed_placements[0].confidence =
-        CandidateConfidence::new(0.6).unwrap();
+    let CandidateSubmissionRequestTarget::PodPlacements { placements, .. } =
+        &mut independent_request.target
+    else {
+        panic!("test request must target Pod placements");
+    };
+    placements[0].reason = "independent corroboration".into();
+    placements[0].confidence = CandidateConfidence::new(0.6).unwrap();
     let independent = tools
         .submit_candidate(&second_harness, independent_request)
         .unwrap();
@@ -389,8 +440,8 @@ fn retries_are_idempotent_and_canonical_deduplication_keeps_independent_evidence
             ]
     }));
     assert!(inspected.submissions.iter().any(|submission| {
-        submission.evidence.proposed_placements[0].reason == "independent corroboration"
-            && submission.evidence.proposed_placements[0].confidence
+        submission.target.placements()[0].reason == "independent corroboration"
+            && submission.target.placements()[0].confidence
                 == CandidateConfidence::new(0.6).unwrap()
     }));
 }
@@ -442,35 +493,47 @@ fn task_submission_requires_the_owning_lease_and_pinned_package_version() {
         tools.submit_candidate(&worker, request.clone()),
         Err(AgentToolsError::CandidateTaskRequired)
     ));
-    request.evidence.task_context = Some(CandidateTaskContext {
-        task_id: task.id,
-        package_version: task.target.pod().unwrap().1,
-    });
+    set_task_context(
+        &mut request,
+        CandidateTaskContext {
+            task_id: task.id,
+            package_version: task.target.pod().unwrap().1,
+        },
+    );
     assert!(matches!(
         tools.submit_candidate(&other, request.clone()),
         Err(AgentToolsError::CandidateTaskLeaseRequired)
     ));
-    request
-        .evidence
-        .task_context
-        .as_mut()
-        .unwrap()
-        .package_version = PackageVersion::new(2).unwrap();
+    task_context_mut(&mut request).package_version = PackageVersion::new(2).unwrap();
     assert!(matches!(
         tools.submit_candidate(&worker, request.clone()),
         Err(AgentToolsError::CandidatePackageVersionMismatch)
     ));
-    request
-        .evidence
-        .task_context
-        .as_mut()
-        .unwrap()
-        .package_version = task.target.pod().unwrap().1;
+    task_context_mut(&mut request).package_version = task.target.pod().unwrap().1;
 
     let submitted = tools.submit_candidate(&worker, request).unwrap();
     assert_eq!(
-        submitted.submission.evidence.task_context.unwrap().task_id,
+        submitted.submission.target.task_context().unwrap().task_id,
         task.id
+    );
+    assert_eq!(
+        submitted.submission.target.acquisition_origin(),
+        CandidateAcquisitionOrigin::AgentDiscovery
+    );
+    assert!(!submitted.submission.target.learning_enabled());
+    let profile_reader = candidate_harness(
+        &tools,
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::Feedback],
+        None,
+    );
+    assert_eq!(
+        tools
+            .taste_profile(&profile_reader)
+            .unwrap()
+            .interest_seed_evidence
+            .active_seed_count,
+        0
     );
 }
 
@@ -495,57 +558,37 @@ fn placement_authorization_and_confidence_validation_are_enforced() {
 }
 
 #[test]
-fn candidate_and_idempotency_evidence_survive_sqlite_restart() {
-    let data_dir = TestDataDir::new();
-    let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
-    let pod = create_test_pod(&tools, "persistent-candidates");
-    let issued = tools
-        .register_agent_harness(
-            &tools.default_auth_context().unwrap(),
-            RegisterAgentHarnessRequest {
-                label: "persistent candidate worker".into(),
-                kind: AgentHarnessKind::Interactive,
-                capabilities: vec![HarnessCapability::CandidateSubmission],
-                pod_ids: Some(vec![pod.id]),
-            },
-        )
-        .unwrap();
-    let token = issued.token.expose().to_string();
-    let request = candidate_request(&[pod.id]);
-    let harness = tools.authenticate_token(&token).unwrap().unwrap();
-    let submitted = tools.submit_candidate(&harness, request.clone()).unwrap();
-    drop(tools);
-
-    let reopened = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
-    let harness = reopened.authenticate_token(&token).unwrap().unwrap();
-    let retry = reopened.submit_candidate(&harness, request).unwrap();
-    let inspected = reopened
-        .inspect_candidate(&harness, submitted.candidate.id)
-        .unwrap();
-
-    assert_eq!(retry.submission.id, submitted.submission.id);
-    assert_eq!(inspected.submissions.len(), 1);
-}
-
-#[test]
-fn changed_input_cannot_reuse_either_idempotency_key() {
+fn revoked_candidate_context_propagates_authorization_failure() {
     let tools = AgentTools::new(seed_store());
-    let pod = create_test_pod(&tools, "conflicting-candidates");
+    let pod = create_test_pod(&tools, "revoked-candidate-context");
     let harness = candidate_harness(
         &tools,
         AgentHarnessKind::Interactive,
         vec![HarnessCapability::CandidateSubmission],
         Some(vec![pod.id]),
     );
-    let request = candidate_request(&[pod.id]);
-    tools.submit_candidate(&harness, request.clone()).unwrap();
-    let mut changed = request;
-    changed.evidence.summary = Some("changed evidence".into());
+    let submitted = tools
+        .submit_candidate(&harness, candidate_request(&[pod.id]))
+        .unwrap();
+    tools
+        .revoke_agent_harness(
+            &tools.default_auth_context().unwrap(),
+            harness.harness_id.unwrap(),
+        )
+        .unwrap();
 
-    assert!(matches!(
-        tools.submit_candidate(&harness, changed),
-        Err(AgentToolsError::CandidateIdempotencyConflict)
-    ));
+    for result in [
+        tools.list_candidates(&harness).map(|_| ()),
+        tools
+            .inspect_candidate(&harness, submitted.candidate.id)
+            .map(|_| ()),
+    ] {
+        assert!(matches!(
+            result,
+            Err(AgentToolsError::Forbidden { reason })
+                if reason == "harness grant is revoked or missing"
+        ));
+    }
 }
 
 #[test]
@@ -582,10 +625,13 @@ fn task_submission_retry_remains_safe_after_task_completion() {
         )
         .unwrap();
     let mut request = candidate_request(&[pod.id]);
-    request.evidence.task_context = Some(CandidateTaskContext {
-        task_id: task.id,
-        package_version: task.target.pod().unwrap().1,
-    });
+    set_task_context(
+        &mut request,
+        CandidateTaskContext {
+            task_id: task.id,
+            package_version: task.target.pod().unwrap().1,
+        },
+    );
     let first = tools.submit_candidate(&worker, request.clone()).unwrap();
     tools
         .complete_discovery_task(&worker, task.id, now)
@@ -629,64 +675,18 @@ fn expired_task_lease_cannot_authorize_a_new_candidate_submission() {
         )
         .unwrap();
     let mut request = candidate_request(&[pod.id]);
-    request.evidence.task_context = Some(CandidateTaskContext {
-        task_id: task.id,
-        package_version: task.target.pod().unwrap().1,
-    });
+    set_task_context(
+        &mut request,
+        CandidateTaskContext {
+            task_id: task.id,
+            package_version: task.target.pod().unwrap().1,
+        },
+    );
 
     assert!(matches!(
         tools.submit_candidate(&worker, request),
         Err(AgentToolsError::CandidateTaskLeaseRequired)
     ));
-}
-
-#[test]
-fn concurrent_idempotent_submissions_cannot_create_duplicate_candidates() {
-    let data_dir = TestDataDir::new();
-    let setup = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
-    let pod = create_test_pod(&setup, "concurrent-candidates");
-    let issued = setup
-        .register_agent_harness(
-            &setup.default_auth_context().unwrap(),
-            RegisterAgentHarnessRequest {
-                label: "concurrent candidate worker".into(),
-                kind: AgentHarnessKind::Interactive,
-                capabilities: vec![HarnessCapability::CandidateSubmission],
-                pod_ids: Some(vec![pod.id]),
-            },
-        )
-        .unwrap();
-    let token = issued.token.expose().to_string();
-    drop(setup);
-
-    let authenticator = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
-    let ctx = authenticator.authenticate_token(&token).unwrap().unwrap();
-    drop(authenticator);
-    let first = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
-    let second = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
-    let request = candidate_request(&[pod.id]);
-    let submitted = first.submit_candidate(&ctx, request.clone()).unwrap();
-    assert!(matches!(
-        second.submit_candidate(&ctx, request.clone()),
-        Err(AgentToolsError::Persistence(
-            StorePersistenceError::ConcurrentWriteConflict { .. }
-        ))
-    ));
-    drop(first);
-    drop(second);
-
-    let reopened = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
-    let ctx = reopened.authenticate_token(&token).unwrap().unwrap();
-    let retry = reopened.submit_candidate(&ctx, request).unwrap();
-    assert_eq!(retry.submission.id, submitted.submission.id);
-    assert_eq!(
-        reopened
-            .inspect_candidate(&ctx, submitted.candidate.id)
-            .unwrap()
-            .submissions
-            .len(),
-        1
-    );
 }
 
 #[test]

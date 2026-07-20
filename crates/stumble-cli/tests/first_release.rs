@@ -172,6 +172,24 @@ fn submit_candidate(
         .submit_candidate(
             worker,
             CandidateSubmissionRequest {
+                target: CandidateSubmissionRequestTarget::PodPlacements {
+                    placements: pod_ids
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .map(|(index, pod_id)| ProposedCandidatePlacement {
+                            pod_id,
+                            reason: format!(
+                                "Subject match supported by placement evidence {index}"
+                            ),
+                            confidence: CandidateConfidence::new(0.95).unwrap(),
+                        })
+                        .collect(),
+                    task_context: Some(CandidateTaskContext {
+                        task_id: task.id,
+                        package_version: task.target.pod().unwrap().1,
+                    }),
+                },
                 evidence: CandidateSubmissionEvidence {
                     source_url: url.into(),
                     source_metadata: CandidateSourceMetadata {
@@ -189,22 +207,6 @@ fn submit_candidate(
                         discovery_method: "harness_browser_search".into(),
                         referrer_url: Some("https://search.example/results".into()),
                     },
-                    proposed_placements: pod_ids
-                        .iter()
-                        .copied()
-                        .enumerate()
-                        .map(|(index, pod_id)| ProposedCandidatePlacement {
-                            pod_id,
-                            reason: format!(
-                                "Subject match supported by placement evidence {index}"
-                            ),
-                            confidence: CandidateConfidence::new(0.95).unwrap(),
-                        })
-                        .collect(),
-                    task_context: Some(CandidateTaskContext {
-                        task_id: task.id,
-                        package_version: task.target.pod().unwrap().1,
-                    }),
                     harness_idempotency_key: format!("worker-{}", task.id),
                     client_idempotency_key: format!("client-{}", task.id),
                 },
@@ -231,6 +233,14 @@ fn accept_origin_content_item_placement(tools: &AgentTools, pod: &Pod) -> Conten
         .submit_candidate(
             &actor,
             CandidateSubmissionRequest {
+                target: CandidateSubmissionRequestTarget::PodPlacements {
+                    placements: vec![ProposedCandidatePlacement {
+                        pod_id: pod.id,
+                        reason: "Public Pod subject match at the Origin Node".into(),
+                        confidence: CandidateConfidence::new(0.95).unwrap(),
+                    }],
+                    task_context: None,
+                },
                 evidence: CandidateSubmissionEvidence {
                     source_url: format!("https://origin.example/{}-remote-recovery", pod.slug),
                     source_metadata: CandidateSourceMetadata {
@@ -248,12 +258,6 @@ fn accept_origin_content_item_placement(tools: &AgentTools, pod: &Pod) -> Conten
                         discovery_method: "origin_harness_search".into(),
                         referrer_url: None,
                     },
-                    proposed_placements: vec![ProposedCandidatePlacement {
-                        pod_id: pod.id,
-                        reason: "Public Pod subject match at the Origin Node".into(),
-                        confidence: CandidateConfidence::new(0.95).unwrap(),
-                    }],
-                    task_context: None,
                     harness_idempotency_key: format!("origin-worker-{}", pod.slug),
                     client_idempotency_key: format!("origin-client-{}", pod.slug),
                 },
@@ -360,6 +364,14 @@ fn accept_local_candidate(
         .submit_candidate(
             actor,
             CandidateSubmissionRequest {
+                target: CandidateSubmissionRequestTarget::PodPlacements {
+                    placements: vec![ProposedCandidatePlacement {
+                        pod_id: pod.id,
+                        reason: format!("{label} supplies independent Feed evidence"),
+                        confidence: CandidateConfidence::new(0.9).unwrap(),
+                    }],
+                    task_context: None,
+                },
                 evidence: CandidateSubmissionEvidence {
                     source_url: format!("https://{label}.example/recovery"),
                     source_metadata: CandidateSourceMetadata {
@@ -377,12 +389,6 @@ fn accept_local_candidate(
                         discovery_method: "interactive_release_proof".into(),
                         referrer_url: None,
                     },
-                    proposed_placements: vec![ProposedCandidatePlacement {
-                        pod_id: pod.id,
-                        reason: format!("{label} supplies independent Feed evidence"),
-                        confidence: CandidateConfidence::new(0.9).unwrap(),
-                    }],
-                    task_context: None,
                     harness_idempotency_key: format!("{label}-harness"),
                     client_idempotency_key: format!("{label}-client"),
                 },

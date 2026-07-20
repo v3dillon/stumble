@@ -96,6 +96,25 @@ async fn tool_catalog_is_annotated_and_scoped_to_the_harness_grant() {
 }
 
 #[tokio::test]
+async fn feedback_catalog_advertises_interest_seed_retraction() {
+    let tools = AgentTools::new(seed_store());
+    let token = ScopedHarness::register(
+        &tools,
+        "ChatGPT feedback catalog",
+        vec![HarnessCapability::Feedback],
+        None,
+    );
+    let tools = McpClient::new(streamable_http_router(tools), token.token())
+        .list_tools(2)
+        .await;
+
+    assert!(tools
+        .names()
+        .iter()
+        .any(|name| name == "retract_interest_seed"));
+}
+
+#[tokio::test]
 async fn origin_curation_tools_are_advertised_only_for_their_harness_capability() {
     let tools = AgentTools::new(seed_store());
     let grants = [
@@ -407,11 +426,14 @@ async fn chatgpt_can_submit_a_provenance_bearing_link_to_an_authorized_pod() {
                             "discovered_at": "2026-07-17T22:00:00Z",
                             "discovery_method": "chatgpt_conversation"
                         },
-                        "proposed_placements": [{
-                            "pod_id": created.pod.id,
-                            "reason": "The user explicitly sent this link for the Pod.",
-                            "confidence": 1.0
-                        }],
+                        "target": {
+                            "kind": "pod_placements",
+                            "placements": [{
+                                "pod_id": created.pod.id,
+                                "reason": "The user explicitly sent this link for the Pod.",
+                                "confidence": 1.0
+                            }]
+                        },
                         "harness_idempotency_key": "chatgpt-link-1",
                         "client_idempotency_key": "conversation-message-1"
             }),
@@ -576,11 +598,14 @@ async fn harnesses_can_curate_an_origin_pod_without_bypassing_scope_or_approval(
                     "discovered_at": "2026-07-18T12:00:00Z",
                     "discovery_method": "interactive_browser"
                 },
-                "proposed_placements": [{
-                    "pod_id": inbox_id,
-                    "reason": "Initial private discovery intake.",
-                    "confidence": 0.9
-                }],
+                "target": {
+                    "kind": "pod_placements",
+                    "placements": [{
+                        "pod_id": inbox_id,
+                        "reason": "Initial private discovery intake.",
+                        "confidence": 0.9
+                    }]
+                },
                 "harness_idempotency_key": "origin-curation-1",
                 "client_idempotency_key": "origin-message-1"
             }),

@@ -94,6 +94,14 @@ fn accepted_item(
         .submit_candidate(
             &submitter,
             CandidateSubmissionRequest {
+                target: CandidateSubmissionRequestTarget::PodPlacements {
+                    placements: vec![ProposedCandidatePlacement {
+                        pod_id: pod.id,
+                        reason: "Strong match".into(),
+                        confidence: CandidateConfidence::new(0.9).unwrap(),
+                    }],
+                    task_context: None,
+                },
                 evidence: CandidateSubmissionEvidence {
                     source_url: format!("https://{source}/{ordinal}"),
                     source_metadata: CandidateSourceMetadata {
@@ -111,12 +119,6 @@ fn accepted_item(
                         discovery_method: "interactive_search".into(),
                         referrer_url: None,
                     },
-                    proposed_placements: vec![ProposedCandidatePlacement {
-                        pod_id: pod.id,
-                        reason: "Strong match".into(),
-                        confidence: CandidateConfidence::new(0.9).unwrap(),
-                    }],
-                    task_context: None,
                     harness_idempotency_key: format!("taste-harness-{ordinal}"),
                     client_idempotency_key: format!("taste-client-{ordinal}"),
                 },
@@ -351,9 +353,9 @@ fn add_to_pod_updates_local_learning_and_user_can_reset_some_or_all_weights() {
         .iter()
         .any(|weight| matches!(weight.signal, LearnedTasteSignal::Topic(_))));
     assert!(source_only
-        .learned
+        .source_affinities
         .iter()
-        .any(|weight| matches!(weight.signal, LearnedTasteSignal::Source(_))));
+        .any(|affinity| matches!(affinity.signal, SourceAffinitySignal::Source(_))));
 
     let empty = tools
         .reset_learned_taste(&user, ResetLearnedTasteRequest::all())
@@ -643,6 +645,15 @@ fn explicit_interest_suppresses_conflicting_learned_aversion_explanation() {
     tools
         .record_feed_feedback(&user, second_id, FeedbackKind::Dismissed, None, None, now)
         .unwrap();
+    let weight = tools
+        .taste_profile(&user)
+        .unwrap()
+        .learned
+        .into_iter()
+        .find(|weight| weight.signal == LearnedTasteSignal::Topic("databases".into()))
+        .unwrap();
+    assert_eq!(weight.opposing_signals, 2);
+    assert!(weight.weight < 0.0);
     tools.complete_feed_batch(&user, batch.id, now).unwrap();
     let mut update = UpdateTasteProfileRequest::default();
     update.interests = Some(vec!["databases".into()]);
@@ -675,6 +686,119 @@ fn explicit_interest_suppresses_conflicting_learned_aversion_explanation() {
             reason
                 == "Explicit interest 'databases' overrode learned topic 'databases' aversion from 2 opposing signals"
         }));
+
+    let reset = tools
+        .reset_learned_taste(
+            &user,
+            ResetLearnedTasteRequest::for_signal(LearnedTasteSignal::Source("one.example".into())),
+        )
+        .unwrap();
+    assert!(!reset
+        .source_affinities
+        .iter()
+        .any(|affinity| { affinity.signal == SourceAffinitySignal::Source("one.example".into()) }));
+}
+
+#[test]
+fn feedback_ignores_unaccepted_candidate_evidence_for_the_same_url() {
+    let tools = AgentTools::new(seed_store());
+    let (_, content_item_id) = accepted_item(
+        &tools,
+        "accepted-feedback-source",
+        551,
+        "accepted-feedback.example",
+        vec!["trusted-topic".into()],
+    );
+    let curator = harness(
+        &tools,
+        "unaccepted evidence curator",
+        vec![HarnessCapability::PodCuration],
+    );
+    let unrelated_pod = tools
+        .create_pod(
+            &curator,
+            CreatePodRequest {
+                name: "Unaccepted evidence".into(),
+                slug: "unaccepted-feedback-evidence".into(),
+                description: "Evidence that must not train feedback".into(),
+                visibility: Visibility::Private,
+            },
+        )
+        .unwrap();
+    let submitter = harness(
+        &tools,
+        "unaccepted evidence submitter",
+        vec![HarnessCapability::CandidateSubmission],
+    );
+    tools
+        .submit_candidate(
+            &submitter,
+            CandidateSubmissionRequest {
+                target: CandidateSubmissionRequestTarget::PodPlacements {
+                    placements: vec![ProposedCandidatePlacement {
+                        pod_id: unrelated_pod.id,
+                        reason: "Unaccepted proposal".into(),
+                        confidence: CandidateConfidence::new(0.7).unwrap(),
+                    }],
+                    task_context: None,
+                },
+                evidence: CandidateSubmissionEvidence {
+                    source_url: "https://accepted-feedback.example/551".into(),
+                    source_metadata: CandidateSourceMetadata {
+                        title: None,
+                        author: Some("Injected Author".into()),
+                        published_at: None,
+                    },
+                    permitted_excerpt: None,
+                    summary: None,
+                    content_type: CandidateContentType::Article,
+                    media_references: Vec::new(),
+                    tags: vec!["injected-topic".into()],
+                    provenance: CandidateProvenance {
+                        discovered_at: Utc::now(),
+                        discovery_method: "unaccepted_agent_evidence".into(),
+                        referrer_url: Some("https://injected-referrer.example/post".into()),
+                    },
+                    harness_idempotency_key: "unaccepted-feedback-worker".into(),
+                    client_idempotency_key: "unaccepted-feedback-client".into(),
+                },
+            },
+        )
+        .unwrap();
+    let user = harness(
+        &tools,
+        "feedback provenance user",
+        vec![HarnessCapability::FeedRead, HarnessCapability::Feedback],
+    );
+    let now = Utc::now();
+    tools
+        .get_feed_batch(&user, FeedBatchRequest::new(100).unwrap(), now)
+        .unwrap();
+    tools
+        .record_feed_feedback(
+            &user,
+            content_item_id,
+            FeedbackKind::Interesting,
+            None,
+            None,
+            now,
+        )
+        .unwrap();
+
+    let profile = tools.taste_profile(&user).unwrap();
+    assert!(!profile
+        .learned
+        .iter()
+        .any(|weight| weight.signal == LearnedTasteSignal::Topic("injected-topic".into())));
+    let affinities = profile.source_affinities;
+    for injected in [
+        SourceAffinitySignal::AuthorOrAccount("injected author".into()),
+        SourceAffinitySignal::ReferrerContext("injected-referrer.example".into()),
+    ] {
+        assert!(!affinities
+            .iter()
+            .any(|affinity| affinity.signal == injected));
+    }
 }
 
 #[test]

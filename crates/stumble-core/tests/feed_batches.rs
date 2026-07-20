@@ -76,6 +76,14 @@ fn accepted_item(tools: &AgentTools, slug: &str, ordinal: usize) -> (Pod, Conten
         .submit_candidate(
             &submitter,
             CandidateSubmissionRequest {
+                target: CandidateSubmissionRequestTarget::PodPlacements {
+                    placements: vec![ProposedCandidatePlacement {
+                        pod_id: pod.id,
+                        reason: "Strong subject match".into(),
+                        confidence: CandidateConfidence::new(0.9).unwrap(),
+                    }],
+                    task_context: None,
+                },
                 evidence: CandidateSubmissionEvidence {
                     source_url: format!("https://source{ordinal}.example/report"),
                     source_metadata: CandidateSourceMetadata {
@@ -93,12 +101,6 @@ fn accepted_item(tools: &AgentTools, slug: &str, ordinal: usize) -> (Pod, Conten
                         discovery_method: "interactive_search".into(),
                         referrer_url: Some("https://search.example".into()),
                     },
-                    proposed_placements: vec![ProposedCandidatePlacement {
-                        pod_id: pod.id,
-                        reason: "Strong subject match".into(),
-                        confidence: CandidateConfidence::new(0.9).unwrap(),
-                    }],
-                    task_context: None,
                     harness_idempotency_key: format!("feed-harness-{ordinal}"),
                     client_idempotency_key: format!("feed-client-{ordinal}"),
                 },
@@ -138,6 +140,14 @@ fn accepted_item_in_pod(tools: &AgentTools, pod: &Pod, ordinal: usize) -> Conten
         .submit_candidate(
             &submitter,
             CandidateSubmissionRequest {
+                target: CandidateSubmissionRequestTarget::PodPlacements {
+                    placements: vec![ProposedCandidatePlacement {
+                        pod_id: pod.id,
+                        reason: "Strong subject match".into(),
+                        confidence: CandidateConfidence::new(0.9).unwrap(),
+                    }],
+                    task_context: None,
+                },
                 evidence: CandidateSubmissionEvidence {
                     source_url: format!("https://pod-source{ordinal}.example/report"),
                     source_metadata: CandidateSourceMetadata {
@@ -155,12 +165,6 @@ fn accepted_item_in_pod(tools: &AgentTools, pod: &Pod, ordinal: usize) -> Conten
                         discovery_method: "interactive_search".into(),
                         referrer_url: Some("https://search.example".into()),
                     },
-                    proposed_placements: vec![ProposedCandidatePlacement {
-                        pod_id: pod.id,
-                        reason: "Strong subject match".into(),
-                        confidence: CandidateConfidence::new(0.9).unwrap(),
-                    }],
-                    task_context: None,
                     harness_idempotency_key: format!("pod-harness-{ordinal}"),
                     client_idempotency_key: format!("pod-client-{ordinal}"),
                 },
@@ -291,6 +295,45 @@ fn source_and_topic_blocks_exclude_matching_items_from_later_batches() {
         .unwrap();
     assert_eq!(later.state, FeedBatchState::CaughtUp);
     assert!(later.items.is_empty());
+}
+
+#[test]
+fn typed_source_blocks_control_feedback_state_and_feed_eligibility() {
+    let tools = AgentTools::new(seed_store());
+    let (_, blocked_id) = accepted_item(&tools, "typed-block-source", 23);
+    let (_, allowed_id) = accepted_item(&tools, "typed-block-allowed", 24);
+    let user = harness(
+        &tools,
+        "typed blocking user",
+        vec![HarnessCapability::FeedRead, HarnessCapability::Feedback],
+        None,
+    );
+    let now = Utc.with_ymd_and_hms(2026, 7, 17, 12, 0, 0).unwrap();
+    let initial = tools
+        .get_feed_batch(&user, FeedBatchRequest::new(2).unwrap(), now)
+        .unwrap();
+    let mut update = UpdateTasteProfileRequest::default();
+    update.blocked_source_affinities = Some(vec![SourceAffinitySignal::Source(
+        "SOURCE23.EXAMPLE".into(),
+    )]);
+    tools.update_taste_profile(&user, update).unwrap();
+    let receipt = tools
+        .record_feed_feedback(&user, blocked_id, FeedbackKind::Saved, None, None, now)
+        .unwrap();
+    assert!(receipt.source_blocked);
+    tools.complete_feed_batch(&user, initial.id, now).unwrap();
+
+    let later = tools
+        .get_feed_batch(
+            &user,
+            FeedBatchRequest::new(2)
+                .unwrap()
+                .with_recurrence_penalty_days(RecurrencePenaltyDays::new(0).unwrap()),
+            now + chrono::Duration::seconds(1),
+        )
+        .unwrap();
+    assert_eq!(later.items.len(), 1);
+    assert_eq!(later.items[0].content_reference.content_item_id, allowed_id);
 }
 
 #[test]

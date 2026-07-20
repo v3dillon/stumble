@@ -9,8 +9,8 @@ use std::{
 use stumble_core::{
     AgentHarnessKind, AgentTools, CandidateConfidence, CandidateContentType, CandidateProvenance,
     CandidateSourceMetadata, CandidateSubmissionEvidence, CandidateSubmissionRequest,
-    CurationPolicy, HarnessCapability, PlacementReviewDecision, ProposedCandidatePlacement,
-    RegisterAgentHarnessRequest,
+    CandidateSubmissionRequestTarget, CurationPolicy, HarnessCapability, PlacementReviewDecision,
+    ProposedCandidatePlacement, RegisterAgentHarnessRequest,
 };
 
 struct Environment {
@@ -126,6 +126,14 @@ impl Environment {
             .submit_candidate(
                 &curator,
                 CandidateSubmissionRequest {
+                    target: CandidateSubmissionRequestTarget::PodPlacements {
+                        placements: vec![ProposedCandidatePlacement {
+                            pod_id: pod_id.parse().unwrap(),
+                            reason: "Primary evidence concerns reliable systems".into(),
+                            confidence: CandidateConfidence::new(0.95).unwrap(),
+                        }],
+                        task_context: None,
+                    },
                     evidence: CandidateSubmissionEvidence {
                         source_url: "https://research.example/systems-report".into(),
                         source_metadata: CandidateSourceMetadata {
@@ -143,12 +151,6 @@ impl Environment {
                             discovery_method: "browser_search".into(),
                             referrer_url: Some("https://search.example/results".into()),
                         },
-                        proposed_placements: vec![ProposedCandidatePlacement {
-                            pod_id: pod_id.parse().unwrap(),
-                            reason: "Primary evidence concerns reliable systems".into(),
-                            confidence: CandidateConfidence::new(0.95).unwrap(),
-                        }],
-                        task_context: None,
                         harness_idempotency_key: "feed-fixture-worker".into(),
                         client_idempotency_key: "feed-fixture-client".into(),
                     },

@@ -106,6 +106,14 @@ fn public_pod(tools: &AgentTools, slug: &str) -> Pod {
 
 fn candidate_request(pod_id: PodId, confidence: f32) -> CandidateSubmissionRequest {
     CandidateSubmissionRequest {
+        target: CandidateSubmissionRequestTarget::PodPlacements {
+            placements: vec![ProposedCandidatePlacement {
+                pod_id,
+                reason: "Strong topical match".into(),
+                confidence: CandidateConfidence::new(confidence).unwrap(),
+            }],
+            task_context: None,
+        },
         evidence: CandidateSubmissionEvidence {
             source_url: "https://example.com/curation?utm_source=test".into(),
             source_metadata: CandidateSourceMetadata {
@@ -126,12 +134,6 @@ fn candidate_request(pod_id: PodId, confidence: f32) -> CandidateSubmissionReque
                 discovery_method: "interactive_search".into(),
                 referrer_url: None,
             },
-            proposed_placements: vec![ProposedCandidatePlacement {
-                pod_id,
-                reason: "Strong topical match".into(),
-                confidence: CandidateConfidence::new(confidence).unwrap(),
-            }],
-            task_context: None,
             harness_idempotency_key: format!("worker-{pod_id}"),
             client_idempotency_key: format!("client-{pod_id}"),
         },
@@ -335,7 +337,12 @@ fn assisted_curation_accepts_only_trusted_high_confidence_evidence() {
     trusted_low.evidence.source_url = "https://example.com/mixed-trust".into();
     trusted_low.evidence.harness_idempotency_key = "trusted-low-worker".into();
     trusted_low.evidence.client_idempotency_key = "trusted-low-client".into();
-    trusted_low.evidence.task_context = Some(CandidateTaskContext {
+    let CandidateSubmissionRequestTarget::PodPlacements { task_context, .. } =
+        &mut trusted_low.target
+    else {
+        panic!("test request must target Pod placements");
+    };
+    *task_context = Some(CandidateTaskContext {
         task_id: task.id,
         package_version: task.target.pod().unwrap().1,
     });
@@ -361,7 +368,11 @@ fn assisted_curation_accepts_only_trusted_high_confidence_evidence() {
     request.evidence.source_url = "https://example.com/trusted-curation".into();
     request.evidence.harness_idempotency_key = "trusted-worker".into();
     request.evidence.client_idempotency_key = "trusted-client".into();
-    request.evidence.task_context = Some(CandidateTaskContext {
+    let CandidateSubmissionRequestTarget::PodPlacements { task_context, .. } = &mut request.target
+    else {
+        panic!("test request must target Pod placements");
+    };
+    *task_context = Some(CandidateTaskContext {
         task_id: task.id,
         package_version: task.target.pod().unwrap().1,
     });
@@ -637,14 +648,15 @@ fn mixed_scope_curation_fails_before_any_authoritative_mutation() {
         Some(vec![allowed.id]),
     );
     let mut request = candidate_request(allowed.id, 0.9);
-    request
-        .evidence
-        .proposed_placements
-        .push(ProposedCandidatePlacement {
-            pod_id: denied.id,
-            reason: "Unauthorized second route".into(),
-            confidence: CandidateConfidence::new(0.9).unwrap(),
-        });
+    let CandidateSubmissionRequestTarget::PodPlacements { placements, .. } = &mut request.target
+    else {
+        panic!("test request must target Pod placements");
+    };
+    placements.push(ProposedCandidatePlacement {
+        pod_id: denied.id,
+        reason: "Unauthorized second route".into(),
+        confidence: CandidateConfidence::new(0.9).unwrap(),
+    });
     let submitted = tools.submit_candidate(&submitter, request).unwrap();
     let events_before = tools
         .federation_pod_events(&curator, &allowed.slug)

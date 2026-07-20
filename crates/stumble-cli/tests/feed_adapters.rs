@@ -43,6 +43,14 @@ fn accepted_item(tools: &AgentTools, ctx: &AuthContext) -> (PodId, ContentItemId
         .submit_candidate(
             ctx,
             CandidateSubmissionRequest {
+                target: CandidateSubmissionRequestTarget::PodPlacements {
+                    placements: vec![ProposedCandidatePlacement {
+                        pod_id: pod.id,
+                        reason: "Adapter evidence".into(),
+                        confidence: CandidateConfidence::new(0.9).unwrap(),
+                    }],
+                    task_context: None,
+                },
                 evidence: CandidateSubmissionEvidence {
                     source_url: "https://feed-adapter.example/report".into(),
                     source_metadata: CandidateSourceMetadata {
@@ -60,12 +68,6 @@ fn accepted_item(tools: &AgentTools, ctx: &AuthContext) -> (PodId, ContentItemId
                         discovery_method: "adapter_test".into(),
                         referrer_url: None,
                     },
-                    proposed_placements: vec![ProposedCandidatePlacement {
-                        pod_id: pod.id,
-                        reason: "Adapter evidence".into(),
-                        confidence: CandidateConfidence::new(0.9).unwrap(),
-                    }],
-                    task_context: None,
                     harness_idempotency_key: "feed-adapter-harness".into(),
                     client_idempotency_key: "feed-adapter-client".into(),
                 },
@@ -343,6 +345,9 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
         &taste_request,
         serde_json::to_vec(&json!({
             "interests": ["systems"],
+            "blocked_source_affinities": [
+                {"kind": "publisher", "value": "Systems Weekly"}
+            ],
             "recurrence_penalty_days": 21
         }))
         .unwrap(),
@@ -374,6 +379,9 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
             tool: "update_taste_profile".into(),
             arguments: json!({
                 "interests": ["systems"],
+                "blocked_source_affinities": [
+                    {"kind": "publisher", "value": "Systems Weekly"}
+                ],
                 "recurrence_penalty_days": 21
             }),
         })
@@ -387,7 +395,7 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
                 .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"interests":["systems"],"recurrence_penalty_days":21}"#,
+                    r#"{"interests":["systems"],"blocked_source_affinities":[{"kind":"publisher","value":"Systems Weekly"}],"recurrence_penalty_days":21}"#,
                 ))
                 .unwrap(),
         )
@@ -511,7 +519,10 @@ async fn unauthenticated_public_http_responses_never_expose_taste_profile_data()
             RegisterAgentHarnessRequest {
                 label: "private profile".into(),
                 kind: AgentHarnessKind::Interactive,
-                capabilities: vec![HarnessCapability::Feedback],
+                capabilities: vec![
+                    HarnessCapability::Feedback,
+                    HarnessCapability::CandidateSubmission,
+                ],
                 pod_ids: None,
             },
         )
@@ -523,6 +534,37 @@ async fn unauthenticated_public_http_responses_never_expose_taste_profile_data()
     let mut update = UpdateTasteProfileRequest::default();
     update.interests = Some(vec!["http-private-needle".into()]);
     tools.update_taste_profile(&user, update).unwrap();
+    let private_candidate = tools
+        .submit_candidate(
+            &user,
+            CandidateSubmissionRequest {
+                target: CandidateSubmissionRequestTarget::User {
+                    learn: true,
+                    interest_seed_metadata: Default::default(),
+                },
+                evidence: CandidateSubmissionEvidence {
+                    source_url: "https://seed-private-needle.example/reference".into(),
+                    source_metadata: CandidateSourceMetadata {
+                        title: None,
+                        author: None,
+                        published_at: None,
+                    },
+                    permitted_excerpt: None,
+                    summary: None,
+                    content_type: CandidateContentType::Article,
+                    media_references: Vec::new(),
+                    tags: vec!["seed-private-topic-needle".into()],
+                    provenance: CandidateProvenance {
+                        discovered_at: chrono::Utc::now(),
+                        discovery_method: "user_submission".into(),
+                        referrer_url: None,
+                    },
+                    harness_idempotency_key: "private-seed-harness".into(),
+                    client_idempotency_key: "private-seed-client".into(),
+                },
+            },
+        )
+        .unwrap();
 
     let federation = tools.default_auth_context().unwrap();
     let mut paths = vec![
@@ -557,11 +599,19 @@ async fn unauthenticated_public_http_responses_never_expose_taste_profile_data()
         assert!(!body.contains("http-private-needle"), "{path}: {body}");
         assert!(!body.contains("taste_profile"), "{path}: {body}");
         assert!(!body.contains("evidence_summary"), "{path}: {body}");
+        assert!(!body.contains("seed-private-needle"), "{path}: {body}");
+        assert!(!body.contains("interest_seed"), "{path}: {body}");
+        assert!(!body.contains("source_affinit"), "{path}: {body}");
     }
+    let retraction_path = format!(
+        "/taste-profile/interest-seeds/{}/retract",
+        private_candidate.candidate.id
+    );
     for (method, path) in [
         ("GET", "/taste-profile"),
         ("PATCH", "/taste-profile"),
         ("POST", "/taste-profile/learned/reset"),
+        ("POST", retraction_path.as_str()),
         ("GET", "/home/discover-public-pods?topics=design"),
         ("GET", "/hub/search-pods?q=design"),
     ] {

@@ -1773,6 +1773,7 @@ pub enum HarnessWriteOperation {
     BlockTopic,
     UpdatePreferences,
     ResetLearnedTaste,
+    RetractInterestSeed,
     CreateDiscoveryTask,
     ClaimDiscoveryTask,
     RenewDiscoveryTaskLease,
@@ -2930,7 +2931,7 @@ pub struct Candidate {
     pub id: CandidateId,
     /// Optional hosted tenant boundary.
     pub tenant_id: Option<TenantId>,
-    /// Source URL exactly as first submitted.
+    /// Target-neutral canonical source URL; exact URLs remain in scoped evidence.
     pub source_url: String,
     /// Stumble-normalized identity used for deduplication.
     pub canonical_url: String,
@@ -2950,6 +2951,16 @@ pub struct CandidateSourceMetadata {
     pub author: Option<String>,
     /// Known source publication time, when supplied.
     pub published_at: Option<DateTime<Utc>>,
+}
+
+/// Optional permitted source-neighborhood facts for Interest Seed enrichment.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct CandidateInterestSeedMetadata {
+    /// Publisher distinct from the source author or account.
+    pub publisher: Option<String>,
+    /// Community in which the reference appeared.
+    pub community: Option<String>,
 }
 
 /// Inspectable evidence describing how an Agent Harness found a Candidate.
@@ -3007,10 +3018,6 @@ pub struct CandidateSubmissionEvidence {
     pub tags: Vec<String>,
     /// Evidence describing how the harness found the source.
     pub provenance: CandidateProvenance,
-    /// One or more separately evidenced authorized local Pods.
-    pub proposed_placements: Vec<ProposedCandidatePlacement>,
-    /// Claimed task and Package version for task-driven discovery.
-    pub task_context: Option<CandidateTaskContext>,
     /// Retry-safe key assigned by the executing harness workflow.
     pub harness_idempotency_key: String,
     /// Retry-safe key assigned by the harness's calling client.
@@ -3019,10 +3026,51 @@ pub struct CandidateSubmissionEvidence {
 
 /// Strict structured input through which an Agent Harness proposes a Candidate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct CandidateSubmissionRequest {
-    /// Validated evidence serialized directly as the request object.
+    /// Explicit operation target, authorized by core against the caller.
+    pub target: CandidateSubmissionRequestTarget,
+    /// Validated evidence serialized alongside the target.
+    #[serde(flatten)]
     pub evidence: CandidateSubmissionEvidence,
+}
+
+/// Caller-selected Candidate Submission operation target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CandidateSubmissionRequestTarget {
+    /// A direct User action with its private-learning controls.
+    User {
+        #[serde(default = "default_candidate_learning")]
+        learn: bool,
+        #[serde(default)]
+        interest_seed_metadata: CandidateInterestSeedMetadata,
+    },
+    /// Evidence proposing one or more authorized Pod placements.
+    PodPlacements {
+        /// Separately evidenced authorized local Pods; validated as non-empty.
+        placements: Vec<ProposedCandidatePlacement>,
+        task_context: Option<CandidateTaskContext>,
+    },
+}
+
+impl CandidateSubmissionRequestTarget {
+    #[must_use]
+    pub fn placements(&self) -> &[ProposedCandidatePlacement] {
+        match self {
+            Self::User { .. } => &[],
+            Self::PodPlacements { placements, .. } => placements,
+        }
+    }
+
+    #[must_use]
+    pub const fn task_context(&self) -> Option<CandidateTaskContext> {
+        match self {
+            Self::User { .. } => None,
+            Self::PodPlacements { task_context, .. } => *task_context,
+        }
+    }
 }
 
 /// Immutable private evidence retained for one Candidate Submission.
@@ -3036,11 +3084,89 @@ pub struct CandidateSubmission {
     pub tenant_id: Option<TenantId>,
     /// Authenticated harness responsible for the submission.
     pub submitted_by: AgentHarnessId,
+    /// Core-authorized target for this evidence record.
+    pub target: CandidateSubmissionTarget,
     /// Complete immutable evidence, flattened for wire compatibility.
     #[serde(flatten)]
     pub evidence: CandidateSubmissionEvidence,
     /// Time at which Stumble committed this evidence.
     pub created_at: DateTime<Utc>,
+}
+
+/// Scope governing Candidate Submission authorization and visibility.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CandidateSubmissionTarget {
+    /// Evidence proposed to one or more Pods owned by this target.
+    PodPlacements {
+        placements: Vec<ProposedCandidatePlacement>,
+        task_context: Option<CandidateTaskContext>,
+    },
+    /// Private reference submitted directly by this User.
+    User {
+        user_id: UserId,
+        learn: bool,
+        interest_seed_metadata: CandidateInterestSeedMetadata,
+    },
+}
+
+impl CandidateSubmissionTarget {
+    #[must_use]
+    pub fn placements(&self) -> &[ProposedCandidatePlacement] {
+        match self {
+            Self::User { .. } => &[],
+            Self::PodPlacements { placements, .. } => placements,
+        }
+    }
+
+    #[must_use]
+    pub const fn acquisition_origin(&self) -> CandidateAcquisitionOrigin {
+        match self {
+            Self::User { .. } => CandidateAcquisitionOrigin::InteractiveUser,
+            Self::PodPlacements { .. } => CandidateAcquisitionOrigin::AgentDiscovery,
+        }
+    }
+
+    #[must_use]
+    pub const fn learning_enabled(&self) -> bool {
+        matches!(self, Self::User { learn: true, .. })
+    }
+
+    #[must_use]
+    pub const fn task_context(&self) -> Option<CandidateTaskContext> {
+        match self {
+            Self::User { .. } => None,
+            Self::PodPlacements { task_context, .. } => *task_context,
+        }
+    }
+
+    #[must_use]
+    pub fn interest_seed_metadata(&self) -> Option<&CandidateInterestSeedMetadata> {
+        match self {
+            Self::User {
+                interest_seed_metadata,
+                ..
+            } => Some(interest_seed_metadata),
+            Self::PodPlacements { .. } => None,
+        }
+    }
+}
+
+const fn default_candidate_learning() -> bool {
+    true
+}
+
+/// Trusted origin of a Candidate Submission, never accepted from caller metadata.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CandidateAcquisitionOrigin {
+    /// Conservative migration/default for autonomous or historical submissions.
+    #[default]
+    AgentDiscovery,
+    /// Explicit, core-authorized direct User submission operation.
+    InteractiveUser,
 }
 
 /// Operation the authenticated harness may perform after receiving Candidate data.
@@ -3144,6 +3270,8 @@ pub struct UserPreferences {
     pub interests: Vec<String>,
     pub blocked_topics: Vec<String>,
     pub blocked_sources: Vec<String>,
+    #[serde(default)]
+    pub blocked_source_affinities: Vec<SourceAffinitySignal>,
     pub preferred_brief_length: usize,
     pub preferred_discovery_mode: DiscoveryMode,
     #[serde(default = "default_recurrence_penalty_days")]
@@ -3160,6 +3288,9 @@ pub struct ExplicitTastePreferences {
     pub blocked_topics: Vec<String>,
     /// Sources the User explicitly excludes.
     pub blocked_sources: Vec<String>,
+    /// Typed publisher, author/account, community, referrer, or source exclusions.
+    #[serde(default)]
+    pub blocked_source_affinities: Vec<SourceAffinitySignal>,
     /// Default recurrence suppression window for Feed Batches.
     pub recurrence_penalty_days: u32,
 }
@@ -3176,6 +3307,51 @@ pub struct TasteProfile {
     pub explicit: ExplicitTastePreferences,
     /// Inspectable locally learned weights.
     pub learned: Vec<LearnedTasteWeight>,
+    /// Aggregate Interest Seed state without raw URL history.
+    pub interest_seed_evidence: InterestSeedEvidenceSummary,
+    /// Aggregate topic and source-neighborhood evidence.
+    pub source_affinities: Vec<SourceAffinity>,
+    /// Permission- and state-derived profile operations for this caller.
+    pub allowed_actions: Vec<TasteProfileAllowedAction>,
+}
+
+/// Operation currently available through an inspected Taste Profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TasteProfileAllowedAction {
+    Set,
+    Reset,
+    Retract,
+}
+
+/// Aggregate lifecycle counts for private Interest Seeds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterestSeedEvidenceSummary {
+    pub active_seed_count: u32,
+    pub retracted_seed_count: u32,
+}
+
+/// Inspectable aggregate affinity learned from User evidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceAffinity {
+    pub signal: SourceAffinitySignal,
+    pub weight: f32,
+    pub supporting_seeds: u32,
+    pub supporting_feedback: u32,
+    pub opposing_feedback: u32,
+    pub explicitly_blocked: bool,
+}
+
+/// Typed source-neighborhood signal, distinct from topic learning.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SourceAffinitySignal {
+    Source(String),
+    Publisher(String),
+    AuthorOrAccount(String),
+    Community(String),
+    ReferrerContext(String),
 }
 
 /// One explainable learned preference. Evidence is aggregated to avoid exposing raw history.
@@ -3203,6 +3379,33 @@ pub enum LearnedTasteSignal {
     Topic(String),
     /// Normalized source domain.
     Source(String),
+    /// Normalized source domain from an Interest Seed.
+    /// Normalized publisher.
+    Publisher(String),
+    /// Normalized author or account.
+    AuthorOrAccount(String),
+    /// Normalized community.
+    Community(String),
+    /// Normalized referring source context.
+    ReferrerContext(String),
+}
+
+/// Retractable private evidence derived from one canonical User submission.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct InterestSeed {
+    pub user_id: UserId,
+    pub tenant_id: Option<TenantId>,
+    pub candidate_id: CandidateId,
+    pub evidence: Vec<InterestSeedSignalEvidence>,
+    pub created_at: DateTime<Utc>,
+    pub retracted_at: Option<DateTime<Utc>>,
+}
+
+/// One enriched Interest Seed signal with its establishing provenance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct InterestSeedSignalEvidence {
+    pub signal: LearnedTasteSignal,
+    pub provenance: CandidateProvenance,
 }
 
 /// Aggregate evidence kind and count, without Content Item or history identifiers.
@@ -3220,6 +3423,8 @@ pub struct LearnedTasteEvidenceSummary {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum LearnedTasteEvidenceKind {
+    /// Explicitly learning-enabled User link submission.
+    UserSubmission,
     /// Save action.
     Save,
     /// More like this action.
@@ -3260,6 +3465,8 @@ pub struct UpdateTasteProfileRequest {
     pub blocked_topics: Option<Vec<String>>,
     /// Replacement explicit source blocks when supplied.
     pub blocked_sources: Option<Vec<String>>,
+    /// Replacement typed source-neighborhood blocks when supplied.
+    pub blocked_source_affinities: Option<Vec<SourceAffinitySignal>>,
     /// Replacement default Feed recurrence window when supplied.
     pub recurrence_penalty_days: Option<RecurrencePenaltyDays>,
 }

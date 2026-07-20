@@ -82,6 +82,7 @@ pub struct InMemoryStore {
     pub discovery_tasks: HashMap<DiscoveryTaskId, DiscoveryTask>,
     pub candidates: HashMap<CandidateId, Candidate>,
     pub candidate_submissions: HashMap<CandidateSubmissionId, CandidateSubmission>,
+    pub(crate) interest_seeds: HashMap<(UserId, CandidateId), InterestSeed>,
     pub pod_curation_policies: HashMap<PodId, CurationPolicy>,
     pub pod_placements: HashMap<(CandidateId, PodId), PodPlacement>,
     pub accepted_placement_projections:
@@ -138,6 +139,8 @@ struct PersistedStore {
     candidates: Vec<Candidate>,
     #[serde(default)]
     candidate_submissions: Vec<CandidateSubmission>,
+    #[serde(default)]
+    interest_seeds: Vec<InterestSeed>,
     #[serde(default)]
     pod_curation_policies: Vec<PersistedPodCurationPolicy>,
     #[serde(default)]
@@ -344,6 +347,7 @@ impl From<&InMemoryStore> for PersistedStore {
             discovery_tasks: store.discovery_tasks.values().cloned().collect(),
             candidates: store.candidates.values().cloned().collect(),
             candidate_submissions: store.candidate_submissions.values().cloned().collect(),
+            interest_seeds: store.interest_seeds.values().cloned().collect(),
             pod_curation_policies: store
                 .pod_curation_policies
                 .iter()
@@ -495,6 +499,11 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .candidate_submissions
                 .into_iter()
                 .map(|submission| (submission.id, submission))
+                .collect(),
+            interest_seeds: snapshot
+                .interest_seeds
+                .into_iter()
+                .map(|seed| ((seed.user_id, seed.candidate_id), seed))
                 .collect(),
             pod_curation_policies: snapshot
                 .pod_curation_policies
@@ -665,7 +674,24 @@ pub fn save_store_snapshot(
 
 pub fn load_store_snapshot(path: &Path) -> Result<InMemoryStore, StorePersistenceError> {
     let bytes = std::fs::read(path)?;
-    let snapshot: PersistedStore = serde_json::from_slice(&bytes)?;
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if let Some(candidates) = value
+        .get_mut("candidates")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for candidate in candidates {
+            migrate_candidate_value(candidate)?;
+        }
+    }
+    if let Some(submissions) = value
+        .get_mut("candidate_submissions")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for submission in submissions {
+            migrate_candidate_submission_value(submission)?;
+        }
+    }
+    let snapshot: PersistedStore = serde_json::from_value(value)?;
     if snapshot.version != 1 {
         return Err(StorePersistenceError::UnsupportedVersion(snapshot.version));
     }
@@ -698,6 +724,7 @@ const STORE_COLLECTIONS: &[&str] = &[
     "discovery_tasks",
     "candidates",
     "candidate_submissions",
+    "interest_seeds",
     "pod_curation_policies",
     "pod_placements",
     "accepted_placement_projections",
@@ -910,6 +937,8 @@ fn load_sqlite_store_from_connection(
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let mut legacy_discovery_task_rows = Vec::new();
+    let mut legacy_candidate_rows = Vec::new();
+    let mut legacy_candidate_submission_rows = Vec::new();
     let mut collections = serde_json::Map::new();
     for collection in STORE_COLLECTIONS {
         collections.insert(
@@ -932,9 +961,16 @@ fn load_sqlite_store_from_connection(
     })?;
     for record in records {
         let (collection, record_key, value_json) = record?;
-        let value: serde_json::Value = serde_json::from_str(&value_json)?;
+        let mut value: serde_json::Value = serde_json::from_str(&value_json)?;
         if collection == "discovery_tasks" && value.get("target").is_none() {
-            legacy_discovery_task_rows.push(record_key);
+            legacy_discovery_task_rows.push(record_key.clone());
+        }
+        if collection == "candidates" && migrate_candidate_value(&mut value)? {
+            legacy_candidate_rows.push(record_key.clone());
+        }
+        if collection == "candidate_submissions" && migrate_candidate_submission_value(&mut value)?
+        {
+            legacy_candidate_submission_rows.push(record_key);
         }
         if let Some(serde_json::Value::Array(values)) = collections.get_mut(&collection) {
             values.push(value);
@@ -950,11 +986,93 @@ fn load_sqlite_store_from_connection(
     if !legacy_discovery_task_rows.is_empty() {
         persist_migrated_discovery_tasks(&transaction, &store, &legacy_discovery_task_rows)?;
     }
+    persist_migrated_records(&transaction, &store, "candidates", &legacy_candidate_rows)?;
+    persist_migrated_records(
+        &transaction,
+        &store,
+        "candidate_submissions",
+        &legacy_candidate_submission_rows,
+    )?;
     transaction.commit()?;
     if had_legacy_pod_memberships {
         persist_migrated_pod_relationships(connection, &store)?;
     }
     Ok(store)
+}
+
+fn migrate_candidate_value(value: &mut serde_json::Value) -> Result<bool, StorePersistenceError> {
+    let record = value.as_object_mut().ok_or_else(|| {
+        StorePersistenceError::Json(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Candidate row must be an object",
+        )))
+    })?;
+    let Some(canonical_url) = record
+        .get("canonical_url")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+    else {
+        return Ok(false);
+    };
+    if record.get("source_url").and_then(serde_json::Value::as_str) == Some(canonical_url.as_str())
+    {
+        return Ok(false);
+    }
+    record.insert(
+        "source_url".into(),
+        serde_json::Value::String(canonical_url),
+    );
+    Ok(true)
+}
+
+fn migrate_candidate_submission_value(
+    value: &mut serde_json::Value,
+) -> Result<bool, StorePersistenceError> {
+    if value.get("target").is_some() {
+        return Ok(false);
+    }
+    let record = value.as_object_mut().ok_or_else(|| {
+        StorePersistenceError::Json(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Candidate Submission row must be an object",
+        )))
+    })?;
+    let placements = record
+        .remove("proposed_placements")
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    let task_context = record
+        .remove("task_context")
+        .unwrap_or(serde_json::Value::Null);
+    record.insert(
+        "target".into(),
+        serde_json::json!({"kind": "pod_placements", "placements": placements, "task_context": task_context}),
+    );
+    Ok(true)
+}
+
+fn persist_migrated_records(
+    transaction: &rusqlite::Transaction<'_>,
+    store: &InMemoryStore,
+    collection: &str,
+    legacy_record_keys: &[String],
+) -> Result<(), StorePersistenceError> {
+    if legacy_record_keys.is_empty() {
+        return Ok(());
+    }
+    let records = store_records(store)?;
+    for record_key in legacy_record_keys {
+        let collection_and_key = (collection.to_string(), record_key.clone());
+        let value_json = records
+            .get(&collection_and_key)
+            .expect("loaded migrated value has a canonical store record");
+        let updated = transaction.execute(
+            "UPDATE stumble_store_records SET value_json = ?1
+             WHERE collection = ?2 AND record_key = ?3",
+            rusqlite::params![value_json, collection, record_key],
+        )?;
+        debug_assert_eq!(updated, 1, "loaded migrated row still exists");
+    }
+    Ok(())
 }
 
 fn persist_migrated_discovery_tasks(
@@ -1034,6 +1152,7 @@ fn record_key(
         "pod_roles" | "pod_memberships" => &["user_id", "pod_id"],
         "submission_pods" => &["submission_id", "pod_id"],
         "user_preferences" => &["user_id", "tenant_id"],
+        "interest_seeds" => &["user_id", "candidate_id"],
         "trust_policies" => &["user_id", "tenant_id"],
         "saves" | "private_notes" | "reading_history" => &["user_id", "submission_id"],
         "hub_pods" => &["node_id", "pod_slug"],

@@ -35,6 +35,7 @@ async fn first_release_catalogs_do_not_advertise_retired_or_placeholder_operatio
     }
     for canonical in [
         "/candidates",
+        "/taste-profile/interest-seeds/:candidate_id/retract",
         "/discovery-tasks/:id/claim",
         "/pods/:slug/package/export",
         "/federation/pods/:slug/events",
@@ -52,6 +53,7 @@ async fn first_release_catalogs_do_not_advertise_retired_or_placeholder_operatio
     ] {
         assert!(!McpToolRouter::tool_names().contains(&retired));
     }
+    assert!(McpToolRouter::tool_names().contains(&"retract_interest_seed"));
 
     let cli_help = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .arg("--help")

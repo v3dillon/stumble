@@ -127,6 +127,12 @@ impl McpToolRouter {
                 let request = serde_json::from_value(call.arguments)?;
                 Ok(json!(self.tools.reset_learned_taste(&self.ctx, request)?))
             }
+            RetractInterestSeed => {
+                let candidate_id = arg_string(&call.arguments, "candidate_id")?.parse()?;
+                Ok(json!(self
+                    .tools
+                    .retract_interest_seed(&self.ctx, candidate_id)?))
+            }
             RegisterAgentHarness => {
                 let request = serde_json::from_value(call.arguments)?;
                 Ok(json!(self

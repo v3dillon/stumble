@@ -86,6 +86,14 @@ fn accept_item(tools: &AgentTools, pod: &Pod, suffix: &str) -> ContentItemId {
         .submit_candidate(
             &submitter,
             CandidateSubmissionRequest {
+                target: CandidateSubmissionRequestTarget::PodPlacements {
+                    placements: vec![ProposedCandidatePlacement {
+                        pod_id: pod.id,
+                        reason: "Directly concerns distributed systems".into(),
+                        confidence: CandidateConfidence::new(0.95).unwrap(),
+                    }],
+                    task_context: None,
+                },
                 evidence: CandidateSubmissionEvidence {
                     source_url: format!("https://reference.example/{suffix}"),
                     source_metadata: CandidateSourceMetadata {
@@ -103,12 +111,6 @@ fn accept_item(tools: &AgentTools, pod: &Pod, suffix: &str) -> ContentItemId {
                         discovery_method: "browser_search".into(),
                         referrer_url: Some("https://search.example/results".into()),
                     },
-                    proposed_placements: vec![ProposedCandidatePlacement {
-                        pod_id: pod.id,
-                        reason: "Directly concerns distributed systems".into(),
-                        confidence: CandidateConfidence::new(0.95).unwrap(),
-                    }],
-                    task_context: None,
                     harness_idempotency_key: format!("origin-worker-{suffix}"),
                     client_idempotency_key: format!("origin-client-{suffix}"),
                 },

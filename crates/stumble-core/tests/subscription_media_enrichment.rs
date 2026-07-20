@@ -10,6 +10,14 @@ fn enrichment_request(
     media_references: Vec<MediaReference>,
 ) -> CandidateSubmissionRequest {
     CandidateSubmissionRequest {
+        target: CandidateSubmissionRequestTarget::PodPlacements {
+            placements: vec![ProposedCandidatePlacement {
+                pod_id,
+                reason: "Corroborates the accepted reference".into(),
+                confidence: CandidateConfidence::new(0.8).unwrap(),
+            }],
+            task_context: None,
+        },
         evidence: CandidateSubmissionEvidence {
             source_url: "https://reference.example/remote-report".into(),
             source_metadata: CandidateSourceMetadata {
@@ -27,12 +35,6 @@ fn enrichment_request(
                 discovery_method: "later_browser_evidence".into(),
                 referrer_url: None,
             },
-            proposed_placements: vec![ProposedCandidatePlacement {
-                pod_id,
-                reason: "Corroborates the accepted reference".into(),
-                confidence: CandidateConfidence::new(0.8).unwrap(),
-            }],
-            task_context: None,
             harness_idempotency_key: format!("{key}-worker"),
             client_idempotency_key: format!("{key}-client"),
         },
@@ -213,6 +215,14 @@ fn later_canonical_evidence_enriches_accepted_content_and_synchronizes_after_res
         vec![HarnessCapability::CandidateSubmission],
     );
     let mut later = CandidateSubmissionRequest {
+        target: CandidateSubmissionRequestTarget::PodPlacements {
+            placements: vec![ProposedCandidatePlacement {
+                pod_id: pod.id,
+                reason: "Corroborates the accepted reference".into(),
+                confidence: CandidateConfidence::new(0.8).unwrap(),
+            }],
+            task_context: None,
+        },
         evidence: CandidateSubmissionEvidence {
             source_url: "HTTPS://REFERENCE.EXAMPLE:443/remote-report#later".into(),
             source_metadata: CandidateSourceMetadata {
@@ -239,12 +249,6 @@ fn later_canonical_evidence_enriches_accepted_content_and_synchronizes_after_res
                 discovery_method: "later_browser_evidence".into(),
                 referrer_url: None,
             },
-            proposed_placements: vec![ProposedCandidatePlacement {
-                pod_id: pod.id,
-                reason: "Corroborates the accepted reference".into(),
-                confidence: CandidateConfidence::new(0.8).unwrap(),
-            }],
-            task_context: None,
             harness_idempotency_key: "later-media-worker".into(),
             client_idempotency_key: "later-media-client".into(),
         },

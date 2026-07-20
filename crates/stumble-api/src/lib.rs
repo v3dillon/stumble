@@ -179,6 +179,10 @@ pub fn router_with_options(
             get(get_taste_profile).patch(update_taste_profile),
         )
         .route("/taste-profile/learned/reset", post(reset_learned_taste))
+        .route(
+            "/taste-profile/interest-seeds/:candidate_id/retract",
+            post(retract_interest_seed),
+        )
         .route("/links/:id/assets", get(retired_submission_contract))
         .route("/links/:id/save", post(retired_feedback_contract))
         .route("/links/:id/rate", post(retired_feedback_contract))
@@ -300,6 +304,11 @@ fn route_docs() -> Vec<ApiRouteDoc> {
             method: "POST",
             path: "/taste-profile/learned/reset",
             description: "reset one or all private learned Taste Profile weights",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/taste-profile/interest-seeds/:candidate_id/retract",
+            description: "retract one private Interest Seed without deleting its reference",
         },
         ApiRouteDoc {
             method: "POST",
@@ -871,6 +880,15 @@ async fn reset_learned_taste(
 ) -> Result<Json<TasteProfile>, ApiError> {
     let ctx = auth_or_default(&state, &headers)?;
     Ok(Json(state.tools.reset_learned_taste(&ctx, request)?))
+}
+
+async fn retract_interest_seed(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(candidate_id): Path<CandidateId>,
+) -> Result<Json<TasteProfile>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.retract_interest_seed(&ctx, candidate_id)?))
 }
 
 async fn update_preferences(

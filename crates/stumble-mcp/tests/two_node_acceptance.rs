@@ -164,7 +164,7 @@ impl TwoNodeScenario {
         let curator = self.origin.harness(
             "Origin public Pod curator",
             vec![HarnessCapability::PodCuration],
-            Some(vec![pods.public]),
+            Some(vec![pods.inbox, pods.public]),
         );
         let reader = self.origin.harness(
             "Origin accepted content reader",
@@ -252,14 +252,17 @@ impl TwoNodeScenario {
                             "discovered_at": "2026-07-18T16:00:00Z",
                             "discovery_method": "agent_harness_browser"
                         },
-                        "proposed_placements": [{
-                            "pod_id": pods.inbox,
-                            "reason": "Keep discovery intake private before explicit routing.",
-                            "confidence": 0.95
-                        }],
-                        "task_context": {
-                            "task_id": task_id,
-                            "package_version": package_version
+                        "target": {
+                            "kind": "pod_placements",
+                            "placements": [{
+                                "pod_id": pods.inbox,
+                                "reason": "Keep discovery intake private before explicit routing.",
+                                "confidence": 0.95
+                            }],
+                            "task_context": {
+                                "task_id": task_id,
+                                "package_version": package_version
+                            }
                         },
                         "harness_idempotency_key": format!("two-node-harness-{index}"),
                         "client_idempotency_key": format!("two-node-client-{index}")
