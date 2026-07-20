@@ -1,7 +1,13 @@
 mod network_leads;
 mod result_batches;
+mod review;
 
 pub(crate) use result_batches::build_discovery_result_batch;
+pub(crate) use review::{
+    clear_discovery_result_learning, discovery_result_allowed_actions, ensure_private_inbox,
+    record_discovery_result_learning, set_discovery_result_learning_link,
+    DiscoveryResultLearningInput,
+};
 
 use crate::agent_tools::AgentToolsError;
 use crate::domain::*;

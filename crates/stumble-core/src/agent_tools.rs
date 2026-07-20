@@ -8,7 +8,10 @@ use crate::interest_seeds::{
     reset_interest_seed_evidence, source_affinity_is_blocked, taste_profile_projections,
 };
 use crate::personal_discovery::{
-    build_discovery_result_batch, build_plan, prepare_request, readiness, retry,
+    build_discovery_result_batch, build_plan, clear_discovery_result_learning,
+    discovery_result_allowed_actions, ensure_private_inbox, prepare_request, readiness,
+    record_discovery_result_learning, retry, set_discovery_result_learning_link,
+    DiscoveryResultLearningInput,
 };
 use crate::ranking::{rank_discovery, RankingInput};
 use crate::signing::{
@@ -2880,6 +2883,256 @@ impl AgentTools {
         );
         self.persist_locked(&mut store)?;
         Ok(result)
+    }
+
+    /// Reviews one private Discovery Result Batch item with a deliberate User action.
+    ///
+    /// Save places into the private Inbox; Add to Pod uses existing curation boundaries;
+    /// More like this / Not for me write replaceable private learning evidence; Ignore
+    /// records item review state without learning. Whole-batch dismiss and notification
+    /// paths remain separate and create no item evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when management authority is missing, the batch/item is missing
+    /// or dismissed, Add to Pod authorization fails, or persistence fails.
+    pub fn review_discovery_result_item(
+        &self,
+        ctx: &AuthContext,
+        request: ReviewDiscoveryResultItemRequest,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<DiscoveryResultItemReviewOutcome, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_management(&store, ctx)?;
+        authorize_interactive_user_action(
+            &store,
+            ctx,
+            "Discovery Result review requires an interactive User action",
+        )?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Personal Discovery requires an authenticated User".into())
+        })?;
+
+        let batch = store
+            .discovery_result_batches
+            .get(&request.batch_id)
+            .filter(|batch| batch.user_id == user_id && batch.tenant_id == ctx.tenant_id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("Discovery Result Batch".into()))?;
+        if batch.state == DiscoveryResultBatchState::Dismissed {
+            return Err(StoreError::Validation(
+                "dismissed Discovery Result Batch cannot receive item review".into(),
+            )
+            .into());
+        }
+        let item_index = batch
+            .items
+            .iter()
+            .position(|item| item.candidate_id == request.candidate_id)
+            .ok_or_else(|| StoreError::NotFound("Discovery Result Item".into()))?;
+        let current_item = batch.items[item_index].clone();
+        let requested_action = request.action.action();
+
+        // Idempotent repeat of the same action: return current state without inflating evidence.
+        if let DiscoveryResultItemReview::Reviewed {
+            action,
+            placement_pod_id,
+            content_item_id,
+            ..
+        } = &current_item.review
+        {
+            if *action == requested_action {
+                let placement = match (placement_pod_id, content_item_id) {
+                    (Some(pod_id), _) => store
+                        .pod_placements
+                        .values()
+                        .find(|placement| {
+                            placement.pod_id == *pod_id
+                                && placement.candidate_id == current_item.candidate_id
+                                && placement.status == PodPlacementStatus::Accepted
+                        })
+                        .cloned(),
+                    _ => None,
+                };
+                let allowed_actions = discovery_result_allowed_actions(&store, ctx);
+                let taste_profile = taste_profile_from_store(&store, ctx, user_id)?;
+                return Ok(DiscoveryResultItemReviewOutcome {
+                    batch,
+                    item: current_item,
+                    placement,
+                    action_replaced: false,
+                    allowed_actions,
+                    taste_profile,
+                });
+            }
+        }
+
+        let candidate = store
+            .candidates
+            .get(&current_item.candidate_id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("Candidate".into()))?;
+        let submission = store
+            .candidate_submissions
+            .get(&current_item.submission_id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("Candidate Submission".into()))?;
+
+        let mut staged = store.clone();
+        let previous_action = match current_item.review {
+            DiscoveryResultItemReview::Reviewed { action, .. } => Some(action),
+            DiscoveryResultItemReview::Unreviewed => None,
+        };
+        let action_replaced = previous_action.is_some_and(|action| action != requested_action);
+        if action_replaced {
+            clear_discovery_result_learning(&mut staged, request.batch_id, request.candidate_id);
+        }
+
+        let mut placement = None;
+        let mut placement_pod_id = None;
+        let mut content_item_id = None;
+        let mut evidence_ids = Vec::new();
+
+        match &request.action {
+            DiscoveryResultItemActionRequest::Save => {
+                let inbox = ensure_private_inbox(&mut staged, ctx, user_id, now)
+                    .map_err(StoreError::Validation)?;
+                let accepted = accept_discovery_result_into_pod(
+                    &mut staged,
+                    ctx,
+                    &candidate,
+                    &submission,
+                    inbox.id,
+                    CurationRationale::new("Saved from Personal Discovery")?,
+                    now,
+                )?;
+                placement_pod_id = Some(inbox.id);
+                content_item_id = accepted.content_item_id;
+                placement = Some(accepted);
+                // Save is durable placement; learning comes only from explicit reinforce/reject.
+            }
+            DiscoveryResultItemActionRequest::AddToPod {
+                pod_id,
+                curation_note,
+            } => {
+                authorize_local_pod_curation(&staged, ctx, *pod_id)?;
+                let note = match curation_note {
+                    Some(note) => note.clone(),
+                    None => CurationRationale::new("Added from Personal Discovery")?,
+                };
+                let accepted = accept_discovery_result_into_pod(
+                    &mut staged,
+                    ctx,
+                    &candidate,
+                    &submission,
+                    *pod_id,
+                    note,
+                    now,
+                )?;
+                if let Some(item) = accepted
+                    .content_item_id
+                    .and_then(|id| staged.submissions.get(&Uuid::from(id)).cloned())
+                {
+                    record_add_to_pod_learning(&mut staged, ctx, &item, now);
+                }
+                placement_pod_id = Some(*pod_id);
+                content_item_id = accepted.content_item_id;
+                placement = Some(accepted);
+            }
+            DiscoveryResultItemActionRequest::MoreLikeThis => {
+                evidence_ids = record_discovery_result_learning(
+                    &mut staged,
+                    DiscoveryResultLearningInput {
+                        user_id,
+                        tenant_id: ctx.tenant_id,
+                        candidate: &candidate,
+                        submission: &submission,
+                        kind: LearnedTasteEvidenceKind::MoreLikeThis,
+                        direction: TasteEvidenceDirection::Supporting,
+                        now,
+                    },
+                );
+            }
+            DiscoveryResultItemActionRequest::NotForMe => {
+                evidence_ids = record_discovery_result_learning(
+                    &mut staged,
+                    DiscoveryResultLearningInput {
+                        user_id,
+                        tenant_id: ctx.tenant_id,
+                        candidate: &candidate,
+                        submission: &submission,
+                        kind: LearnedTasteEvidenceKind::LessLikeThis,
+                        direction: TasteEvidenceDirection::Opposing,
+                        now,
+                    },
+                );
+            }
+            DiscoveryResultItemActionRequest::Ignore => {
+                // Item review only — no learning evidence.
+            }
+        }
+
+        set_discovery_result_learning_link(
+            &mut staged,
+            request.batch_id,
+            request.candidate_id,
+            evidence_ids,
+        );
+
+        // Durable placements from Save / Add to Pod remain inspectable after a later
+        // learning-only action replaces the review action.
+        let (final_placement_pod_id, final_content_item_id) = match &current_item.review {
+            DiscoveryResultItemReview::Reviewed {
+                placement_pod_id: existing_pod,
+                content_item_id: existing_item,
+                ..
+            } => (
+                placement_pod_id.or(*existing_pod),
+                content_item_id.or(*existing_item),
+            ),
+            DiscoveryResultItemReview::Unreviewed => (placement_pod_id, content_item_id),
+        };
+
+        let batch = staged
+            .discovery_result_batches
+            .get_mut(&request.batch_id)
+            .expect("BUG: batch exists after lookup");
+        let item = batch
+            .items
+            .get_mut(item_index)
+            .expect("BUG: item index valid");
+        item.review = DiscoveryResultItemReview::Reviewed {
+            action: requested_action,
+            reviewed_at: now,
+            replaced_action: previous_action.filter(|action| *action != requested_action),
+            placement_pod_id: final_placement_pod_id,
+            content_item_id: final_content_item_id,
+        };
+
+        let item = item.clone();
+        let batch = batch.clone();
+        let allowed_actions = discovery_result_allowed_actions(&staged, ctx);
+        let taste_profile = taste_profile_from_store(&staged, ctx, user_id)?;
+        record_harness_write_at(
+            &mut staged,
+            ctx,
+            HarnessWriteOperation::ReviewDiscoveryResultItem,
+            placement_pod_id,
+            now,
+        );
+        self.persist_locked(&mut staged)?;
+        *store = staged;
+        Ok(DiscoveryResultItemReviewOutcome {
+            batch,
+            item,
+            placement,
+            action_replaced,
+            allowed_actions,
+            taste_profile,
+        })
     }
 
     /// Reads a plan for its interactive owner or the worker holding its task lease.
@@ -9591,6 +9844,102 @@ fn trusted_placement_confidence(
         .filter(|placement| placement.pod_id == pod_id)
         .map(|placement| placement.confidence)
         .max_by(|left, right| left.value().total_cmp(&right.value()))
+}
+
+fn taste_profile_from_store(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    user_id: UserId,
+) -> Result<TasteProfile, AgentToolsError> {
+    let preferences = store.user_preferences.get(&(user_id, ctx.tenant_id));
+    let interest_seed_evidence = interest_seed_evidence(store, user_id, ctx.tenant_id);
+    let projections = taste_profile_projections(store, user_id, ctx.tenant_id, preferences);
+    let mut allowed_actions = vec![
+        TasteProfileAllowedAction::Set,
+        TasteProfileAllowedAction::Reset,
+    ];
+    if interest_seed_evidence.active_seed_count > 0 {
+        allowed_actions.push(TasteProfileAllowedAction::Retract);
+    }
+    Ok(TasteProfile {
+        user_id,
+        tenant_id: ctx.tenant_id,
+        explicit: ExplicitTastePreferences {
+            interests: preferences
+                .map(|preferences| preferences.interests.clone())
+                .unwrap_or_default(),
+            blocked_topics: preferences
+                .map(|preferences| preferences.blocked_topics.clone())
+                .unwrap_or_default(),
+            blocked_sources: preferences
+                .map(|preferences| preferences.blocked_sources.clone())
+                .unwrap_or_default(),
+            blocked_source_affinities: preferences
+                .map(|preferences| preferences.blocked_source_affinities.clone())
+                .unwrap_or_default(),
+            recurrence_penalty_days: preferences
+                .map_or_else(RecurrencePenaltyDays::default, |preferences| {
+                    preferences.recurrence_penalty_days
+                })
+                .get(),
+        },
+        learned: projections.learned,
+        interest_seed_evidence,
+        source_affinities: projections.source_affinities,
+        allowed_actions,
+    })
+}
+
+fn accept_discovery_result_into_pod(
+    store: &mut InMemoryStore,
+    ctx: &AuthContext,
+    candidate: &Candidate,
+    submission: &CandidateSubmission,
+    pod_id: PodId,
+    reason: CurationRationale,
+    now: chrono::DateTime<Utc>,
+) -> Result<PodPlacement, AgentToolsError> {
+    if let Some(existing) = store.pod_placements.get(&(candidate.id, pod_id)).cloned() {
+        if existing.status == PodPlacementStatus::Accepted {
+            return Ok(existing);
+        }
+    }
+    let content_item = ensure_content_item(
+        store,
+        candidate,
+        std::slice::from_ref(submission),
+        &[submission.id],
+        now,
+    )?;
+    let actor = curation_actor(ctx);
+    let placement = PodPlacement {
+        candidate_id: candidate.id,
+        pod_id,
+        content_item_id: Some(content_item.id()),
+        reason,
+        confidence: CandidateConfidence::new(1.0)
+            .map_err(|error| StoreError::Validation(error.to_string()))?,
+        source_submission_ids: vec![submission.id],
+        origin_placements: Vec::new(),
+        origin_withdrawals: Vec::new(),
+        status: PodPlacementStatus::Accepted,
+        curation_path: CurationPath::AddToPod,
+        actor,
+        audit_history: vec![PlacementAuditEntry {
+            status: PodPlacementStatus::Accepted,
+            curation_path: CurationPath::AddToPod,
+            actor,
+            note: None,
+            occurred_at: now,
+        }],
+        created_at: now,
+        updated_at: now,
+    };
+    accept_candidate_placement(store, ctx, candidate, &placement)?;
+    store
+        .pod_placements
+        .insert((candidate.id, pod_id), placement.clone());
+    Ok(placement)
 }
 
 fn ensure_content_item(

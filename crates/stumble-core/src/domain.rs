@@ -1934,6 +1934,7 @@ pub enum HarnessWriteOperation {
     CompleteDiscoveryResultBatch,
     DismissDiscoveryResultBatch,
     MarkDiscoveryResultBatchReviewed,
+    ReviewDiscoveryResultItem,
 }
 
 /// Current lifecycle state with state-specific lease data.
@@ -2179,6 +2180,145 @@ pub struct DiscoveryResultItem {
     pub canonical_url: String,
     /// Allocation role under which the item was selected into the batch.
     pub allocation_role: DiscoveryPlanSourceRole,
+    /// Private per-item review decision; distinct from batch completion and placement.
+    #[serde(default)]
+    pub review: DiscoveryResultItemReview,
+}
+
+/// Deliberate User action recorded against one Discovery Result Batch item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DiscoveryResultItemAction {
+    /// Create an Accepted Placement in the User's private Inbox.
+    Save,
+    /// Create an Accepted Placement in an authorized Pod.
+    AddToPod,
+    /// Explicit supporting learning evidence for eligible topics and Source Affinities.
+    MoreLikeThis,
+    /// Explicit opposing learning evidence; suppresses immediate rediscovery.
+    NotForMe,
+    /// Acknowledge the item without learning or placement.
+    Ignore,
+}
+
+/// Permission-derived actions an interactive harness may offer for a result item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DiscoveryResultAllowedAction {
+    /// Save into the private Inbox.
+    Save,
+    /// Place into an authorized Pod (requires Pod Role + Harness Grant).
+    AddToPod,
+    /// Reinforce eligible topics and Source Affinities.
+    MoreLikeThis,
+    /// Reject the result and record opposing evidence.
+    NotForMe,
+    /// Leave the item without learning.
+    Ignore,
+}
+
+/// Private per-item review state, independent of batch Ready/Reviewed/Dismissed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "state", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DiscoveryResultItemReview {
+    /// No deliberate item action yet.
+    #[default]
+    Unreviewed,
+    /// User recorded one deliberate action (may replace a prior action).
+    Reviewed {
+        /// Current deliberate action.
+        action: DiscoveryResultItemAction,
+        /// When the current action was recorded.
+        reviewed_at: DateTime<Utc>,
+        /// Prior action when the User replaced an earlier decision (inspectable).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaced_action: Option<DiscoveryResultItemAction>,
+        /// Pod that received an Accepted Placement for Save or Add to Pod.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placement_pod_id: Option<PodId>,
+        /// Content Item identity for placement-bearing actions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_item_id: Option<ContentItemId>,
+    },
+}
+
+/// Requested deliberate action for one Discovery Result Batch item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DiscoveryResultItemActionRequest {
+    /// Save into the User's private Inbox.
+    Save,
+    /// Place into the selected authorized Pod.
+    AddToPod {
+        /// Target Pod for explicit curation.
+        pod_id: PodId,
+        /// Optional public Pod-fit note retained on the placement.
+        #[serde(default)]
+        curation_note: Option<CurationRationale>,
+    },
+    /// Create supporting learning evidence.
+    MoreLikeThis,
+    /// Create opposing learning evidence and reject rediscovery.
+    NotForMe,
+    /// Leave the item without learning or placement.
+    Ignore,
+}
+
+impl DiscoveryResultItemActionRequest {
+    /// Maps the request to the durable review action discriminant.
+    #[must_use]
+    pub const fn action(&self) -> DiscoveryResultItemAction {
+        match self {
+            Self::Save => DiscoveryResultItemAction::Save,
+            Self::AddToPod { .. } => DiscoveryResultItemAction::AddToPod,
+            Self::MoreLikeThis => DiscoveryResultItemAction::MoreLikeThis,
+            Self::NotForMe => DiscoveryResultItemAction::NotForMe,
+            Self::Ignore => DiscoveryResultItemAction::Ignore,
+        }
+    }
+}
+
+/// Request to review one item inside a private Discovery Result Batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct ReviewDiscoveryResultItemRequest {
+    /// Batch owning the item.
+    pub batch_id: DiscoveryResultBatchId,
+    /// Candidate identity of the shortlist item.
+    pub candidate_id: CandidateId,
+    /// Deliberate action to apply (idempotent when repeated).
+    pub action: DiscoveryResultItemActionRequest,
+}
+
+/// Outcome of one private Discovery Result item review.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct DiscoveryResultItemReviewOutcome {
+    /// Batch after the atomic review mutation (state may remain Ready).
+    pub batch: DiscoveryResultBatch,
+    /// Item after review mutation.
+    pub item: DiscoveryResultItem,
+    /// Accepted Placement when Save or Add to Pod produced one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<PodPlacement>,
+    /// Whether this call replaced a different prior item action.
+    pub action_replaced: bool,
+    /// Actions currently allowed for this caller on this item.
+    pub allowed_actions: Vec<DiscoveryResultAllowedAction>,
+    /// Updated aggregate Taste Profile evidence after the action.
+    pub taste_profile: TasteProfile,
+}
+
+/// Private linkage from a reviewed result item to replaceable taste evidence rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DiscoveryResultItemLearningLink {
+    pub batch_id: DiscoveryResultBatchId,
+    pub candidate_id: CandidateId,
+    pub evidence_ids: Vec<Uuid>,
 }
 
 /// Inspectable reason a quota could not be filled or was reallocated.

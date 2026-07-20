@@ -94,6 +94,7 @@ pub(crate) enum McpTool {
     GetDiscoveryResultBatch,
     DismissDiscoveryResultBatch,
     MarkDiscoveryResultBatchReviewed,
+    ReviewDiscoveryResultItem,
     GetPodPackage,
     ExportPodPackage,
     ImportPodPackage,
@@ -166,6 +167,7 @@ pub(crate) fn definitions() -> &'static [ToolDefinition] {
         d(Tool::GetDiscoveryResultBatch, "get_discovery_result_batch", PersonalDiscoveryManagement, uuid_schema("batch_id"), Blocking, published(28, "Inspect Discovery Result Batch", "Inspect one private Discovery Result Batch and its Candidate provenance.", true, false)),
         d(Tool::DismissDiscoveryResultBatch, "dismiss_discovery_result_batch", PersonalDiscoveryManagement, uuid_schema("batch_id"), Blocking, published(29, "Dismiss Discovery Result Batch", "Dismiss an entire ready batch without creating item-level learning evidence.", false, true)),
         d(Tool::MarkDiscoveryResultBatchReviewed, "mark_discovery_result_batch_reviewed", PersonalDiscoveryManagement, uuid_schema("batch_id"), Blocking, hidden("Mark Discovery Result Batch Reviewed", "Mark a ready batch reviewed without item-level learning evidence.", false, false)),
+        d(Tool::ReviewDiscoveryResultItem, "review_discovery_result_item", PersonalDiscoveryManagement, review_result_item_schema(), Blocking, published(30, "Review Discovery Result Item", "Deliberately save, place, reinforce, reject, or ignore one private Discovery Result Batch item.", false, false)),
         d(Tool::GetPodPackage, "get_pod_package", Public, string_schema("pod_slug"), Blocking, published(1, "Read Pod Package", "Read the versioned context, curation instructions, and Source Rules for one Pod.", true, false)),
         d(Tool::ExportPodPackage, "export_pod_package", CapabilityOnly(Capability::PackageManagement), string_schema("pod_slug"), Blocking, hidden("Export Pod Package", "Export a portable Pod Package.", true, false)),
         d(Tool::ImportPodPackage, "import_pod_package", CapabilityOnly(Capability::PackageManagement), object_schema(json!({"pod_slug": {"type": "string"}, "files": {"type": "object"}}), &["pod_slug", "files"]), Blocking, hidden("Import Pod Package", "Import Pod Package files.", false, false)),
@@ -321,6 +323,25 @@ fn personal_discovery_schema() -> Value {
             "idempotency_key": {"type": "string"}
         }),
         &["idempotency_key"],
+    )
+}
+
+fn review_result_item_schema() -> Value {
+    object_schema(
+        json!({
+            "batch_id": uuid(),
+            "candidate_id": uuid(),
+            "action": {
+                "oneOf": [
+                    {"type": "object", "properties": {"action": {"const": "save"}}, "required": ["action"], "additionalProperties": false},
+                    {"type": "object", "properties": {"action": {"const": "add_to_pod"}, "pod_id": uuid(), "curation_note": {"type": ["string", "null"]}}, "required": ["action", "pod_id"], "additionalProperties": false},
+                    {"type": "object", "properties": {"action": {"const": "more_like_this"}}, "required": ["action"], "additionalProperties": false},
+                    {"type": "object", "properties": {"action": {"const": "not_for_me"}}, "required": ["action"], "additionalProperties": false},
+                    {"type": "object", "properties": {"action": {"const": "ignore"}}, "required": ["action"], "additionalProperties": false}
+                ]
+            }
+        }),
+        &["batch_id", "candidate_id", "action"],
     )
 }
 

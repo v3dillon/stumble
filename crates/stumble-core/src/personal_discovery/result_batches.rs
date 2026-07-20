@@ -304,6 +304,7 @@ impl SelectionState {
             submission_id: submission.id,
             canonical_url: candidate.canonical_url.clone(),
             allocation_role,
+            review: DiscoveryResultItemReview::Unreviewed,
         });
     }
 }
@@ -326,21 +327,33 @@ fn recently_reviewed_canonical_urls(
     user_id: UserId,
     tenant_id: Option<TenantId>,
 ) -> HashSet<String> {
-    store
-        .discovery_result_batches
-        .values()
-        .filter(|batch| {
-            batch.user_id == user_id
-                && batch.tenant_id == tenant_id
-                && matches!(
-                    batch.state,
-                    DiscoveryResultBatchState::Ready
-                        | DiscoveryResultBatchState::Reviewed
-                        | DiscoveryResultBatchState::Dismissed
-                )
-        })
-        .flat_map(|batch| batch.items.iter().map(|item| item.canonical_url.clone()))
-        .collect()
+    let mut urls = HashSet::new();
+    for batch in store.discovery_result_batches.values().filter(|batch| {
+        batch.user_id == user_id
+            && batch.tenant_id == tenant_id
+            && matches!(
+                batch.state,
+                DiscoveryResultBatchState::Ready
+                    | DiscoveryResultBatchState::Reviewed
+                    | DiscoveryResultBatchState::Dismissed
+            )
+    }) {
+        for item in &batch.items {
+            urls.insert(item.canonical_url.clone());
+            // Explicit Not for me rejections also suppress equivalent spellings
+            // even if batch membership were later reinterpreted.
+            if matches!(
+                item.review,
+                DiscoveryResultItemReview::Reviewed {
+                    action: DiscoveryResultItemAction::NotForMe,
+                    ..
+                }
+            ) {
+                urls.insert(item.canonical_url.clone());
+            }
+        }
+    }
+    urls
 }
 
 enum PolicyReject {

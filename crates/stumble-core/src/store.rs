@@ -82,6 +82,8 @@ pub struct InMemoryStore {
     pub discovery_tasks: HashMap<DiscoveryTaskId, DiscoveryTask>,
     pub discovery_plans: HashMap<DiscoveryPlanId, DiscoveryPlan>,
     pub discovery_result_batches: HashMap<DiscoveryResultBatchId, DiscoveryResultBatch>,
+    /// Replaceable learning evidence produced by deliberate Discovery Result item actions.
+    pub(crate) discovery_result_item_learning_links: Vec<DiscoveryResultItemLearningLink>,
     pub candidates: HashMap<CandidateId, Candidate>,
     pub candidate_submissions: HashMap<CandidateSubmissionId, CandidateSubmission>,
     pub(crate) interest_seeds: HashMap<(UserId, CandidateId), InterestSeed>,
@@ -141,6 +143,8 @@ struct PersistedStore {
     discovery_plans: Vec<DiscoveryPlan>,
     #[serde(default)]
     discovery_result_batches: Vec<DiscoveryResultBatch>,
+    #[serde(default)]
+    discovery_result_item_learning_links: Vec<DiscoveryResultItemLearningLink>,
     #[serde(default)]
     candidates: Vec<Candidate>,
     #[serde(default)]
@@ -353,6 +357,9 @@ impl From<&InMemoryStore> for PersistedStore {
             discovery_tasks: store.discovery_tasks.values().cloned().collect(),
             discovery_plans: store.discovery_plans.values().cloned().collect(),
             discovery_result_batches: store.discovery_result_batches.values().cloned().collect(),
+            discovery_result_item_learning_links: store
+                .discovery_result_item_learning_links
+                .clone(),
             candidates: store.candidates.values().cloned().collect(),
             candidate_submissions: store.candidate_submissions.values().cloned().collect(),
             interest_seeds: store.interest_seeds.values().cloned().collect(),
@@ -508,6 +515,7 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .into_iter()
                 .map(|batch| (batch.id, batch))
                 .collect(),
+            discovery_result_item_learning_links: snapshot.discovery_result_item_learning_links,
             candidates: snapshot
                 .candidates
                 .into_iter()
@@ -734,6 +742,7 @@ const STORE_COLLECTIONS: &[&str] = &[
     "discovery_tasks",
     "discovery_plans",
     "discovery_result_batches",
+    "discovery_result_item_learning_links",
     "candidates",
     "candidate_submissions",
     "interest_seeds",
@@ -1140,6 +1149,8 @@ fn record_key(
         "event_log" => &["event_id"],
         "feedback_events" => return Ok(serde_json::to_string(value)?),
         "harness_write_audit" => &["id"],
+        "discovery_result_item_learning_links" => &["batch_id", "candidate_id"],
+        "taste_learning_evidence" => &["id"],
         _ => &["id"],
     };
     let mut key = Vec::with_capacity(fields.len());

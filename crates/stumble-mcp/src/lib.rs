@@ -347,6 +347,14 @@ impl McpToolRouter {
                     chrono::Utc::now(),
                 )?))
             }
+            ReviewDiscoveryResultItem => {
+                let request = serde_json::from_value(call.arguments)?;
+                Ok(json!(self.tools.review_discovery_result_item(
+                    &self.ctx,
+                    request,
+                    chrono::Utc::now(),
+                )?))
+            }
             GetPodPackage => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
                 Ok(json!(self.tools.get_skill_pack(&self.ctx, &pod_slug)?))

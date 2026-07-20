@@ -173,6 +173,7 @@ pub(super) enum PersonalDiscoveryWorkflow {
     Batch(IdArgs),
     DismissBatch(IdArgs),
     ReviewBatch(IdArgs),
+    ReviewItem(InputArgs),
 }
 
 #[derive(Subcommand)]

@@ -265,3 +265,125 @@ fn cli_completes_lists_and_dismisses_result_batches() {
     let dismissed = environment.run(None, &["discover", "personal", "dismiss-batch", batch_id]);
     assert_eq!(dismissed["data"]["state"], "dismissed");
 }
+
+#[test]
+fn cli_reviews_result_item_and_exposes_allowed_actions() {
+    let environment = Environment::new();
+    let input = environment.root.join("request.json");
+    fs::write(
+        &input,
+        r#"{"idempotency_key":"cli-review","result_count":4}"#,
+    )
+    .unwrap();
+    let created = environment.run(
+        None,
+        &[
+            "discover",
+            "personal",
+            "request",
+            "--input",
+            input.to_str().unwrap(),
+        ],
+    );
+    let task_id = created["data"]["task"]["id"].as_str().unwrap().to_owned();
+    let worker = environment.run(
+        None,
+        &[
+            "node",
+            "harness",
+            "register",
+            "--label",
+            "review-worker",
+            "--kind",
+            "unattended",
+            "--capability",
+            "personal_discovery_execution",
+        ],
+    )["data"]["credential"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    environment.run(
+        Some(&worker),
+        &[
+            "discover",
+            "task",
+            "claim",
+            &task_id,
+            "--lease-seconds",
+            "300",
+        ],
+    );
+    let candidate = environment.root.join("candidate.json");
+    fs::write(
+        &candidate,
+        format!(
+            r#"{{
+              "source_url":"https://cli-review.example/result",
+              "target":{{"kind":"personal_discovery","task_id":"{task_id}","allocation_role":"proven"}},
+              "source_metadata":{{}},
+              "content_type":"article",
+              "tags":["systems"],
+              "provenance":{{"discovered_at":"2026-07-20T12:00:00Z","discovery_method":"browser_search"}}
+            }}"#
+        ),
+    )
+    .unwrap();
+    let submitted = environment.run(
+        Some(&worker),
+        &[
+            "discover",
+            "candidate",
+            "submit",
+            "--input",
+            candidate.to_str().unwrap(),
+            "--idempotency-key",
+            "cli-review-1",
+        ],
+    );
+    let submission_id = submitted["data"]["submission"]["id"].as_str().unwrap();
+    let complete = environment.root.join("complete.json");
+    fs::write(
+        &complete,
+        format!(r#"{{"task_id":"{task_id}","submission_ids":["{submission_id}"]}}"#),
+    )
+    .unwrap();
+    let batch = environment.run(
+        Some(&worker),
+        &[
+            "discover",
+            "personal",
+            "complete-batch",
+            "--input",
+            complete.to_str().unwrap(),
+        ],
+    );
+    let batch_id = batch["data"]["id"].as_str().unwrap();
+    let candidate_id = batch["data"]["items"][0]["candidate_id"].as_str().unwrap();
+    let review = environment.root.join("review.json");
+    fs::write(
+        &review,
+        format!(
+            r#"{{"batch_id":"{batch_id}","candidate_id":"{candidate_id}","action":{{"action":"not_for_me"}}}}"#
+        ),
+    )
+    .unwrap();
+    let outcome = environment.run(
+        None,
+        &[
+            "discover",
+            "personal",
+            "review-item",
+            "--input",
+            review.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(outcome["data"]["item"]["review"]["action"], "not_for_me");
+    assert_eq!(outcome["data"]["batch"]["state"], "ready");
+    assert!(outcome["data"]["taste_profile"]["source_affinities"].is_array());
+    assert!(outcome["data"]["allowed_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action == "not_for_me"));
+}

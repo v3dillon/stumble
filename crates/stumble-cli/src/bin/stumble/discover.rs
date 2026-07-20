@@ -13,7 +13,8 @@ use stumble_core::{
     AgentTools, AuthContext, CandidateConfidence, CandidateId, CandidateReviewState,
     CandidateSubmissionRequest, CompleteDiscoveryResultBatchRequest, CurationRationale,
     DiscoveryPlanId, DiscoveryResultBatchId, DiscoveryTask, DiscoveryTaskId, DiscoveryTaskState,
-    PlacementReviewDecision, RequestPersonalDiscovery, RouteCandidatePlacementRequest, StoreError,
+    PlacementReviewDecision, RequestPersonalDiscovery, ReviewDiscoveryResultItemRequest,
+    RouteCandidatePlacementRequest, StoreError,
 };
 
 pub(super) fn execute(
@@ -110,6 +111,24 @@ fn execute_personal(
             serde_json::to_value(
                 tools
                     .mark_discovery_result_batch_reviewed(actor, id, chrono::Utc::now())
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error)
+        }
+        PersonalDiscoveryWorkflow::ReviewItem(args) => {
+            let request: ReviewDiscoveryResultItemRequest = serde_json::from_value(
+                read_json_input(&args.input)
+                    .map_err(|error| (error, ExitStatusCategory::ValidationOrConflict))?,
+            )
+            .map_err(|error| {
+                (
+                    ErrorBody::new("invalid_input", error.to_string()),
+                    ExitStatusCategory::ValidationOrConflict,
+                )
+            })?;
+            serde_json::to_value(
+                tools
+                    .review_discovery_result_item(actor, request, chrono::Utc::now())
                     .map_err(agent_tools_error)?,
             )
             .map_err(internal_error)

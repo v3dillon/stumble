@@ -234,6 +234,10 @@ pub fn router_with_options(
             "/discovery-result-batches/:id/reviewed",
             post(mark_discovery_result_batch_reviewed),
         )
+        .route(
+            "/discovery-result-batches/:id/items/:candidate_id/review",
+            post(review_discovery_result_item),
+        )
         .route("/discovery-plans/:id", get(discovery_plan))
         .route("/discovery-tasks/ready", get(list_ready_discovery_tasks))
         .route("/discovery-tasks/:id", get(discovery_task_status))
@@ -726,6 +730,24 @@ async fn mark_discovery_result_batch_reviewed(
     Ok(Json(state.tools.mark_discovery_result_batch_reviewed(
         &ctx,
         id,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn review_discovery_result_item(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path((batch_id, candidate_id)): Path<(DiscoveryResultBatchId, CandidateId)>,
+    Json(action): Json<DiscoveryResultItemActionRequest>,
+) -> Result<Json<DiscoveryResultItemReviewOutcome>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.review_discovery_result_item(
+        &ctx,
+        ReviewDiscoveryResultItemRequest {
+            batch_id,
+            candidate_id,
+            action,
+        },
         chrono::Utc::now(),
     )?))
 }
