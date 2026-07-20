@@ -81,6 +81,7 @@ pub struct InMemoryStore {
     pub harness_write_audit: Vec<HarnessWriteAudit>,
     pub discovery_tasks: HashMap<DiscoveryTaskId, DiscoveryTask>,
     pub discovery_plans: HashMap<DiscoveryPlanId, DiscoveryPlan>,
+    pub discovery_result_batches: HashMap<DiscoveryResultBatchId, DiscoveryResultBatch>,
     pub candidates: HashMap<CandidateId, Candidate>,
     pub candidate_submissions: HashMap<CandidateSubmissionId, CandidateSubmission>,
     pub(crate) interest_seeds: HashMap<(UserId, CandidateId), InterestSeed>,
@@ -138,6 +139,8 @@ struct PersistedStore {
     discovery_tasks: Vec<DiscoveryTask>,
     #[serde(default)]
     discovery_plans: Vec<DiscoveryPlan>,
+    #[serde(default)]
+    discovery_result_batches: Vec<DiscoveryResultBatch>,
     #[serde(default)]
     candidates: Vec<Candidate>,
     #[serde(default)]
@@ -349,6 +352,7 @@ impl From<&InMemoryStore> for PersistedStore {
             harness_write_audit: store.harness_write_audit.clone(),
             discovery_tasks: store.discovery_tasks.values().cloned().collect(),
             discovery_plans: store.discovery_plans.values().cloned().collect(),
+            discovery_result_batches: store.discovery_result_batches.values().cloned().collect(),
             candidates: store.candidates.values().cloned().collect(),
             candidate_submissions: store.candidate_submissions.values().cloned().collect(),
             interest_seeds: store.interest_seeds.values().cloned().collect(),
@@ -498,6 +502,11 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .discovery_plans
                 .into_iter()
                 .map(|plan| (plan.id, plan))
+                .collect(),
+            discovery_result_batches: snapshot
+                .discovery_result_batches
+                .into_iter()
+                .map(|batch| (batch.id, batch))
                 .collect(),
             candidates: snapshot
                 .candidates
@@ -724,6 +733,7 @@ const STORE_COLLECTIONS: &[&str] = &[
     "harness_write_audit",
     "discovery_tasks",
     "discovery_plans",
+    "discovery_result_batches",
     "candidates",
     "candidate_submissions",
     "interest_seeds",

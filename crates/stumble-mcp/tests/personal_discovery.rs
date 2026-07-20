@@ -183,3 +183,89 @@ async fn mcp_catalog_projects_the_canonical_personal_management_policy() {
         );
     }
 }
+
+#[test]
+fn mcp_worker_submits_results_and_manager_lists_batch() {
+    let tools = AgentTools::new(seed_store());
+    let manager = router(
+        &tools,
+        "manager",
+        AgentHarnessKind::Interactive,
+        HarnessCapability::PersonalDiscoveryManagement,
+    );
+    let worker = router(
+        &tools,
+        "worker",
+        AgentHarnessKind::Unattended,
+        HarnessCapability::PersonalDiscoveryExecution,
+    );
+    let created = manager
+        .call(McpToolCall {
+            tool: "request_personal_discovery".into(),
+            arguments: json!({"idempotency_key": "mcp-batch", "result_count": 4}),
+        })
+        .unwrap();
+    let task_id = created["task"]["id"].as_str().unwrap();
+    worker
+        .call(McpToolCall {
+            tool: "claim_discovery_task".into(),
+            arguments: json!({"task_id": task_id, "lease_seconds": 300}),
+        })
+        .unwrap();
+    let submitted = worker
+        .call(McpToolCall {
+            tool: "submit_candidate".into(),
+            arguments: json!({
+                "source_url": "https://mcp.example/result",
+                "target": {
+                    "kind": "personal_discovery",
+                    "task_id": task_id,
+                    "allocation_role": "proven"
+                },
+                "source_metadata": {"title": "MCP", "author": null, "published_at": null},
+                "content_type": "article",
+                "tags": ["systems"],
+                "provenance": {
+                    "discovered_at": "2026-07-20T12:00:00Z",
+                    "discovery_method": "browser_search",
+                    "referrer_url": null
+                },
+                "harness_idempotency_key": "mcp-result-1",
+                "client_idempotency_key": "mcp-result-1"
+            }),
+        })
+        .unwrap();
+    let submission_id = submitted["submission"]["id"].as_str().unwrap();
+    let batch = worker
+        .call(McpToolCall {
+            tool: "complete_discovery_result_batch".into(),
+            arguments: json!({
+                "task_id": task_id,
+                "submission_ids": [submission_id],
+                "source_availability": []
+            }),
+        })
+        .unwrap();
+    assert_eq!(batch["state"], "ready");
+    assert_eq!(batch["task_id"], task_id);
+    let listed = manager
+        .call(McpToolCall {
+            tool: "list_discovery_result_batches".into(),
+            arguments: json!({}),
+        })
+        .unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert!(worker
+        .call(McpToolCall {
+            tool: "dismiss_discovery_result_batch".into(),
+            arguments: json!({"batch_id": batch["id"]}),
+        })
+        .is_err());
+    let dismissed = manager
+        .call(McpToolCall {
+            tool: "dismiss_discovery_result_batch".into(),
+            arguments: json!({"batch_id": batch["id"]}),
+        })
+        .unwrap();
+    assert_eq!(dismissed["state"], "dismissed");
+}

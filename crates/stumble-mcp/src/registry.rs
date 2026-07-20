@@ -29,6 +29,8 @@ pub(crate) enum ToolAvailability {
     InteractiveFeedback,
     UnscopedInteractiveFeedback,
     DiscoveryExecution,
+    /// CandidateSubmission grant, or Personal Discovery execution for task-bound results.
+    CandidateSubmissionOrPersonalExecution,
     PersonalPlanAccess,
     PersonalDiscoveryManagement,
 }
@@ -42,6 +44,7 @@ impl ToolAvailability {
                 Some(HarnessCapability::Feedback)
             }
             Self::DiscoveryExecution
+            | Self::CandidateSubmissionOrPersonalExecution
             | Self::PersonalPlanAccess
             | Self::PersonalDiscoveryManagement => None,
         }
@@ -86,6 +89,11 @@ pub(crate) enum McpTool {
     PersonalDiscoveryReadiness,
     RequestPersonalDiscovery,
     GetDiscoveryPlan,
+    CompleteDiscoveryResultBatch,
+    ListDiscoveryResultBatches,
+    GetDiscoveryResultBatch,
+    DismissDiscoveryResultBatch,
+    MarkDiscoveryResultBatchReviewed,
     GetPodPackage,
     ExportPodPackage,
     ImportPodPackage,
@@ -110,8 +118,9 @@ pub(crate) fn definitions() -> &'static [ToolDefinition] {
     use HarnessCapability as Capability;
     use McpTool as Tool;
     use ToolAvailability::{
-        CapabilityOnly, DiscoveryExecution, InteractiveFeedback, PersonalDiscoveryManagement,
-        PersonalPlanAccess, Public, UnscopedInteractiveFeedback,
+        CandidateSubmissionOrPersonalExecution, CapabilityOnly, DiscoveryExecution,
+        InteractiveFeedback, PersonalDiscoveryManagement, PersonalPlanAccess, Public,
+        UnscopedInteractiveFeedback,
     };
     use ToolHandlerKind::{Async, Blocking};
 
@@ -138,8 +147,8 @@ pub(crate) fn definitions() -> &'static [ToolDefinition] {
         d(Tool::ListPodContent, "list_pod_content", CapabilityOnly(Capability::FeedRead), uuid_schema("pod_id"), Blocking, published(8, "List Pod Content", "List the complete accepted Content Item stream for one Pod without private Candidate data.", true, false)),
         d(Tool::CreatePrivatePodWithPackage, "create_private_pod_with_package", CapabilityOnly(Capability::PodCuration), private_pod_package_schema(), Blocking, hidden("Create Private Pod with Package", "Create a private Pod with its initial Pod Package.", false, false)),
         d(Tool::JoinPod, "join_pod", CapabilityOnly(Capability::SubscriptionManagement), string_schema("pod_slug"), Blocking, hidden("Join Pod", "Subscribe to a local Pod by slug.", false, false)),
-        d(Tool::SubmitCandidate, "submit_candidate", CapabilityOnly(Capability::CandidateSubmission), candidate_schema(), Blocking, published(11, "Save Discovered Link", "Submit one externally discovered link with source metadata and provenance to an explicit User or Pod Placements target. This creates a private Candidate, not an Accepted Placement.", false, false)),
-        d(Tool::InspectCandidate, "inspect_candidate", CapabilityOnly(Capability::CandidateSubmission), uuid_schema("candidate_id"), Blocking, published(12, "Inspect Candidate", "Inspect a private Candidate and its independent provenance records.", true, false)),
+        d(Tool::SubmitCandidate, "submit_candidate", CandidateSubmissionOrPersonalExecution, candidate_schema(), Blocking, published(11, "Save Discovered Link", "Submit one externally discovered link with source metadata and provenance to an explicit User, Pod Placements, or Personal Discovery Task target. This creates a private Candidate, not an Accepted Placement.", false, false)),
+        d(Tool::InspectCandidate, "inspect_candidate", CandidateSubmissionOrPersonalExecution, uuid_schema("candidate_id"), Blocking, published(12, "Inspect Candidate", "Inspect a private Candidate and its independent provenance records.", true, false)),
         d(Tool::MaterializeDiscoveryTasks, "materialize_discovery_tasks", CapabilityOnly(Capability::DiscoveryTasks), empty_schema(), Blocking, hidden("Materialize Discovery Tasks", "Materialize due Discovery Tasks from Source Rules.", false, false)),
         d(Tool::ListDiscoveryTasks, "list_discovery_tasks", DiscoveryExecution, empty_schema(), Blocking, hidden("List Discovery Tasks", "List Discovery Tasks visible to this Harness.", true, false)),
         d(Tool::ListReadyDiscoveryTasks, "list_ready_discovery_tasks", DiscoveryExecution, empty_schema(), Blocking, published(13, "List Ready Discovery Tasks", "List due discovery work that this Agent Harness is authorized to claim.", true, false)),
@@ -152,6 +161,11 @@ pub(crate) fn definitions() -> &'static [ToolDefinition] {
         d(Tool::PersonalDiscoveryReadiness, "personal_discovery_readiness", PersonalDiscoveryManagement, empty_schema(), Blocking, published(23, "Check Personal Discovery Readiness", "Inspect whether private aggregate User evidence can support a generic Personal Discovery run.", true, false)),
         d(Tool::RequestPersonalDiscovery, "request_personal_discovery", PersonalDiscoveryManagement, personal_discovery_schema(), Blocking, published(24, "Request Personal Discovery", "Create a retry-safe minimized Discovery Plan and User-scoped task without selecting a Pod or source.", false, false)),
         d(Tool::GetDiscoveryPlan, "get_discovery_plan", PersonalPlanAccess, uuid_schema("discovery_plan_id"), Blocking, published(25, "Read Discovery Plan", "Read an authorized minimized task-specific Discovery Plan.", true, false)),
+        d(Tool::CompleteDiscoveryResultBatch, "complete_discovery_result_batch", DiscoveryExecution, complete_batch_schema(), Blocking, published(26, "Complete Discovery Result Batch", "Atomically complete a claimed Personal Discovery Task into one private ordered result batch.", false, false)),
+        d(Tool::ListDiscoveryResultBatches, "list_discovery_result_batches", PersonalDiscoveryManagement, empty_schema(), Blocking, published(27, "List Discovery Result Batches", "List private Discovery Result Batches for the authenticated User.", true, false)),
+        d(Tool::GetDiscoveryResultBatch, "get_discovery_result_batch", PersonalDiscoveryManagement, uuid_schema("batch_id"), Blocking, published(28, "Inspect Discovery Result Batch", "Inspect one private Discovery Result Batch and its Candidate provenance.", true, false)),
+        d(Tool::DismissDiscoveryResultBatch, "dismiss_discovery_result_batch", PersonalDiscoveryManagement, uuid_schema("batch_id"), Blocking, published(29, "Dismiss Discovery Result Batch", "Dismiss an entire ready batch without creating item-level learning evidence.", false, true)),
+        d(Tool::MarkDiscoveryResultBatchReviewed, "mark_discovery_result_batch_reviewed", PersonalDiscoveryManagement, uuid_schema("batch_id"), Blocking, hidden("Mark Discovery Result Batch Reviewed", "Mark a ready batch reviewed without item-level learning evidence.", false, false)),
         d(Tool::GetPodPackage, "get_pod_package", Public, string_schema("pod_slug"), Blocking, published(1, "Read Pod Package", "Read the versioned context, curation instructions, and Source Rules for one Pod.", true, false)),
         d(Tool::ExportPodPackage, "export_pod_package", CapabilityOnly(Capability::PackageManagement), string_schema("pod_slug"), Blocking, hidden("Export Pod Package", "Export a portable Pod Package.", true, false)),
         d(Tool::ImportPodPackage, "import_pod_package", CapabilityOnly(Capability::PackageManagement), object_schema(json!({"pod_slug": {"type": "string"}, "files": {"type": "object"}}), &["pod_slug", "files"]), Blocking, hidden("Import Pod Package", "Import Pod Package files.", false, false)),
@@ -310,6 +324,28 @@ fn personal_discovery_schema() -> Value {
     )
 }
 
+fn complete_batch_schema() -> Value {
+    object_schema(
+        json!({
+            "task_id": uuid(),
+            "submission_ids": {"type": "array", "items": uuid()},
+            "source_availability": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "source": {"type": "string"},
+                        "reason": {"type": "string"}
+                    },
+                    "required": ["source", "reason"],
+                    "additionalProperties": false
+                }
+            }
+        }),
+        &["task_id", "submission_ids"],
+    )
+}
+
 fn update_taste_schema() -> Value {
     object_schema(
         json!({
@@ -420,7 +456,8 @@ fn candidate_schema() -> Value {
             "source_url": {"type": "string", "format": "uri"},
             "target": {"oneOf": [
                 {"type": "object", "properties": {"kind": {"const": "user"}, "learn": {"type": "boolean", "default": true}, "interest_seed_metadata": {"type": "object", "properties": {"publisher": {"type": ["string", "null"]}, "community": {"type": ["string", "null"]}}, "additionalProperties": false}}, "required": ["kind"], "additionalProperties": false},
-                {"type": "object", "properties": {"kind": {"const": "pod_placements"}, "placements": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"pod_id": uuid(), "reason": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}}, "required": ["pod_id", "reason", "confidence"], "additionalProperties": false}}, "task_context": {"type": ["object", "null"], "properties": {"task_id": uuid(), "package_version": {"type": "integer", "minimum": 1}}, "required": ["task_id", "package_version"], "additionalProperties": false}}, "required": ["kind", "placements"], "additionalProperties": false}
+                {"type": "object", "properties": {"kind": {"const": "pod_placements"}, "placements": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"pod_id": uuid(), "reason": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}}, "required": ["pod_id", "reason", "confidence"], "additionalProperties": false}}, "task_context": {"type": ["object", "null"], "properties": {"task_id": uuid(), "package_version": {"type": "integer", "minimum": 1}}, "required": ["task_id", "package_version"], "additionalProperties": false}}, "required": ["kind", "placements"], "additionalProperties": false},
+                {"type": "object", "properties": {"kind": {"const": "personal_discovery"}, "task_id": uuid(), "allocation_role": {"type": "string", "enum": ["proven", "adjacent"]}, "source_facts": {"type": "object", "properties": {"publisher": {"type": ["string", "null"]}, "community": {"type": ["string", "null"]}}, "additionalProperties": false}}, "required": ["kind", "task_id", "allocation_role"], "additionalProperties": false}
             ]},
             "source_metadata": {"type": "object", "properties": {"title": {"type": ["string", "null"]}, "author": {"type": ["string", "null"]}, "published_at": {"type": ["string", "null"], "format": "date-time"}}, "additionalProperties": false},
             "permitted_excerpt": {"type": ["string", "null"]}, "summary": {"type": ["string", "null"]},

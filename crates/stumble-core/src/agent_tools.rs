@@ -7,7 +7,9 @@ use crate::interest_seeds::{
     candidate_submission_taste_signals, interest_seed_evidence, record_interest_seed,
     reset_interest_seed_evidence, source_affinity_is_blocked, taste_profile_projections,
 };
-use crate::personal_discovery::{build_plan, prepare_request, readiness, retry};
+use crate::personal_discovery::{
+    build_discovery_result_batch, build_plan, prepare_request, readiness, retry,
+};
 use crate::ranking::{rank_discovery, RankingInput};
 use crate::signing::{
     hash_api_token, new_plaintext_api_token, sign_pod_announcement, sign_pod_endorsement,
@@ -2618,6 +2620,268 @@ impl AgentTools {
         Ok(RequestedPersonalDiscovery { plan, task })
     }
 
+    /// Atomically completes a leased Personal Discovery Task into one ordered result batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the caller does not hold the task lease, submissions are
+    /// invalid for the task, authorization is denied, or persistence fails.
+    pub fn complete_discovery_result_batch(
+        &self,
+        ctx: &AuthContext,
+        request: CompleteDiscoveryResultBatchRequest,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<DiscoveryResultBatch, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let (pod_id, harness_id) =
+            authorized_discovery_task_mutation(&store, ctx, request.task_id)?;
+        if pod_id.is_some() {
+            return Err(StoreError::Validation(
+                "complete_discovery_result_batch requires a Personal Discovery Task".into(),
+            )
+            .into());
+        }
+        let task = store
+            .discovery_tasks
+            .get(&request.task_id)
+            .ok_or_else(|| StoreError::NotFound("Discovery Task".into()))?
+            .clone();
+        let plan_id = task
+            .target
+            .discovery_plan_id()
+            .ok_or_else(|| StoreError::Validation("Personal Discovery Task missing plan".into()))?;
+        let plan = store
+            .discovery_plans
+            .get(&plan_id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("Discovery Plan".into()))?;
+
+        if let Some(existing) = store
+            .discovery_result_batches
+            .values()
+            .find(|batch| batch.task_id == request.task_id)
+            .cloned()
+        {
+            return Ok(existing);
+        }
+
+        let DiscoveryTaskState::Leased(lease) = &task.state else {
+            return Err(AgentToolsError::TaskLeaseRequired);
+        };
+        if lease.harness_id != harness_id || lease.expires_at <= now {
+            return Err(AgentToolsError::TaskLeaseRequired);
+        }
+        let lease = lease.clone();
+
+        let mut seen_ids = HashSet::new();
+        let mut ordered = Vec::with_capacity(request.submission_ids.len());
+        for submission_id in &request.submission_ids {
+            if !seen_ids.insert(*submission_id) {
+                continue;
+            }
+            let submission = store
+                .candidate_submissions
+                .get(submission_id)
+                .ok_or_else(|| StoreError::NotFound("Candidate Submission".into()))?;
+            match &submission.target {
+                CandidateSubmissionTarget::PersonalDiscovery {
+                    task_id,
+                    discovery_plan_id,
+                    user_id,
+                    ..
+                } if *task_id == request.task_id
+                    && *discovery_plan_id == plan.id
+                    && *user_id == plan.user_id
+                    && submission.submitted_by == harness_id =>
+                {
+                    ordered.push(submission.clone());
+                }
+                _ => {
+                    return Err(StoreError::Validation(
+                        "submission is not a task-bound Personal Discovery result for this lease"
+                            .into(),
+                    )
+                    .into());
+                }
+            }
+        }
+        let ordered_refs: Vec<&CandidateSubmission> = ordered.iter().collect();
+        let batch = build_discovery_result_batch(
+            &store,
+            &plan,
+            request.task_id,
+            &ordered_refs,
+            &store.candidates,
+            &request.source_availability,
+            now,
+        );
+
+        let mut staged = store.clone();
+        staged
+            .discovery_result_batches
+            .insert(batch.id, batch.clone());
+        let task = staged
+            .discovery_tasks
+            .get_mut(&request.task_id)
+            .expect("BUG: task exists after lookup");
+        task.attempts.push(DiscoveryTaskAttempt {
+            harness_id,
+            started_at: lease.claimed_at,
+            finished_at: now,
+            outcome: DiscoveryTaskAttemptOutcome::Completed,
+        });
+        task.state = DiscoveryTaskState::Completed;
+        record_harness_write(
+            &mut staged,
+            ctx,
+            HarnessWriteOperation::CompleteDiscoveryResultBatch,
+            None,
+        );
+        self.persist_locked(&mut staged)?;
+        *store = staged;
+        Ok(batch)
+    }
+
+    /// Lists private Discovery Result Batches for the authenticated User.
+    pub fn list_discovery_result_batches(
+        &self,
+        ctx: &AuthContext,
+    ) -> Result<Vec<DiscoveryResultBatch>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_management(&store, ctx)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Personal Discovery requires an authenticated User".into())
+        })?;
+        let mut batches: Vec<_> = store
+            .discovery_result_batches
+            .values()
+            .filter(|batch| batch.user_id == user_id && batch.tenant_id == ctx.tenant_id)
+            .cloned()
+            .collect();
+        batches.sort_by_key(|batch| (batch.created_at, batch.id));
+        Ok(batches)
+    }
+
+    /// Inspects one private Discovery Result Batch owned by the authenticated User.
+    pub fn discovery_result_batch(
+        &self,
+        ctx: &AuthContext,
+        batch_id: DiscoveryResultBatchId,
+    ) -> Result<DiscoveryResultBatch, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_management(&store, ctx)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Personal Discovery requires an authenticated User".into())
+        })?;
+        store
+            .discovery_result_batches
+            .get(&batch_id)
+            .filter(|batch| batch.user_id == user_id && batch.tenant_id == ctx.tenant_id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("Discovery Result Batch".into()).into())
+    }
+
+    /// Dismisses an entire ready batch without creating item-level learning evidence.
+    pub fn dismiss_discovery_result_batch(
+        &self,
+        ctx: &AuthContext,
+        batch_id: DiscoveryResultBatchId,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<DiscoveryResultBatch, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_management(&store, ctx)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Personal Discovery requires an authenticated User".into())
+        })?;
+        let batch = store
+            .discovery_result_batches
+            .get_mut(&batch_id)
+            .filter(|batch| batch.user_id == user_id && batch.tenant_id == ctx.tenant_id)
+            .ok_or_else(|| StoreError::NotFound("Discovery Result Batch".into()))?;
+        match batch.state {
+            DiscoveryResultBatchState::Dismissed => {
+                return Ok(batch.clone());
+            }
+            DiscoveryResultBatchState::Reviewed => {
+                return Err(StoreError::Validation(
+                    "reviewed Discovery Result Batch cannot be dismissed".into(),
+                )
+                .into());
+            }
+            DiscoveryResultBatchState::Ready => {
+                batch.state = DiscoveryResultBatchState::Dismissed;
+                batch.dismissed_at = Some(now);
+            }
+        }
+        let result = batch.clone();
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::DismissDiscoveryResultBatch,
+            None,
+        );
+        self.persist_locked(&mut store)?;
+        Ok(result)
+    }
+
+    /// Marks a ready batch reviewed without recording item-level learning evidence.
+    pub fn mark_discovery_result_batch_reviewed(
+        &self,
+        ctx: &AuthContext,
+        batch_id: DiscoveryResultBatchId,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<DiscoveryResultBatch, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_management(&store, ctx)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Personal Discovery requires an authenticated User".into())
+        })?;
+        let batch = store
+            .discovery_result_batches
+            .get_mut(&batch_id)
+            .filter(|batch| batch.user_id == user_id && batch.tenant_id == ctx.tenant_id)
+            .ok_or_else(|| StoreError::NotFound("Discovery Result Batch".into()))?;
+        match batch.state {
+            DiscoveryResultBatchState::Reviewed => {
+                return Ok(batch.clone());
+            }
+            DiscoveryResultBatchState::Dismissed => {
+                return Err(StoreError::Validation(
+                    "dismissed Discovery Result Batch cannot be marked reviewed".into(),
+                )
+                .into());
+            }
+            DiscoveryResultBatchState::Ready => {
+                batch.state = DiscoveryResultBatchState::Reviewed;
+                batch.reviewed_at = Some(now);
+            }
+        }
+        let result = batch.clone();
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::MarkDiscoveryResultBatchReviewed,
+            None,
+        );
+        self.persist_locked(&mut store)?;
+        Ok(result)
+    }
+
     /// Reads a plan for its interactive owner or the worker holding its task lease.
     pub fn discovery_plan(
         &self,
@@ -3028,6 +3292,16 @@ impl AgentTools {
         };
         if lease.harness_id != harness_id || lease.expires_at <= now {
             return Err(AgentToolsError::TaskLeaseRequired);
+        }
+        // Personal Discovery success must produce exactly one Discovery Result Batch.
+        // Workers complete via complete_discovery_result_batch; bare complete is invalid.
+        // Failures remain available so leased personal work can still be released for retry.
+        if failure.is_none() && matches!(task.target, DiscoveryTaskTarget::Personal { .. }) {
+            return Err(StoreError::Validation(
+                "Personal Discovery tasks complete only through complete_discovery_result_batch"
+                    .into(),
+            )
+            .into());
         }
         let lease = lease.clone();
         let outcome = if let Some(reason) = failure {
@@ -3625,6 +3899,31 @@ impl AgentTools {
                 placements: placements.clone(),
                 task_context: *task_context,
             },
+            CandidateSubmissionRequestTarget::PersonalDiscovery {
+                task_id,
+                allocation_role,
+                source_facts,
+            } => {
+                let task = projected
+                    .discovery_tasks
+                    .get(task_id)
+                    .expect("Personal Discovery task was validated");
+                let plan_id = task
+                    .target
+                    .discovery_plan_id()
+                    .expect("Personal Discovery task carries a plan");
+                let plan = projected
+                    .discovery_plans
+                    .get(&plan_id)
+                    .expect("Personal Discovery plan was validated");
+                CandidateSubmissionTarget::PersonalDiscovery {
+                    user_id: plan.user_id,
+                    task_id: *task_id,
+                    discovery_plan_id: plan_id,
+                    allocation_role: *allocation_role,
+                    source_facts: source_facts.clone(),
+                }
+            }
         };
         let submission = CandidateSubmission {
             id: stable_candidate_uuid(
@@ -3775,6 +4074,7 @@ impl AgentTools {
                             .is_ok()
                         })
                     }
+                    CandidateSubmissionTarget::PersonalDiscovery { .. } => false,
                 });
         if harness.is_some() && can_submit_evidence {
             allowed_actions.push(CandidateAllowedAction::SubmitCandidateEvidence);
@@ -8577,6 +8877,27 @@ fn candidate_submission_is_visible(
                     .iter()
                     .all(|placement| candidate_placement_is_visible(store, ctx, placement.pod_id))
         }
+        CandidateSubmissionTarget::PersonalDiscovery {
+            user_id, task_id, ..
+        } => {
+            if authorize_personal_discovery_management(store, ctx).is_ok()
+                && ctx.user_id == Some(user_id)
+            {
+                return true;
+            }
+            harness.is_some_and(|harness| {
+                authorize_personal_discovery_execution(store, ctx).is_ok()
+                    && (submission.submitted_by == harness.id
+                        || store.discovery_tasks.get(&task_id).is_some_and(|task| {
+                            matches!(
+                                &task.state,
+                                DiscoveryTaskState::Leased(lease)
+                                    if lease.harness_id == harness.id
+                                        && lease.expires_at > Utc::now()
+                            )
+                        }))
+            })
+        }
     }
 }
 
@@ -8684,7 +9005,15 @@ fn validate_candidate_submission(
     }
     let harness =
         harness_for_context(store, ctx)?.ok_or(AgentToolsError::CandidateHarnessRequired)?;
-    authorize_harness(store, ctx, HarnessCapability::CandidateSubmission, None)?;
+    match &request.target {
+        CandidateSubmissionRequestTarget::PersonalDiscovery { .. } => {
+            authorize_personal_discovery_execution(store, ctx)?;
+        }
+        CandidateSubmissionRequestTarget::User { .. }
+        | CandidateSubmissionRequestTarget::PodPlacements { .. } => {
+            authorize_harness(store, ctx, HarnessCapability::CandidateSubmission, None)?;
+        }
+    }
     if matches!(
         request.target,
         CandidateSubmissionRequestTarget::User { .. }
@@ -8735,6 +9064,9 @@ fn validate_candidate_submission(
                                 ) | (
                                     CandidateSubmissionRequestTarget::PodPlacements { .. },
                                     CandidateSubmissionTarget::PodPlacements { .. },
+                                ) | (
+                                    CandidateSubmissionRequestTarget::PersonalDiscovery { .. },
+                                    CandidateSubmissionTarget::PersonalDiscovery { .. },
                                 )
                             )
                     })
@@ -8809,6 +9141,35 @@ fn validate_candidate_task_context(
     harness: &AgentHarness,
     request: &CandidateSubmissionRequest,
 ) -> Result<(), AgentToolsError> {
+    if let CandidateSubmissionRequestTarget::PersonalDiscovery { task_id, .. } = &request.target {
+        let task = store
+            .discovery_tasks
+            .get(task_id)
+            .ok_or_else(|| StoreError::NotFound("Discovery Task".into()))?;
+        if task.target.discovery_plan_id().is_none() {
+            return Err(StoreError::Validation(
+                "Personal Discovery result requires a Personal Discovery Task".into(),
+            )
+            .into());
+        }
+        authorize_discovery_task(store, ctx, task)?;
+        if !matches!(
+            &task.state,
+            DiscoveryTaskState::Leased(lease)
+                if lease.harness_id == harness.id && lease.expires_at > Utc::now()
+        ) {
+            return Err(AgentToolsError::CandidateTaskLeaseRequired);
+        }
+        let plan_id = task
+            .target
+            .discovery_plan_id()
+            .expect("Personal target checked above");
+        store
+            .discovery_plans
+            .get(&plan_id)
+            .ok_or_else(|| StoreError::NotFound("Discovery Plan".into()))?;
+        return Ok(());
+    }
     match request.target.task_context() {
         Some(task_context) => {
             let task = store
@@ -8890,6 +9251,23 @@ fn candidate_submission_matches_request(
                 interest_seed_metadata: requested_metadata,
             },
         ) => stored_learn == requested_learn && stored_metadata == requested_metadata,
+        (
+            CandidateSubmissionTarget::PersonalDiscovery {
+                task_id: stored_task,
+                allocation_role: stored_role,
+                source_facts: stored_facts,
+                ..
+            },
+            CandidateSubmissionRequestTarget::PersonalDiscovery {
+                task_id: requested_task,
+                allocation_role: requested_role,
+                source_facts: requested_facts,
+            },
+        ) => {
+            stored_task == requested_task
+                && stored_role == requested_role
+                && stored_facts == requested_facts
+        }
         (
             CandidateSubmissionTarget::PodPlacements {
                 placements: stored,
@@ -10076,6 +10454,8 @@ fn record_taste_learning_evidence(
                 CandidateSubmissionTarget::PodPlacements { .. } => {
                     accepted_submission_ids.contains(&submission.id)
                 }
+                // Agent-discovered Personal Discovery results never train taste alone.
+                CandidateSubmissionTarget::PersonalDiscovery { .. } => false,
             })
         {
             signals.extend(candidate_submission_taste_signals(candidate, submission));

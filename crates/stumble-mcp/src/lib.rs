@@ -314,6 +314,39 @@ impl McpToolRouter {
                 let plan_id = arg_string(&call.arguments, "discovery_plan_id")?.parse()?;
                 Ok(json!(self.tools.discovery_plan(&self.ctx, plan_id)?))
             }
+            CompleteDiscoveryResultBatch => {
+                let request = serde_json::from_value(call.arguments)?;
+                Ok(json!(self.tools.complete_discovery_result_batch(
+                    &self.ctx,
+                    request,
+                    chrono::Utc::now(),
+                )?))
+            }
+            ListDiscoveryResultBatches => Ok(json!(self
+                .tools
+                .list_discovery_result_batches(&self.ctx)?)),
+            GetDiscoveryResultBatch => {
+                let batch_id = arg_string(&call.arguments, "batch_id")?.parse()?;
+                Ok(json!(self
+                    .tools
+                    .discovery_result_batch(&self.ctx, batch_id)?))
+            }
+            DismissDiscoveryResultBatch => {
+                let batch_id = arg_string(&call.arguments, "batch_id")?.parse()?;
+                Ok(json!(self.tools.dismiss_discovery_result_batch(
+                    &self.ctx,
+                    batch_id,
+                    chrono::Utc::now(),
+                )?))
+            }
+            MarkDiscoveryResultBatchReviewed => {
+                let batch_id = arg_string(&call.arguments, "batch_id")?.parse()?;
+                Ok(json!(self.tools.mark_discovery_result_batch_reviewed(
+                    &self.ctx,
+                    batch_id,
+                    chrono::Utc::now(),
+                )?))
+            }
             GetPodPackage => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
                 Ok(json!(self.tools.get_skill_pack(&self.ctx, &pod_slug)?))

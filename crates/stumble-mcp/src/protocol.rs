@@ -423,6 +423,12 @@ fn tool_is_available(
                 .is_ok()
                 || tools.require_personal_discovery_execution(context).is_ok()
         }
+        ToolAvailability::CandidateSubmissionOrPersonalExecution => {
+            tools
+                .require_harness_capability(context, HarnessCapability::CandidateSubmission)
+                .is_ok()
+                || tools.require_personal_discovery_execution(context).is_ok()
+        }
         ToolAvailability::PersonalPlanAccess => tools
             .require_personal_discovery_plan_access(context)
             .is_ok(),

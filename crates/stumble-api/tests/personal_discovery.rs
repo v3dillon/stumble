@@ -69,3 +69,148 @@ async fn http_exposes_personal_readiness_request_and_plan_inspection() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn http_completes_lists_and_dismisses_result_batches() {
+    let tools = AgentTools::new(seed_store());
+    let manager = tools
+        .register_agent_harness(
+            &tools.default_auth_context().unwrap(),
+            RegisterAgentHarnessRequest {
+                label: "manager".into(),
+                kind: AgentHarnessKind::Interactive,
+                capabilities: vec![HarnessCapability::PersonalDiscoveryManagement],
+                pod_ids: None,
+            },
+        )
+        .unwrap();
+    let worker = tools
+        .register_agent_harness(
+            &tools.default_auth_context().unwrap(),
+            RegisterAgentHarnessRequest {
+                label: "worker".into(),
+                kind: AgentHarnessKind::Unattended,
+                capabilities: vec![HarnessCapability::PersonalDiscoveryExecution],
+                pod_ids: None,
+            },
+        )
+        .unwrap();
+    let manager_auth = format!("Bearer {}", manager.token.expose());
+    let worker_auth = format!("Bearer {}", worker.token.expose());
+    let app = router(tools);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/personal-discovery")
+                .header("content-type", "application/json")
+                .header("authorization", &manager_auth)
+                .body(Body::from(
+                    json!({"idempotency_key": "http-batch", "result_count": 4}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let created: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let task_id = created["task"]["id"].as_str().unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/discovery-tasks/{task_id}/claim"))
+                .header("content-type", "application/json")
+                .header("authorization", &worker_auth)
+                .body(Body::from(json!({"lease_seconds": 300}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/candidates")
+                .header("content-type", "application/json")
+                .header("authorization", &worker_auth)
+                .body(Body::from(
+                    json!({
+                        "source_url": "https://http.example/result",
+                        "target": {
+                            "kind": "personal_discovery",
+                            "task_id": task_id,
+                            "allocation_role": "proven"
+                        },
+                        "source_metadata": {},
+                        "content_type": "article",
+                        "tags": ["systems"],
+                        "provenance": {
+                            "discovered_at": "2026-07-20T12:00:00Z",
+                            "discovery_method": "browser_search"
+                        },
+                        "harness_idempotency_key": "http-result-1",
+                        "client_idempotency_key": "http-result-1"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let submitted: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let submission_id = submitted["submission"]["id"].as_str().unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/discovery-result-batches")
+                .header("content-type", "application/json")
+                .header("authorization", &worker_auth)
+                .body(Body::from(
+                    json!({
+                        "task_id": task_id,
+                        "submission_ids": [submission_id]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let batch: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(batch["state"], "ready");
+    let batch_id = batch["id"].as_str().unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/discovery-result-batches")
+                .header("authorization", &manager_auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::post(format!("/discovery-result-batches/{batch_id}/dismiss"))
+                .header("authorization", &manager_auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let dismissed: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(dismissed["state"], "dismissed");
+}

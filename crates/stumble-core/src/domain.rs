@@ -239,6 +239,31 @@ impl std::str::FromStr for DiscoveryTaskId {
     }
 }
 
+/// Stable local identity of a private Discovery Result Batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DiscoveryResultBatchId(Uuid);
+
+impl From<Uuid> for DiscoveryResultBatchId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl std::fmt::Display for DiscoveryResultBatchId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::str::FromStr for DiscoveryResultBatchId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse().map(Self)
+    }
+}
+
 /// Positive, bounded duration of a Discovery Task lease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -1906,6 +1931,9 @@ pub enum HarnessWriteOperation {
     RenewDiscoveryTaskLease,
     CompleteDiscoveryTask,
     FailDiscoveryTask,
+    CompleteDiscoveryResultBatch,
+    DismissDiscoveryResultBatch,
+    MarkDiscoveryResultBatchReviewed,
 }
 
 /// Current lifecycle state with state-specific lease data.
@@ -2107,6 +2135,146 @@ pub struct DiscoveryPlan {
 pub struct RequestedPersonalDiscovery {
     pub plan: DiscoveryPlan,
     pub task: DiscoveryTask,
+}
+
+/// Lifecycle of a private Discovery Result Batch, distinct from task completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DiscoveryResultBatchState {
+    /// Completed run awaiting User review.
+    Ready,
+    /// User finished reviewing the batch without whole-batch dismissal.
+    Reviewed,
+    /// User dismissed the entire batch without item-level learning evidence.
+    Dismissed,
+}
+
+/// Whether a results-ready notice has been delivered for this batch.
+///
+/// Independent of batch review state and of Discovery Task completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DiscoveryResultNotificationState {
+    /// On-demand / queue-only runs do not emit a results-ready notice.
+    #[default]
+    NotApplicable,
+    /// Scheduled completion may notify once when the harness supports delivery.
+    Pending,
+    /// One-shot notice was delivered; does not mark the batch reviewed.
+    Delivered,
+}
+
+/// One ordered Candidate reference retained by a Discovery Result Batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryResultItem {
+    /// Zero-based position within the finite shortlist.
+    pub position: u16,
+    /// Canonical private Candidate identity.
+    pub candidate_id: CandidateId,
+    /// Provenance-bearing submission that produced this result.
+    pub submission_id: CandidateSubmissionId,
+    /// Canonical URL identity retained for inspection and suppression.
+    pub canonical_url: String,
+    /// Allocation role under which the item was selected into the batch.
+    pub allocation_role: DiscoveryPlanSourceRole,
+}
+
+/// Inspectable reason a quota could not be filled or was reallocated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DiscoveryResultAvailabilityReason {
+    /// Fewer proven-neighborhood results than the plan allocation requested.
+    InsufficientProven { requested: u16, filled: u16 },
+    /// Fewer adjacent-exploration results than the plan allocation requested.
+    InsufficientAdjacent { requested: u16, filled: u16 },
+    /// Domain diversity cap excluded further candidates.
+    DomainCap { domain: String, rejected_count: u16 },
+    /// Author or account diversity cap excluded further candidates.
+    AuthorOrAccountCap {
+        identity: String,
+        rejected_count: u16,
+    },
+    /// Publisher diversity cap excluded further candidates.
+    PublisherCap {
+        identity: String,
+        rejected_count: u16,
+    },
+    /// Community diversity cap excluded further candidates.
+    CommunityCap {
+        identity: String,
+        rejected_count: u16,
+    },
+    /// Explicit block excluded a candidate.
+    Blocked { detail: String },
+    /// Canonical URL already selected into this batch.
+    CanonicalDuplicate { canonical_url: String },
+    /// Canonical URL appeared in a recent prior result batch for this User.
+    RecentlyReviewed { canonical_url: String },
+    /// Worker-reported source neighborhood unavailability.
+    SourceUnavailable { source: String, reason: String },
+    /// Remaining slots moved between proven and adjacent without weakening policy.
+    Reallocated {
+        from: DiscoveryPlanSourceRole,
+        to: DiscoveryPlanSourceRole,
+        count: u16,
+    },
+    /// Overall shortfall after policy enforcement (no invented results).
+    Underfilled { requested: u16, filled: u16 },
+}
+
+/// Worker-reported unavailability for a planned source neighborhood.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct ReportedSourceAvailability {
+    /// Generic source locator the worker could not use.
+    pub source: String,
+    /// Inspectable harness reason (for example authentication or unreachable).
+    pub reason: String,
+}
+
+/// Request to atomically finish a leased Personal Discovery Task into a batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct CompleteDiscoveryResultBatchRequest {
+    /// Claimed Personal Discovery Task producing this batch.
+    pub task_id: DiscoveryTaskId,
+    /// Ordered shortlist of prior task-bound submissions (finite, provenance-bearing).
+    pub submission_ids: Vec<CandidateSubmissionId>,
+    /// Optional worker-reported source availability for inspectable shortfalls.
+    #[serde(default)]
+    pub source_availability: Vec<ReportedSourceAvailability>,
+}
+
+/// Private finite shortlist returned from one Personal Discovery Task.
+///
+/// Never federated. Retains task and plan identity for explainability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryResultBatch {
+    pub id: DiscoveryResultBatchId,
+    pub user_id: UserId,
+    pub tenant_id: Option<TenantId>,
+    pub task_id: DiscoveryTaskId,
+    pub plan_id: DiscoveryPlanId,
+    /// Ready / reviewed / dismissed lifecycle, independent of task state.
+    pub state: DiscoveryResultBatchState,
+    /// One-shot results-ready notice state, independent of review.
+    pub notification_state: DiscoveryResultNotificationState,
+    /// Plan-requested finite size.
+    pub requested_size: u16,
+    /// Plan allocation quotas at completion time.
+    pub allocation: DiscoveryPlanAllocation,
+    /// How many selected items filled each allocation role after policy.
+    pub allocation_filled: DiscoveryPlanAllocation,
+    /// Ordered finite Candidate references with provenance.
+    pub items: Vec<DiscoveryResultItem>,
+    /// Inspectable underfill, reallocation, cap, block, and availability reasons.
+    pub source_availability: Vec<DiscoveryResultAvailabilityReason>,
+    pub created_at: DateTime<Utc>,
+    pub reviewed_at: Option<DateTime<Utc>>,
+    pub dismissed_at: Option<DateTime<Utc>>,
 }
 
 /// Exclusive, expiring ownership of a Discovery Task.
@@ -3362,14 +3530,26 @@ pub enum CandidateSubmissionRequestTarget {
         /// Owning discovery task and pinned package version, when task-driven.
         task_context: Option<CandidateTaskContext>,
     },
+    /// Agent-discovered shortlist item bound to a claimed Personal Discovery Task.
+    ///
+    /// Never creates Interest Seeds or other learning evidence by itself.
+    PersonalDiscovery {
+        /// Claimed Personal Discovery Task authorizing this submission.
+        task_id: DiscoveryTaskId,
+        /// Allocation role under which the worker presents this result.
+        allocation_role: DiscoveryPlanSourceRole,
+        /// Optional permitted source-neighborhood facts for diversity caps.
+        #[serde(default)]
+        source_facts: CandidateInterestSeedMetadata,
+    },
 }
 
 impl CandidateSubmissionRequestTarget {
-    /// Returns proposed Pod placements, or an empty slice for a User target.
+    /// Returns proposed Pod placements, or an empty slice for non-Pod targets.
     #[must_use]
     pub fn placements(&self) -> &[ProposedCandidatePlacement] {
         match self {
-            Self::User { .. } => &[],
+            Self::User { .. } | Self::PersonalDiscovery { .. } => &[],
             Self::PodPlacements { placements, .. } => placements,
         }
     }
@@ -3378,8 +3558,17 @@ impl CandidateSubmissionRequestTarget {
     #[must_use]
     pub const fn task_context(&self) -> Option<CandidateTaskContext> {
         match self {
-            Self::User { .. } => None,
+            Self::User { .. } | Self::PersonalDiscovery { .. } => None,
             Self::PodPlacements { task_context, .. } => *task_context,
+        }
+    }
+
+    /// Returns the Personal Discovery task identity, when present.
+    #[must_use]
+    pub const fn personal_discovery_task_id(&self) -> Option<DiscoveryTaskId> {
+        match self {
+            Self::PersonalDiscovery { task_id, .. } => Some(*task_id),
+            Self::User { .. } | Self::PodPlacements { .. } => None,
         }
     }
 }
@@ -3425,14 +3614,27 @@ pub enum CandidateSubmissionTarget {
         /// Optional source-neighborhood facts permitted for private learning.
         interest_seed_metadata: CandidateInterestSeedMetadata,
     },
+    /// Agent-discovered Personal Discovery shortlist item; never User evidence.
+    PersonalDiscovery {
+        /// User who owns the Personal Discovery Task and plan.
+        user_id: UserId,
+        /// Claimed Personal Discovery Task.
+        task_id: DiscoveryTaskId,
+        /// Immutable plan pinned to the task.
+        discovery_plan_id: DiscoveryPlanId,
+        /// Allocation role under which the worker presented this result.
+        allocation_role: DiscoveryPlanSourceRole,
+        /// Optional permitted source-neighborhood facts for diversity caps.
+        source_facts: CandidateInterestSeedMetadata,
+    },
 }
 
 impl CandidateSubmissionTarget {
-    /// Returns proposed Pod placements, or an empty slice for a User target.
+    /// Returns proposed Pod placements, or an empty slice for non-Pod targets.
     #[must_use]
     pub fn placements(&self) -> &[ProposedCandidatePlacement] {
         match self {
-            Self::User { .. } => &[],
+            Self::User { .. } | Self::PersonalDiscovery { .. } => &[],
             Self::PodPlacements { placements, .. } => placements,
         }
     }
@@ -3442,7 +3644,9 @@ impl CandidateSubmissionTarget {
     pub const fn acquisition_origin(&self) -> CandidateAcquisitionOrigin {
         match self {
             Self::User { .. } => CandidateAcquisitionOrigin::InteractiveUser,
-            Self::PodPlacements { .. } => CandidateAcquisitionOrigin::AgentDiscovery,
+            Self::PodPlacements { .. } | Self::PersonalDiscovery { .. } => {
+                CandidateAcquisitionOrigin::AgentDiscovery
+            }
         }
     }
 
@@ -3456,8 +3660,17 @@ impl CandidateSubmissionTarget {
     #[must_use]
     pub const fn task_context(&self) -> Option<CandidateTaskContext> {
         match self {
-            Self::User { .. } => None,
+            Self::User { .. } | Self::PersonalDiscovery { .. } => None,
             Self::PodPlacements { task_context, .. } => *task_context,
+        }
+    }
+
+    /// Returns the Personal Discovery task identity, when present.
+    #[must_use]
+    pub const fn personal_discovery_task_id(&self) -> Option<DiscoveryTaskId> {
+        match self {
+            Self::PersonalDiscovery { task_id, .. } => Some(*task_id),
+            Self::User { .. } | Self::PodPlacements { .. } => None,
         }
     }
 
@@ -3469,7 +3682,16 @@ impl CandidateSubmissionTarget {
                 interest_seed_metadata,
                 ..
             } => Some(interest_seed_metadata),
-            Self::PodPlacements { .. } => None,
+            Self::PodPlacements { .. } | Self::PersonalDiscovery { .. } => None,
+        }
+    }
+
+    /// Returns source facts used for Personal Discovery diversity caps.
+    #[must_use]
+    pub fn personal_source_facts(&self) -> Option<&CandidateInterestSeedMetadata> {
+        match self {
+            Self::PersonalDiscovery { source_facts, .. } => Some(source_facts),
+            Self::User { .. } | Self::PodPlacements { .. } => None,
         }
     }
 }

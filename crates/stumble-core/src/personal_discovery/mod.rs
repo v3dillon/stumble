@@ -1,4 +1,7 @@
 mod network_leads;
+mod result_batches;
+
+pub(crate) use result_batches::build_discovery_result_batch;
 
 use crate::agent_tools::AgentToolsError;
 use crate::domain::*;

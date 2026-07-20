@@ -168,6 +168,11 @@ pub(super) enum PersonalDiscoveryWorkflow {
     Readiness,
     Request(InputArgs),
     Plan(IdArgs),
+    CompleteBatch(InputArgs),
+    Batches,
+    Batch(IdArgs),
+    DismissBatch(IdArgs),
+    ReviewBatch(IdArgs),
 }
 
 #[derive(Subcommand)]

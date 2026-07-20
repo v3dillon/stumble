@@ -221,6 +221,19 @@ pub fn router_with_options(
             get(personal_discovery_readiness),
         )
         .route("/personal-discovery", post(request_personal_discovery))
+        .route(
+            "/discovery-result-batches",
+            get(list_discovery_result_batches).post(complete_discovery_result_batch),
+        )
+        .route("/discovery-result-batches/:id", get(discovery_result_batch))
+        .route(
+            "/discovery-result-batches/:id/dismiss",
+            post(dismiss_discovery_result_batch),
+        )
+        .route(
+            "/discovery-result-batches/:id/reviewed",
+            post(mark_discovery_result_batch_reviewed),
+        )
         .route("/discovery-plans/:id", get(discovery_plan))
         .route("/discovery-tasks/ready", get(list_ready_discovery_tasks))
         .route("/discovery-tasks/:id", get(discovery_task_status))
@@ -657,6 +670,62 @@ async fn request_personal_discovery(
     Ok(Json(state.tools.request_personal_discovery(
         &ctx,
         request,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn list_discovery_result_batches(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<DiscoveryResultBatch>>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.list_discovery_result_batches(&ctx)?))
+}
+
+async fn complete_discovery_result_batch(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<CompleteDiscoveryResultBatchRequest>,
+) -> Result<Json<DiscoveryResultBatch>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.complete_discovery_result_batch(
+        &ctx,
+        request,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn discovery_result_batch(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<DiscoveryResultBatchId>,
+) -> Result<Json<DiscoveryResultBatch>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.discovery_result_batch(&ctx, id)?))
+}
+
+async fn dismiss_discovery_result_batch(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<DiscoveryResultBatchId>,
+) -> Result<Json<DiscoveryResultBatch>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.dismiss_discovery_result_batch(
+        &ctx,
+        id,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn mark_discovery_result_batch_reviewed(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<DiscoveryResultBatchId>,
+) -> Result<Json<DiscoveryResultBatch>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.mark_discovery_result_batch_reviewed(
+        &ctx,
+        id,
         chrono::Utc::now(),
     )?))
 }

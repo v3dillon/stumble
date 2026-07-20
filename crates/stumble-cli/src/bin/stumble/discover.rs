@@ -11,9 +11,9 @@ use serde_json::json;
 use stumble_cli::{read_json_input, ErrorBody, ExitStatusCategory};
 use stumble_core::{
     AgentTools, AuthContext, CandidateConfidence, CandidateId, CandidateReviewState,
-    CandidateSubmissionRequest, CurationRationale, DiscoveryPlanId, DiscoveryTask, DiscoveryTaskId,
-    DiscoveryTaskState, PlacementReviewDecision, RequestPersonalDiscovery,
-    RouteCandidatePlacementRequest, StoreError,
+    CandidateSubmissionRequest, CompleteDiscoveryResultBatchRequest, CurationRationale,
+    DiscoveryPlanId, DiscoveryResultBatchId, DiscoveryTask, DiscoveryTaskId, DiscoveryTaskState,
+    PlacementReviewDecision, RequestPersonalDiscovery, RouteCandidatePlacementRequest, StoreError,
 };
 
 pub(super) fn execute(
@@ -62,6 +62,57 @@ fn execute_personal(
             let id = parse_id::<DiscoveryPlanId>(&args.id)?;
             serde_json::to_value(tools.discovery_plan(actor, id).map_err(agent_tools_error)?)
                 .map_err(internal_error)
+        }
+        PersonalDiscoveryWorkflow::CompleteBatch(args) => {
+            let request: CompleteDiscoveryResultBatchRequest = serde_json::from_value(
+                read_json_input(&args.input)
+                    .map_err(|error| (error, ExitStatusCategory::ValidationOrConflict))?,
+            )
+            .map_err(|error| {
+                (
+                    ErrorBody::new("invalid_input", error.to_string()),
+                    ExitStatusCategory::ValidationOrConflict,
+                )
+            })?;
+            serde_json::to_value(
+                tools
+                    .complete_discovery_result_batch(actor, request, chrono::Utc::now())
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error)
+        }
+        PersonalDiscoveryWorkflow::Batches => serde_json::to_value(
+            tools
+                .list_discovery_result_batches(actor)
+                .map_err(agent_tools_error)?,
+        )
+        .map_err(internal_error),
+        PersonalDiscoveryWorkflow::Batch(args) => {
+            let id = parse_id::<DiscoveryResultBatchId>(&args.id)?;
+            serde_json::to_value(
+                tools
+                    .discovery_result_batch(actor, id)
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error)
+        }
+        PersonalDiscoveryWorkflow::DismissBatch(args) => {
+            let id = parse_id::<DiscoveryResultBatchId>(&args.id)?;
+            serde_json::to_value(
+                tools
+                    .dismiss_discovery_result_batch(actor, id, chrono::Utc::now())
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error)
+        }
+        PersonalDiscoveryWorkflow::ReviewBatch(args) => {
+            let id = parse_id::<DiscoveryResultBatchId>(&args.id)?;
+            serde_json::to_value(
+                tools
+                    .mark_discovery_result_batch_reviewed(actor, id, chrono::Utc::now())
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error)
         }
     }
 }
