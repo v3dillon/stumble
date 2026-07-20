@@ -1,21 +1,21 @@
-use crate::agent_tools::AgentToolsError;
 use crate::domain::*;
-use crate::store::{InMemoryStore, StoreError};
+use crate::store::InMemoryStore;
 use std::collections::{HashMap, HashSet};
 use url::Url;
 
 pub(crate) fn record_interest_seed(
     store: &mut InMemoryStore,
-    ctx: &AuthContext,
     candidate: &Candidate,
     submission: &CandidateSubmission,
-) -> Result<(), AgentToolsError> {
-    let user_id = ctx.user_id.ok_or_else(|| {
-        StoreError::Validation("Interest Seed requires an authenticated User".into())
-    })?;
-    submission.target.interest_seed_metadata().ok_or_else(|| {
-        StoreError::Validation("Interest Seed requires a User submission target".into())
-    })?;
+) {
+    let CandidateSubmissionTarget::User {
+        user_id,
+        learn: true,
+        ..
+    } = submission.target
+    else {
+        return;
+    };
     let signals = candidate_submission_taste_signals(candidate, submission);
     let key = (user_id, candidate.id);
     let provenance = submission.evidence.provenance.clone();
@@ -38,20 +38,19 @@ pub(crate) fn record_interest_seed(
         seed.evidence.sort_by(|left, right| {
             taste_signal_key(&left.signal).cmp(&taste_signal_key(&right.signal))
         });
-        return Ok(());
+        return;
     }
     store.interest_seeds.insert(
         key,
         InterestSeed {
             user_id,
-            tenant_id: ctx.tenant_id,
+            tenant_id: submission.tenant_id,
             candidate_id: candidate.id,
             evidence,
             created_at: submission.created_at,
             retracted_at: None,
         },
     );
-    Ok(())
 }
 
 pub(crate) fn candidate_submission_taste_signals(
@@ -237,7 +236,7 @@ enum TasteProfileProjection {
 impl TasteProfileProjection {
     fn key(&self) -> (&str, &str) {
         match self {
-            Self::Source(affinity) => source_affinity_key(&affinity.signal),
+            Self::Source(affinity) => affinity.signal.key(),
             Self::Learned(weight) => taste_signal_key(&weight.signal),
         }
     }
@@ -262,36 +261,6 @@ fn source_affinity_signal(signal: &LearnedTasteSignal) -> Option<SourceAffinityS
     }
 }
 
-pub(crate) fn source_affinity_key(signal: &SourceAffinitySignal) -> (&str, &str) {
-    match signal {
-        SourceAffinitySignal::Source(value) => ("source", value),
-        SourceAffinitySignal::Publisher(value) => ("publisher", value),
-        SourceAffinitySignal::AuthorOrAccount(value) => ("author_or_account", value),
-        SourceAffinitySignal::Community(value) => ("community", value),
-        SourceAffinitySignal::ReferrerContext(value) => ("referrer_context", value),
-    }
-}
-
-pub(crate) fn source_affinity_signals_match(
-    left: &SourceAffinitySignal,
-    right: &SourceAffinitySignal,
-) -> bool {
-    match (left, right) {
-        (SourceAffinitySignal::Source(left), SourceAffinitySignal::Source(right))
-        | (SourceAffinitySignal::Publisher(left), SourceAffinitySignal::Publisher(right))
-        | (
-            SourceAffinitySignal::AuthorOrAccount(left),
-            SourceAffinitySignal::AuthorOrAccount(right),
-        )
-        | (SourceAffinitySignal::Community(left), SourceAffinitySignal::Community(right))
-        | (
-            SourceAffinitySignal::ReferrerContext(left),
-            SourceAffinitySignal::ReferrerContext(right),
-        ) => left.eq_ignore_ascii_case(right),
-        _ => false,
-    }
-}
-
 pub(crate) fn source_affinity_is_blocked(
     preferences: &UserPreferences,
     signal: &SourceAffinitySignal,
@@ -299,7 +268,7 @@ pub(crate) fn source_affinity_is_blocked(
     preferences
         .blocked_source_affinities
         .iter()
-        .any(|blocked| source_affinity_signals_match(blocked, signal))
+        .any(|blocked| blocked.eq_ignore_ascii_case(signal))
         || matches!(signal, SourceAffinitySignal::Source(source)
             if preferences.blocked_sources.iter().any(|blocked| blocked.eq_ignore_ascii_case(source)))
 }
@@ -384,4 +353,68 @@ pub(crate) fn taste_signal_key(signal: &LearnedTasteSignal) -> (&str, &str) {
 
 pub(crate) fn taste_signals_match(left: &LearnedTasteSignal, right: &LearnedTasteSignal) -> bool {
     left == right
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[test]
+    fn seed_ownership_comes_from_the_authorized_submission_target() {
+        let target_user = uuid::Uuid::now_v7();
+        let submission_tenant = uuid::Uuid::now_v7();
+        let candidate_id = uuid::Uuid::now_v7().into();
+        let candidate = Candidate {
+            id: candidate_id,
+            tenant_id: None,
+            source_url: "https://example.com/report".into(),
+            canonical_url: "https://example.com/report".into(),
+            review_state: CandidateReviewState::Pending,
+            created_at: Utc::now(),
+        };
+        let submission = CandidateSubmission {
+            id: uuid::Uuid::now_v7().into(),
+            candidate_id,
+            tenant_id: Some(submission_tenant),
+            submitted_by: uuid::Uuid::now_v7().into(),
+            target: CandidateSubmissionTarget::User {
+                user_id: target_user,
+                learn: true,
+                interest_seed_metadata: CandidateInterestSeedMetadata::default(),
+            },
+            evidence: CandidateSubmissionEvidence {
+                source_url: candidate.source_url.clone(),
+                source_metadata: CandidateSourceMetadata {
+                    title: None,
+                    author: None,
+                    published_at: None,
+                },
+                permitted_excerpt: None,
+                summary: None,
+                content_type: CandidateContentType::Article,
+                media_references: Vec::new(),
+                tags: Vec::new(),
+                provenance: CandidateProvenance {
+                    discovered_at: Utc::now(),
+                    discovery_method: "test".into(),
+                    referrer_url: None,
+                },
+                harness_idempotency_key: "harness".into(),
+                client_idempotency_key: "client".into(),
+            },
+            created_at: Utc::now(),
+        };
+        let mut store = InMemoryStore::default();
+
+        record_interest_seed(&mut store, &candidate, &submission);
+
+        assert!(store
+            .interest_seeds
+            .contains_key(&(target_user, candidate_id)));
+        assert_eq!(
+            store.interest_seeds[&(target_user, candidate_id)].tenant_id,
+            Some(submission_tenant)
+        );
+    }
 }

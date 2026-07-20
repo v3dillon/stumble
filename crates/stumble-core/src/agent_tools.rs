@@ -5,9 +5,8 @@ use crate::feed_mix::{
 };
 use crate::interest_seeds::{
     candidate_submission_taste_signals, interest_seed_evidence, record_interest_seed,
-    reset_interest_seed_evidence, source_affinity_is_blocked, source_affinity_key,
-    source_affinity_signals_match, taste_profile_projections, taste_signal_key,
-    taste_signals_match,
+    reset_interest_seed_evidence, source_affinity_is_blocked, taste_profile_projections,
+    taste_signal_key, taste_signals_match,
 };
 use crate::ranking::{rank_discovery, RankingInput};
 use crate::signing::{
@@ -3434,7 +3433,7 @@ impl AgentTools {
             .candidate_submissions
             .insert(submission.id, submission.clone());
         if submission.target.learning_enabled() {
-            record_interest_seed(&mut projected, ctx, &candidate, &submission)?;
+            record_interest_seed(&mut projected, &candidate, &submission);
         }
         enrich_accepted_content_item(&mut projected, ctx, &candidate)?;
         record_harness_write(
@@ -5556,6 +5555,12 @@ impl AgentTools {
     }
 
     /// Retracts one canonical submission's learning contribution without deleting content.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the caller lacks private retraction authority, the
+    /// Interest Seed does not exist in the caller's User and tenant scope, or
+    /// persistence fails.
     pub fn retract_interest_seed(
         &self,
         ctx: &AuthContext,
@@ -8020,27 +8025,12 @@ fn normalize_source_affinity_signals(
 ) -> Vec<SourceAffinitySignal> {
     let mut output = Vec::new();
     for signal in values {
-        let normalized = match signal {
-            SourceAffinitySignal::Source(value) => {
-                SourceAffinitySignal::Source(value.trim().to_string())
-            }
-            SourceAffinitySignal::Publisher(value) => {
-                SourceAffinitySignal::Publisher(value.trim().to_string())
-            }
-            SourceAffinitySignal::AuthorOrAccount(value) => {
-                SourceAffinitySignal::AuthorOrAccount(value.trim().to_string())
-            }
-            SourceAffinitySignal::Community(value) => {
-                SourceAffinitySignal::Community(value.trim().to_string())
-            }
-            SourceAffinitySignal::ReferrerContext(value) => {
-                SourceAffinitySignal::ReferrerContext(value.trim().to_string())
-            }
+        let Some(normalized) = signal.normalized() else {
+            continue;
         };
-        if source_affinity_key(&normalized).1.is_empty()
-            || output
-                .iter()
-                .any(|existing| source_affinity_signals_match(existing, &normalized))
+        if output
+            .iter()
+            .any(|existing: &SourceAffinitySignal| existing.eq_ignore_ascii_case(&normalized))
         {
             continue;
         }
@@ -9751,7 +9741,7 @@ fn feed_attention_value(
             continue;
         }
         learned_value += affinity.weight;
-        let (signal_kind, signal_value) = source_affinity_key(&affinity.signal);
+        let (signal_kind, signal_value) = affinity.signal.key();
         let supporting = affinity
             .supporting_seeds
             .saturating_add(affinity.supporting_feedback);

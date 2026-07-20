@@ -66,10 +66,10 @@ fn request(url: &str, learn: bool, key: &str) -> CandidateSubmissionRequest {
     CandidateSubmissionRequest {
         target: CandidateSubmissionRequestTarget::User {
             learn,
-            interest_seed_metadata: CandidateInterestSeedMetadata {
-                publisher: Some("Systems Weekly".into()),
-                community: Some("rust-lang".into()),
-            },
+            interest_seed_metadata: CandidateInterestSeedMetadata::new(
+                Some("Systems Weekly".into()),
+                Some("rust-lang".into()),
+            ),
         },
         evidence: CandidateSubmissionEvidence {
             source_url: url.into(),

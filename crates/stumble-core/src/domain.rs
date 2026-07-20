@@ -2956,11 +2956,23 @@ pub struct CandidateSourceMetadata {
 /// Optional permitted source-neighborhood facts for Interest Seed enrichment.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
+#[non_exhaustive]
 pub struct CandidateInterestSeedMetadata {
     /// Publisher distinct from the source author or account.
     pub publisher: Option<String>,
     /// Community in which the reference appeared.
     pub community: Option<String>,
+}
+
+impl CandidateInterestSeedMetadata {
+    /// Creates optional source-neighborhood metadata for private learning.
+    #[must_use]
+    pub const fn new(publisher: Option<String>, community: Option<String>) -> Self {
+        Self {
+            publisher,
+            community,
+        }
+    }
 }
 
 /// Inspectable evidence describing how an Agent Harness found a Candidate.
@@ -3042,8 +3054,10 @@ pub struct CandidateSubmissionRequest {
 pub enum CandidateSubmissionRequestTarget {
     /// A direct User action with its private-learning controls.
     User {
+        /// Whether this explicit User action contributes private learning evidence.
         #[serde(default = "default_candidate_learning")]
         learn: bool,
+        /// Optional source-neighborhood facts permitted for private learning.
         #[serde(default)]
         interest_seed_metadata: CandidateInterestSeedMetadata,
     },
@@ -3051,11 +3065,13 @@ pub enum CandidateSubmissionRequestTarget {
     PodPlacements {
         /// Separately evidenced authorized local Pods; validated as non-empty.
         placements: Vec<ProposedCandidatePlacement>,
+        /// Owning discovery task and pinned package version, when task-driven.
         task_context: Option<CandidateTaskContext>,
     },
 }
 
 impl CandidateSubmissionRequestTarget {
+    /// Returns proposed Pod placements, or an empty slice for a User target.
     #[must_use]
     pub fn placements(&self) -> &[ProposedCandidatePlacement] {
         match self {
@@ -3064,6 +3080,7 @@ impl CandidateSubmissionRequestTarget {
         }
     }
 
+    /// Returns the discovery-task context carried by a Pod target, when present.
     #[must_use]
     pub const fn task_context(&self) -> Option<CandidateTaskContext> {
         match self {
@@ -3100,18 +3117,24 @@ pub struct CandidateSubmission {
 pub enum CandidateSubmissionTarget {
     /// Evidence proposed to one or more Pods owned by this target.
     PodPlacements {
+        /// Independently evidenced Pod destinations for this submission.
         placements: Vec<ProposedCandidatePlacement>,
+        /// Owning discovery task and pinned package version, when task-driven.
         task_context: Option<CandidateTaskContext>,
     },
     /// Private reference submitted directly by this User.
     User {
+        /// User whose explicit action created this private evidence.
         user_id: UserId,
+        /// Whether this action contributes private learning evidence.
         learn: bool,
+        /// Optional source-neighborhood facts permitted for private learning.
         interest_seed_metadata: CandidateInterestSeedMetadata,
     },
 }
 
 impl CandidateSubmissionTarget {
+    /// Returns proposed Pod placements, or an empty slice for a User target.
     #[must_use]
     pub fn placements(&self) -> &[ProposedCandidatePlacement] {
         match self {
@@ -3120,6 +3143,7 @@ impl CandidateSubmissionTarget {
         }
     }
 
+    /// Returns the acquisition origin derived from the authorized target.
     #[must_use]
     pub const fn acquisition_origin(&self) -> CandidateAcquisitionOrigin {
         match self {
@@ -3128,11 +3152,13 @@ impl CandidateSubmissionTarget {
         }
     }
 
+    /// Reports whether this target contributes private learning evidence.
     #[must_use]
     pub const fn learning_enabled(&self) -> bool {
         matches!(self, Self::User { learn: true, .. })
     }
 
+    /// Returns the discovery-task context carried by a Pod target, when present.
     #[must_use]
     pub const fn task_context(&self) -> Option<CandidateTaskContext> {
         match self {
@@ -3141,6 +3167,7 @@ impl CandidateSubmissionTarget {
         }
     }
 
+    /// Returns private Interest Seed metadata for a User target.
     #[must_use]
     pub fn interest_seed_metadata(&self) -> Option<&CandidateInterestSeedMetadata> {
         match self {
@@ -3318,27 +3345,41 @@ pub struct TasteProfile {
 /// Operation currently available through an inspected Taste Profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum TasteProfileAllowedAction {
+    /// Replace explicit Taste Profile preferences.
     Set,
+    /// Reset all or selected learned evidence.
     Reset,
+    /// Retract an active Interest Seed contribution.
     Retract,
 }
 
 /// Aggregate lifecycle counts for private Interest Seeds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct InterestSeedEvidenceSummary {
+    /// Number of currently active private Interest Seeds.
     pub active_seed_count: u32,
+    /// Number of retained but retracted private Interest Seeds.
     pub retracted_seed_count: u32,
 }
 
 /// Inspectable aggregate affinity learned from User evidence.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SourceAffinity {
+    /// Typed source-neighborhood subject of the aggregate affinity.
     pub signal: SourceAffinitySignal,
+    /// Bounded ranking adjustment after explicit-preference precedence.
     pub weight: f32,
+    /// Number of active Interest Seeds supporting this affinity.
     pub supporting_seeds: u32,
+    /// Number of positive feedback events supporting this affinity.
     pub supporting_feedback: u32,
+    /// Number of negative feedback events opposing this affinity.
     pub opposing_feedback: u32,
+    /// Whether the User explicitly blocks this exact typed affinity.
     pub explicitly_blocked: bool,
 }
 
@@ -3347,11 +3388,48 @@ pub struct SourceAffinity {
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SourceAffinitySignal {
+    /// Canonical source domain.
     Source(String),
+    /// Publisher distinct from an author or account.
     Publisher(String),
+    /// Authorship identity or social account.
     AuthorOrAccount(String),
+    /// Community in which a reference appeared.
     Community(String),
+    /// Canonical domain of the discovery referrer.
     ReferrerContext(String),
+}
+
+impl SourceAffinitySignal {
+    pub(crate) fn key(&self) -> (&'static str, &str) {
+        match self {
+            Self::Source(value) => ("source", value),
+            Self::Publisher(value) => ("publisher", value),
+            Self::AuthorOrAccount(value) => ("author_or_account", value),
+            Self::Community(value) => ("community", value),
+            Self::ReferrerContext(value) => ("referrer_context", value),
+        }
+    }
+
+    pub(crate) fn eq_ignore_ascii_case(&self, other: &Self) -> bool {
+        let (kind, value) = self.key();
+        let (other_kind, other_value) = other.key();
+        kind == other_kind && value.eq_ignore_ascii_case(other_value)
+    }
+
+    pub(crate) fn normalized(self) -> Option<Self> {
+        let normalized = self.key().1.trim().to_string();
+        if normalized.is_empty() {
+            return None;
+        }
+        Some(match self {
+            Self::Source(_) => Self::Source(normalized),
+            Self::Publisher(_) => Self::Publisher(normalized),
+            Self::AuthorOrAccount(_) => Self::AuthorOrAccount(normalized),
+            Self::Community(_) => Self::Community(normalized),
+            Self::ReferrerContext(_) => Self::ReferrerContext(normalized),
+        })
+    }
 }
 
 /// One explainable learned preference. Evidence is aggregated to avoid exposing raw history.
