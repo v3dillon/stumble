@@ -9922,6 +9922,15 @@ fn record_add_to_pod_learning(
     item: &Submission,
     now: chrono::DateTime<Utc>,
 ) {
+    if authorize_interactive_user_action(
+        store,
+        ctx,
+        "Add-to-Pod learning requires an interactive User action",
+    )
+    .is_err()
+    {
+        return;
+    }
     if let Some(user_id) = ctx.user_id {
         record_taste_learning_evidence(
             store,

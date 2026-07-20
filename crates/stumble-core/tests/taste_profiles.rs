@@ -335,17 +335,20 @@ fn unattended_harness_cannot_record_learning_feedback() {
     let worker = unattended_harness(
         &tools,
         "unattended learner",
-        vec![HarnessCapability::FeedRead, HarnessCapability::Feedback],
+        vec![
+            HarnessCapability::FeedRead,
+            HarnessCapability::Feedback,
+            HarnessCapability::PodCuration,
+        ],
     );
     let now = Utc::now();
     let batch = tools
         .get_feed_batch(&worker, FeedBatchRequest::new(100).unwrap(), now)
         .unwrap();
 
-    assert!(batch
-        .items
-        .iter()
-        .all(|item| item.allowed_actions.is_empty()));
+    assert!(batch.items.iter().all(|item| {
+        item.allowed_actions == vec![stumble_core::domain::FeedAllowedAction::AddToPod]
+    }));
 
     assert!(matches!(
         tools.record_feed_feedback(
@@ -377,6 +380,41 @@ fn unattended_harness_cannot_record_learning_feedback() {
             },
         )
         .is_err());
+
+    let curator = harness(
+        &tools,
+        "interactive target curator",
+        vec![HarnessCapability::PodCuration],
+    );
+    let target = tools
+        .create_pod(
+            &curator,
+            CreatePodRequest {
+                name: "Automation review".into(),
+                slug: "automation-review".into(),
+                description: "Review worker discoveries".into(),
+                visibility: Visibility::Private,
+            },
+        )
+        .unwrap();
+    tools
+        .add_content_item_to_pod(
+            &worker,
+            AddContentItemToPodRequest::new(item_id, target.id, None).unwrap(),
+            now,
+        )
+        .unwrap();
+    let inspector = harness(
+        &tools,
+        "interactive profile inspector",
+        vec![HarnessCapability::Feedback],
+    );
+    assert!(tools
+        .taste_profile(&inspector)
+        .unwrap()
+        .learned
+        .iter()
+        .all(|weight| weight.signal != LearnedTasteSignal::Topic("automation".into())));
 }
 
 #[test]

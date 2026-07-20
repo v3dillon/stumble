@@ -81,7 +81,7 @@ Potential content discovered during ingestion that has not yet been accepted int
 _Avoid_: Draft post, pending submission
 
 **Candidate Submission**:
-The idempotent, provenance-bearing structured input through which an Agent Harness proposes a Candidate and one or more Pod Placements to Stumble.
+The idempotent, provenance-bearing structured input through which an Agent Harness submits a Candidate to an explicit User or Pod Placements target.
 _Avoid_: Scrape result, link submission
 
 **Accepted Placement**:
