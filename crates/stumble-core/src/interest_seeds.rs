@@ -146,11 +146,17 @@ pub(crate) fn taste_profile_projections(
     let mut projections = taste_signal_aggregates(store, user_id, tenant_id)
         .into_iter()
         .map(
-            |(signal, aggregate)| match source_affinity_signal(&signal) {
+            |(signal, aggregate)| match signal.source_affinity() {
                 Some(source_signal) => TasteProfileProjection::Source(
                     aggregate.source_affinity(source_signal, preferences),
                 ),
-                None => TasteProfileProjection::Learned(aggregate.learned_weight(signal)),
+                None => {
+                    let explicitly_blocked = matches!(&signal, LearnedTasteSignal::Topic(topic)
+                        if preferences.is_some_and(|preferences| preferences.blocked_topics.iter().any(|blocked| blocked.eq_ignore_ascii_case(topic))));
+                    TasteProfileProjection::Learned(
+                        aggregate.learned_weight(signal, explicitly_blocked),
+                    )
+                }
             },
         )
         .collect::<Vec<_>>();
@@ -195,8 +201,12 @@ impl TasteSignalAggregate {
         }
     }
 
-    fn learned_weight(self, signal: LearnedTasteSignal) -> LearnedTasteWeight {
-        let weight = self.inferred_weight(false);
+    fn learned_weight(
+        self,
+        signal: LearnedTasteSignal,
+        explicitly_blocked: bool,
+    ) -> LearnedTasteWeight {
+        let weight = self.inferred_weight(explicitly_blocked);
         let supporting_signals = self
             .supporting_seeds
             .saturating_add(self.supporting_feedback);
@@ -237,26 +247,7 @@ impl TasteProfileProjection {
     fn key(&self) -> (&str, &str) {
         match self {
             Self::Source(affinity) => affinity.signal.key(),
-            Self::Learned(weight) => taste_signal_key(&weight.signal),
-        }
-    }
-}
-
-fn source_affinity_signal(signal: &LearnedTasteSignal) -> Option<SourceAffinitySignal> {
-    match signal {
-        LearnedTasteSignal::Topic(_) => None,
-        LearnedTasteSignal::Source(value) => Some(SourceAffinitySignal::Source(value.clone())),
-        LearnedTasteSignal::Publisher(value) => {
-            Some(SourceAffinitySignal::Publisher(value.clone()))
-        }
-        LearnedTasteSignal::AuthorOrAccount(value) => {
-            Some(SourceAffinitySignal::AuthorOrAccount(value.clone()))
-        }
-        LearnedTasteSignal::Community(value) => {
-            Some(SourceAffinitySignal::Community(value.clone()))
-        }
-        LearnedTasteSignal::ReferrerContext(value) => {
-            Some(SourceAffinitySignal::ReferrerContext(value.clone()))
+            Self::Learned(weight) => weight.signal.key(),
         }
     }
 }
@@ -341,14 +332,7 @@ pub(crate) fn reset_interest_seed_evidence(
 }
 
 pub(crate) fn taste_signal_key(signal: &LearnedTasteSignal) -> (&str, &str) {
-    match signal {
-        LearnedTasteSignal::Topic(value) => ("topic", value),
-        LearnedTasteSignal::Source(value) => ("source", value),
-        LearnedTasteSignal::Publisher(value) => ("publisher", value),
-        LearnedTasteSignal::AuthorOrAccount(value) => ("author_or_account", value),
-        LearnedTasteSignal::Community(value) => ("community", value),
-        LearnedTasteSignal::ReferrerContext(value) => ("referrer_context", value),
-    }
+    signal.key()
 }
 
 pub(crate) fn taste_signals_match(left: &LearnedTasteSignal, right: &LearnedTasteSignal) -> bool {

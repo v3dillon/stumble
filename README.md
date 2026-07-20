@@ -92,6 +92,7 @@ Read Feed batches, record feedback, and manage taste settings.
 | `stumble feed taste show` | Show taste settings and learned weights. |
 | `stumble feed taste set` | Set explicit taste preferences. |
 | `stumble feed taste reset` | Reset learned taste weights. |
+| `stumble feed taste retract` | Retract one private Interest Seed contribution. |
 
 ## `sync`
 

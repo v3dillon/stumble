@@ -216,6 +216,32 @@ fn candidate_submission_rejects_media_references_that_are_not_permitted_web_urls
 }
 
 #[test]
+fn candidate_submission_rejects_credentials_in_source_and_referrer_urls() {
+    let tools = AgentTools::new(seed_store());
+    let harness = candidate_harness(
+        &tools,
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::CandidateSubmission],
+        None,
+    );
+    let mut source = candidate_request(&[]);
+    source.evidence.source_url = "https://alice:secret@example.com/report".into();
+    let mut referrer = candidate_request(&[]);
+    referrer.evidence.provenance.referrer_url =
+        Some("https://bob:private@search.example/results".into());
+    referrer.evidence.harness_idempotency_key = "credential-referrer-harness".into();
+    referrer.evidence.client_idempotency_key = "credential-referrer-client".into();
+
+    for request in [source, referrer] {
+        assert!(matches!(
+            tools.submit_candidate(&harness, request),
+            Err(AgentToolsError::BadUrl(message)) if message.contains("credentials")
+        ));
+    }
+    assert!(tools.list_candidates(&harness).unwrap().is_empty());
+}
+
+#[test]
 fn media_reference_boundary_canonicalizes_equivalent_web_urls() {
     let reference = MediaReference::new(
         MediaReferenceType::Image,

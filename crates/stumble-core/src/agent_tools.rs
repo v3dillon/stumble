@@ -7114,6 +7114,16 @@ pub fn canonicalize_url(value: &str) -> Result<String, AgentToolsError> {
     canonicalize_url_spelling(value).map_err(|error| AgentToolsError::BadUrl(error.to_string()))
 }
 
+fn canonicalize_candidate_evidence_url(value: &str) -> Result<String, AgentToolsError> {
+    let parsed = Url::parse(value).map_err(|error| AgentToolsError::BadUrl(error.to_string()))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(AgentToolsError::BadUrl(
+            "Candidate evidence URLs must not contain credentials".into(),
+        ));
+    }
+    canonicalize_url(value)
+}
+
 fn discard_replayed_events(
     store: &InMemoryStore,
     cursor: Option<&str>,
@@ -8479,9 +8489,9 @@ fn validate_candidate_submission(
                 .into(),
         });
     }
-    let canonical_source_url = canonicalize_url(&evidence.source_url)?;
+    let canonical_source_url = canonicalize_candidate_evidence_url(&evidence.source_url)?;
     if let Some(referrer_url) = &evidence.provenance.referrer_url {
-        canonicalize_url(referrer_url)?;
+        canonicalize_candidate_evidence_url(referrer_url)?;
     }
     resolve_media_for_store(
         store

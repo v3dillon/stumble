@@ -192,6 +192,9 @@ fn explicit_preferences_override_inferred_affinity() {
     tools
         .submit_candidate(&user, request("https://example.com/rust", true, "one"))
         .unwrap();
+    tools
+        .submit_candidate(&user, request("https://another.example/rust", true, "two"))
+        .unwrap();
     let mut prefer = UpdateTasteProfileRequest::default();
     prefer.interests = Some(vec!["rust".into()]);
     let preferred = tools.update_taste_profile(&user, prefer).unwrap();
@@ -212,6 +215,13 @@ fn explicit_preferences_override_inferred_affinity() {
     ]);
     let blocked = tools.update_taste_profile(&user, block).unwrap();
     assert_eq!(blocked.explicit.blocked_topics, vec!["rust"]);
+    let blocked_topic = blocked
+        .learned
+        .iter()
+        .find(|weight| weight.signal == LearnedTasteSignal::Topic("rust".into()))
+        .unwrap();
+    assert_eq!(blocked_topic.weight, 0.0);
+    assert!(!blocked_topic.evidence_summary.is_empty());
     assert!(blocked.source_affinities.iter().any(|affinity| {
         affinity.signal == SourceAffinitySignal::Source("example.com".into())
             && affinity.explicitly_blocked

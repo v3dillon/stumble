@@ -983,9 +983,12 @@ fn load_sqlite_store_from_connection(
     }
     let had_legacy_pod_memberships = !snapshot.pod_memberships.is_empty();
     let store = snapshot.try_into()?;
-    if !legacy_discovery_task_rows.is_empty() {
-        persist_migrated_discovery_tasks(&transaction, &store, &legacy_discovery_task_rows)?;
-    }
+    persist_migrated_records(
+        &transaction,
+        &store,
+        "discovery_tasks",
+        &legacy_discovery_task_rows,
+    )?;
     persist_migrated_records(&transaction, &store, "candidates", &legacy_candidate_rows)?;
     persist_migrated_records(
         &transaction,
@@ -1071,27 +1074,6 @@ fn persist_migrated_records(
             rusqlite::params![value_json, collection, record_key],
         )?;
         debug_assert_eq!(updated, 1, "loaded migrated row still exists");
-    }
-    Ok(())
-}
-
-fn persist_migrated_discovery_tasks(
-    transaction: &rusqlite::Transaction<'_>,
-    store: &InMemoryStore,
-    legacy_record_keys: &[String],
-) -> Result<(), StorePersistenceError> {
-    let records = store_records(store)?;
-    for record_key in legacy_record_keys {
-        let collection_and_key = ("discovery_tasks".to_string(), record_key.clone());
-        let value_json = records
-            .get(&collection_and_key)
-            .expect("loaded Discovery Task has a canonical store record");
-        let updated = transaction.execute(
-            "UPDATE stumble_store_records SET value_json = ?1
-             WHERE collection = 'discovery_tasks' AND record_key = ?2",
-            rusqlite::params![value_json, record_key],
-        )?;
-        debug_assert_eq!(updated, 1, "loaded Discovery Task row still exists");
     }
     Ok(())
 }
@@ -1662,8 +1644,13 @@ mod tests {
                 )
         ));
 
-        persist_migrated_discovery_tasks(&transaction, &store, std::slice::from_ref(record_key))
-            .unwrap();
+        persist_migrated_records(
+            &transaction,
+            &store,
+            "discovery_tasks",
+            std::slice::from_ref(record_key),
+        )
+        .unwrap();
         transaction.commit().unwrap();
         second
             .execute(

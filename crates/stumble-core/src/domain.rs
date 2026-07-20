@@ -3418,17 +3418,20 @@ impl SourceAffinitySignal {
     }
 
     pub(crate) fn normalized(self) -> Option<Self> {
-        let normalized = self.key().1.trim().to_string();
+        let mut signal = self;
+        let value = match &mut signal {
+            Self::Source(value)
+            | Self::Publisher(value)
+            | Self::AuthorOrAccount(value)
+            | Self::Community(value)
+            | Self::ReferrerContext(value) => value,
+        };
+        let normalized = value.trim().to_string();
         if normalized.is_empty() {
             return None;
         }
-        Some(match self {
-            Self::Source(_) => Self::Source(normalized),
-            Self::Publisher(_) => Self::Publisher(normalized),
-            Self::AuthorOrAccount(_) => Self::AuthorOrAccount(normalized),
-            Self::Community(_) => Self::Community(normalized),
-            Self::ReferrerContext(_) => Self::ReferrerContext(normalized),
-        })
+        *value = normalized;
+        Some(signal)
     }
 }
 
@@ -3457,7 +3460,6 @@ pub enum LearnedTasteSignal {
     Topic(String),
     /// Normalized source domain.
     Source(String),
-    /// Normalized source domain from an Interest Seed.
     /// Normalized publisher.
     Publisher(String),
     /// Normalized author or account.
@@ -3466,6 +3468,34 @@ pub enum LearnedTasteSignal {
     Community(String),
     /// Normalized referring source context.
     ReferrerContext(String),
+}
+
+impl LearnedTasteSignal {
+    pub(crate) fn key(&self) -> (&'static str, &str) {
+        match self {
+            Self::Topic(value) => ("topic", value),
+            Self::Source(value) => ("source", value),
+            Self::Publisher(value) => ("publisher", value),
+            Self::AuthorOrAccount(value) => ("author_or_account", value),
+            Self::Community(value) => ("community", value),
+            Self::ReferrerContext(value) => ("referrer_context", value),
+        }
+    }
+
+    pub(crate) fn source_affinity(&self) -> Option<SourceAffinitySignal> {
+        match self {
+            Self::Topic(_) => None,
+            Self::Source(value) => Some(SourceAffinitySignal::Source(value.clone())),
+            Self::Publisher(value) => Some(SourceAffinitySignal::Publisher(value.clone())),
+            Self::AuthorOrAccount(value) => {
+                Some(SourceAffinitySignal::AuthorOrAccount(value.clone()))
+            }
+            Self::Community(value) => Some(SourceAffinitySignal::Community(value.clone())),
+            Self::ReferrerContext(value) => {
+                Some(SourceAffinitySignal::ReferrerContext(value.clone()))
+            }
+        }
+    }
 }
 
 /// Retractable private evidence derived from one canonical User submission.
