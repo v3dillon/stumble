@@ -2533,11 +2533,12 @@ impl AgentTools {
         Ok(proposal)
     }
 
-    /// Creates one idempotent task for every scheduled Source Rule due in the current period.
+    /// Reports whether the authenticated User has enough evidence for Personal Discovery.
     ///
     /// # Errors
     ///
-    /// Returns an error when authorization, package parsing, locking, or persistence fails.
+    /// Returns an error when authorization fails, the User identity is missing, or the store
+    /// cannot be read.
     pub fn personal_discovery_readiness(
         &self,
         ctx: &AuthContext,
