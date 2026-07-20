@@ -89,7 +89,7 @@ async fn http_mcp_and_cli_share_pending_proposal_behavior() {
         String::from_utf8_lossy(&cli.stderr)
     );
     let created: Value = serde_json::from_slice(&cli.stdout).unwrap();
-    assert_eq!(created["version"], 1);
+    assert_eq!(created["version"], 2);
     assert_eq!(created["data"]["outcome"]["status"], "pending_approval");
     let proposal_id = created["data"]["outcome"]["result"]["id"].as_str().unwrap();
 

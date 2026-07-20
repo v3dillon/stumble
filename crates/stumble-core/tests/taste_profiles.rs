@@ -55,6 +55,28 @@ fn harness(tools: &AgentTools, label: &str, capabilities: Vec<HarnessCapability>
         .unwrap()
 }
 
+fn unattended_harness(
+    tools: &AgentTools,
+    label: &str,
+    capabilities: Vec<HarnessCapability>,
+) -> AuthContext {
+    let issued = tools
+        .register_agent_harness(
+            &tools.default_auth_context().unwrap(),
+            RegisterAgentHarnessRequest {
+                label: label.into(),
+                kind: AgentHarnessKind::Unattended,
+                capabilities,
+                pod_ids: None,
+            },
+        )
+        .unwrap();
+    tools
+        .authenticate_token(issued.token.expose())
+        .unwrap()
+        .unwrap()
+}
+
 fn accepted_item(
     tools: &AgentTools,
     slug: &str,
@@ -301,6 +323,63 @@ fn corroborated_feedback_learns_explainable_weights_and_weak_signal_does_not_ran
 }
 
 #[test]
+fn unattended_harness_cannot_record_learning_feedback() {
+    let tools = AgentTools::new(seed_store());
+    let (_, item_id) = accepted_item(
+        &tools,
+        "unattended-learning",
+        150,
+        "worker.example",
+        vec!["automation".into()],
+    );
+    let worker = unattended_harness(
+        &tools,
+        "unattended learner",
+        vec![HarnessCapability::FeedRead, HarnessCapability::Feedback],
+    );
+    let now = Utc::now();
+    let batch = tools
+        .get_feed_batch(&worker, FeedBatchRequest::new(100).unwrap(), now)
+        .unwrap();
+
+    assert!(batch
+        .items
+        .iter()
+        .all(|item| item.allowed_actions.is_empty()));
+
+    assert!(matches!(
+        tools.record_feed_feedback(
+            &worker,
+            item_id,
+            FeedbackKind::Interesting,
+            None,
+            None,
+            now,
+        ),
+        Err(AgentToolsError::Forbidden { reason }) if reason.contains("interactive")
+    ));
+    assert!(tools
+        .save_link(&worker, SubmissionId::from(item_id))
+        .is_err());
+    assert!(tools
+        .block_source(&worker, "worker.example".into())
+        .is_err());
+    assert!(tools.block_topic(&worker, "automation".into()).is_err());
+    assert!(tools
+        .update_preferences(
+            &worker,
+            UpdatePreferencesRequest {
+                interests: Some(vec!["automation".into()]),
+                blocked_topics: None,
+                blocked_sources: None,
+                preferred_brief_length: None,
+                preferred_discovery_mode: None,
+            },
+        )
+        .is_err());
+}
+
+#[test]
 fn add_to_pod_updates_local_learning_and_user_can_reset_some_or_all_weights() {
     let tools = AgentTools::new(seed_store());
     let (_, item_id) = accepted_item(
@@ -493,6 +572,22 @@ fn taste_profile_requires_unscoped_feedback_authority_and_honors_revocation() {
         .is_err());
     assert!(tools
         .reset_learned_taste(&scoped, ResetLearnedTasteRequest::all())
+        .is_err());
+
+    let unattended = unattended_harness(
+        &tools,
+        "unattended profile",
+        vec![HarnessCapability::Feedback],
+    );
+    assert!(matches!(
+        tools.taste_profile(&unattended),
+        Err(AgentToolsError::Forbidden { reason }) if reason.contains("interactive")
+    ));
+    assert!(tools
+        .update_taste_profile(&unattended, UpdateTasteProfileRequest::default())
+        .is_err());
+    assert!(tools
+        .reset_learned_taste(&unattended, ResetLearnedTasteRequest::all())
         .is_err());
 
     let (unscoped, _) = feedback_harness(&tools);

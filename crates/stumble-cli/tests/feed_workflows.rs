@@ -202,7 +202,7 @@ fn current_batch_is_stable_until_explicit_completion_and_exposes_evidence() {
         }
     });
     let first = environment.run_json(&["feed", "batch", "get", "--input", "-"], &request);
-    assert_eq!(first["version"], 1);
+    assert_eq!(first["version"], 2);
     assert_eq!(first["data"]["state"], "ready");
     assert_eq!(
         first["data"]["batch_intent"]["focus_topics"],

@@ -6,9 +6,9 @@ use axum::{
 };
 use serde_json::{json, Value};
 use stumble_core::{
-    seed_store, AgentTools, CreatePodOutcome, CreatePrivatePodWithPackageRequest,
+    seed_store, AgentHarnessKind, AgentTools, CreatePodOutcome, CreatePrivatePodWithPackageRequest,
     HarnessCapability, MediaReference, MediaReferenceType, PodPackageContents, PodPlacementStatus,
-    ProposalStatus,
+    ProposalStatus, RegisterAgentHarnessRequest,
 };
 use stumble_mcp::streamable_http_router;
 use support::{mcp_request, response_json, McpClient, ScopedHarness};
@@ -112,6 +112,29 @@ async fn feedback_catalog_advertises_interest_seed_retraction() {
         .names()
         .iter()
         .any(|name| name == "retract_interest_seed"));
+}
+
+#[tokio::test]
+async fn unattended_feedback_catalog_omits_interactive_private_tools() {
+    let tools = AgentTools::new(seed_store());
+    let issued = tools
+        .register_agent_harness(
+            &tools.default_auth_context().unwrap(),
+            RegisterAgentHarnessRequest {
+                label: "unattended feedback catalog".into(),
+                kind: AgentHarnessKind::Unattended,
+                capabilities: vec![HarnessCapability::FeedRead, HarnessCapability::Feedback],
+                pod_ids: None,
+            },
+        )
+        .unwrap();
+    let catalog = McpClient::new(streamable_http_router(tools), issued.token.expose())
+        .list_tools(2)
+        .await;
+    let names = catalog.names();
+
+    assert!(!names.iter().any(|name| name == "record_feed_feedback"));
+    assert!(!names.iter().any(|name| name == "retract_interest_seed"));
 }
 
 #[tokio::test]

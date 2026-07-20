@@ -104,7 +104,7 @@ async fn http_mcp_and_cli_submit_and_inspect_equivalent_candidates() {
         String::from_utf8_lossy(&cli.stderr)
     );
     let cli_submission: Value = serde_json::from_slice(&cli.stdout).unwrap();
-    assert_eq!(cli_submission["version"], 1);
+    assert_eq!(cli_submission["version"], 2);
     let candidate_id = cli_submission["data"]["candidate"]["id"].as_str().unwrap();
 
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
@@ -174,7 +174,7 @@ async fn http_mcp_and_cli_submit_and_inspect_equivalent_candidates() {
         .unwrap();
     assert!(cli_inspection.status.success());
     let cli_inspection: Value = serde_json::from_slice(&cli_inspection.stdout).unwrap();
-    assert_eq!(cli_inspection["version"], 1);
+    assert_eq!(cli_inspection["version"], 2);
     assert_eq!(cli_inspection["data"]["candidate"]["id"], candidate_id);
     assert_eq!(
         cli_inspection["data"]["candidate"]["id"],

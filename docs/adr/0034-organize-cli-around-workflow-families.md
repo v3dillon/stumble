@@ -44,7 +44,7 @@ Command paths use resource-first grammar and short, unhyphenated words. Conventi
 
 ## Machine contract
 
-- Success writes one `{ "version": 1, "data": ... }` JSON document to stdout. Failure writes one `{ "version": 1, "error": ... }` document to stderr. `--format text` is an optional human rendering.
+- Success writes one `{ "version": 2, "data": ... }` JSON document to stdout. Failure writes one `{ "version": 2, "error": ... }` document to stderr. Version 2 introduces the typed Candidate Submission target contract. `--format text` is an optional human rendering.
 - Errors contain a stable domain code, message, and optional details. Exit codes distinguish only usage, authorization, validation or conflict, and internal failure.
 - Breaking JSON changes require a new envelope version; additive fields do not.
 - Every `list` accepts `--limit`, an opaque `--cursor`, and relevant filters, returning bounded `{ "items": [...], "next_cursor": ... }` data.

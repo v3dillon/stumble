@@ -376,14 +376,7 @@ fn tool_descriptors(tools: &AgentTools, context: &AuthContext) -> Vec<Value> {
         .iter()
         .filter_map(|definition| {
             definition.discovery_order.and_then(|order| {
-                definition
-                    .capability
-                    .is_none_or(|capability| {
-                        tools
-                            .require_harness_capability(context, capability)
-                            .is_ok()
-                    })
-                    .then_some((order, definition))
+                tool_is_available(tools, context, definition).then_some((order, definition))
             })
         })
         .collect::<Vec<_>>();
@@ -404,6 +397,27 @@ fn tool_descriptors(tools: &AgentTools, context: &AuthContext) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn tool_is_available(
+    tools: &AgentTools,
+    context: &AuthContext,
+    definition: &crate::registry::ToolDefinition,
+) -> bool {
+    use crate::registry::McpTool;
+
+    match definition.tool {
+        McpTool::RecordFeedFeedback => tools.require_interactive_feedback(context, false).is_ok(),
+        McpTool::GetTasteProfile
+        | McpTool::UpdateTasteProfile
+        | McpTool::ResetLearnedTaste
+        | McpTool::RetractInterestSeed => tools.require_interactive_feedback(context, true).is_ok(),
+        _ => definition.capability.is_none_or(|capability| {
+            tools
+                .require_harness_capability(context, capability)
+                .is_ok()
+        }),
+    }
 }
 
 async fn tool_descriptors_on_blocking(

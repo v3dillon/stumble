@@ -32,7 +32,7 @@ fn wake_adapter_emits_or_invokes_discovery_ready_without_browser_control() {
     let fixture = TestDir::new();
     let stumble = fixture.executable(
         "stumble",
-        "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >\"$ARGS_PATH\"\nprintf '%s\\n' \"$STUMBLE_HARNESS_CREDENTIAL\" >\"$CREDENTIAL_PATH\"\nprintf '{\"version\":1,\"data\":{\"items\":[{\"id\":\"task-1\"}],\"next_cursor\":null}}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >\"$ARGS_PATH\"\nprintf '%s\\n' \"$STUMBLE_HARNESS_CREDENTIAL\" >\"$CREDENTIAL_PATH\"\nprintf '{\"version\":2,\"data\":{\"items\":[{\"id\":\"task-1\"}],\"next_cursor\":null}}\\n'\n",
     );
     let event_path = fixture.0.join("event.json");
     let args_path = fixture.0.join("args.txt");
@@ -89,7 +89,7 @@ fn wake_adapter_emits_idle_for_an_empty_canonical_task_page() {
     let fixture = TestDir::new();
     let stumble = fixture.executable(
         "stumble",
-        "#!/usr/bin/env bash\nprintf '{\"version\":1,\"data\":{\"items\":[],\"next_cursor\":null}}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '{\"version\":2,\"data\":{\"items\":[],\"next_cursor\":null}}\\n'\n",
     );
     let event_path = fixture.0.join("idle-event.json");
     let wake =

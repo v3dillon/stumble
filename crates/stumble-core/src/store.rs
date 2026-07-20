@@ -683,14 +683,6 @@ pub fn load_store_snapshot(path: &Path) -> Result<InMemoryStore, StorePersistenc
             migrate_candidate_value(candidate)?;
         }
     }
-    if let Some(submissions) = value
-        .get_mut("candidate_submissions")
-        .and_then(serde_json::Value::as_array_mut)
-    {
-        for submission in submissions {
-            migrate_candidate_submission_value(submission)?;
-        }
-    }
     let snapshot: PersistedStore = serde_json::from_value(value)?;
     if snapshot.version != 1 {
         return Err(StorePersistenceError::UnsupportedVersion(snapshot.version));
@@ -938,7 +930,6 @@ fn load_sqlite_store_from_connection(
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let mut legacy_discovery_task_rows = Vec::new();
     let mut legacy_candidate_rows = Vec::new();
-    let mut legacy_candidate_submission_rows = Vec::new();
     let mut collections = serde_json::Map::new();
     for collection in STORE_COLLECTIONS {
         collections.insert(
@@ -968,10 +959,6 @@ fn load_sqlite_store_from_connection(
         if collection == "candidates" && migrate_candidate_value(&mut value)? {
             legacy_candidate_rows.push(record_key.clone());
         }
-        if collection == "candidate_submissions" && migrate_candidate_submission_value(&mut value)?
-        {
-            legacy_candidate_submission_rows.push(record_key);
-        }
         if let Some(serde_json::Value::Array(values)) = collections.get_mut(&collection) {
             values.push(value);
         }
@@ -990,12 +977,6 @@ fn load_sqlite_store_from_connection(
         &legacy_discovery_task_rows,
     )?;
     persist_migrated_records(&transaction, &store, "candidates", &legacy_candidate_rows)?;
-    persist_migrated_records(
-        &transaction,
-        &store,
-        "candidate_submissions",
-        &legacy_candidate_submission_rows,
-    )?;
     transaction.commit()?;
     if had_legacy_pod_memberships {
         persist_migrated_pod_relationships(connection, &store)?;
@@ -1024,31 +1005,6 @@ fn migrate_candidate_value(value: &mut serde_json::Value) -> Result<bool, StoreP
     record.insert(
         "source_url".into(),
         serde_json::Value::String(canonical_url),
-    );
-    Ok(true)
-}
-
-fn migrate_candidate_submission_value(
-    value: &mut serde_json::Value,
-) -> Result<bool, StorePersistenceError> {
-    if value.get("target").is_some() {
-        return Ok(false);
-    }
-    let record = value.as_object_mut().ok_or_else(|| {
-        StorePersistenceError::Json(serde_json::Error::io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Candidate Submission row must be an object",
-        )))
-    })?;
-    let placements = record
-        .remove("proposed_placements")
-        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
-    let task_context = record
-        .remove("task_context")
-        .unwrap_or(serde_json::Value::Null);
-    record.insert(
-        "target".into(),
-        serde_json::json!({"kind": "pod_placements", "placements": placements, "task_context": task_context}),
     );
     Ok(true)
 }

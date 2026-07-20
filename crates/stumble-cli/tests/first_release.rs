@@ -38,7 +38,7 @@ impl TestDataDir {
             String::from_utf8_lossy(&initialized.stderr)
         );
         let initialized: Value = serde_json::from_slice(&initialized.stdout).unwrap();
-        assert_eq!(initialized["version"], 1);
+        assert_eq!(initialized["version"], 2);
         assert!(initialized["data"]["node"]["node_id"].as_str().is_some());
 
         let authority_entries = std::fs::read_dir(&credential_store)
@@ -546,7 +546,7 @@ async fn assert_adapter_parity(home_dir: &TestDataDir, user_token: &str, expecte
         .unwrap();
     assert!(cli.status.success());
     let cli_envelope = serde_json::from_slice::<Value>(&cli.stdout).unwrap();
-    assert_eq!(cli_envelope["version"], 1);
+    assert_eq!(cli_envelope["version"], 2);
     assert_eq!(cli_envelope["data"]["id"], expected["id"]);
     assert_eq!(cli_envelope["data"]["allowed_actions"], json!(["complete"]));
     assert_eq!(canonical_feed(cli_envelope["data"].clone()), *expected);

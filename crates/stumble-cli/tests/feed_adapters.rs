@@ -157,7 +157,7 @@ async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
         String::from_utf8_lossy(&cli.stderr)
     );
     let cli_envelope: Value = serde_json::from_slice(&cli.stdout).unwrap();
-    assert_eq!(cli_envelope["version"], 1);
+    assert_eq!(cli_envelope["version"], 2);
     let cli_batch = cli_envelope["data"].clone();
 
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
@@ -284,7 +284,7 @@ async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
         .unwrap();
     assert!(cli_feedback.status.success());
     let cli_feedback: Value = serde_json::from_slice(&cli_feedback.stdout).unwrap();
-    assert_eq!(cli_feedback["version"], 1);
+    assert_eq!(cli_feedback["version"], 2);
     let cli_feedback = cli_feedback["data"].clone();
 
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
@@ -369,7 +369,7 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
         .unwrap();
     assert!(cli_update.status.success());
     let cli_update: Value = serde_json::from_slice(&cli_update.stdout).unwrap();
-    assert_eq!(cli_update["version"], 1);
+    assert_eq!(cli_update["version"], 2);
     let cli_update = cli_update["data"].clone();
 
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
@@ -428,7 +428,7 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
         String::from_utf8_lossy(&cli.stderr)
     );
     let cli_profile: Value = serde_json::from_slice(&cli.stdout).unwrap();
-    assert_eq!(cli_profile["version"], 1);
+    assert_eq!(cli_profile["version"], 2);
     let cli_profile = cli_profile["data"].clone();
 
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
@@ -477,7 +477,7 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
         .unwrap();
     assert!(cli_reset.status.success());
     let cli_reset: Value = serde_json::from_slice(&cli_reset.stdout).unwrap();
-    assert_eq!(cli_reset["version"], 1);
+    assert_eq!(cli_reset["version"], 2);
     let cli_reset = cli_reset["data"].clone();
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
     let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();

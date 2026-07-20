@@ -97,7 +97,7 @@ fn removed_public_operations_are_ordinary_usage_errors() {
         assert_eq!(output.status.code(), Some(2), "{arguments:?}");
         assert!(output.stdout.is_empty(), "{arguments:?}");
         let error = json(&output.stderr);
-        assert_eq!(error["version"], 1, "{arguments:?}");
+        assert_eq!(error["version"], 2, "{arguments:?}");
         assert_eq!(error["error"]["code"], "usage_error", "{arguments:?}");
         assert_ne!(
             error["error"]["code"], "legacy_contract_retired",
@@ -180,7 +180,7 @@ fn success_and_usage_failure_use_versioned_json_envelopes() {
     assert!(success.status.success());
     assert!(success.stderr.is_empty());
     let success_json = json(&success.stdout);
-    assert_eq!(success_json["version"], 1);
+    assert_eq!(success_json["version"], 2);
     assert!(success_json["data"]["data_dir"].as_str().is_some());
     assert!(success_json["data"]["node"]["node_id"].as_str().is_some());
 
@@ -191,7 +191,7 @@ fn success_and_usage_failure_use_versioned_json_envelopes() {
     assert_eq!(failure.status.code(), Some(2));
     assert!(failure.stdout.is_empty());
     let failure_json = json(&failure.stderr);
-    assert_eq!(failure_json["version"], 1);
+    assert_eq!(failure_json["version"], 2);
     assert_eq!(failure_json["error"]["code"], "usage_error");
     assert!(failure_json["error"]["message"]
         .as_str()

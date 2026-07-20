@@ -442,6 +442,11 @@ impl AgentTools {
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         authorize_harness(&store, ctx, HarnessCapability::Feedback, None)?;
+        authorize_interactive_user_action(
+            &store,
+            ctx,
+            "Feedback Signal recording requires an interactive User action",
+        )?;
         let user_id = ctx.user_id.ok_or_else(|| {
             StoreError::Validation("Feedback Signal requires an authenticated User".into())
         })?;
@@ -1686,6 +1691,33 @@ impl AgentTools {
             .read()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         authorize_harness(&store, ctx, capability, None)
+    }
+
+    /// Verifies interactive Feedback authority for adapter capability projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the harness is unattended, revoked, scoped when
+    /// `unscoped` is required, lacks Feedback authority, or the lock is poisoned.
+    pub fn require_interactive_feedback(
+        &self,
+        ctx: &AuthContext,
+        unscoped: bool,
+    ) -> Result<(), AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        if unscoped {
+            authorize_taste_profile(&store, ctx)
+        } else {
+            authorize_harness(&store, ctx, HarnessCapability::Feedback, None)?;
+            authorize_interactive_user_action(
+                &store,
+                ctx,
+                "Feedback requires an interactive User action",
+            )
+        }
     }
 
     /// Creates an expiring proposal without applying its sensitive change.
@@ -4388,7 +4420,7 @@ impl AgentTools {
             .store
             .read()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
-        authorize_harness(&store, ctx, HarnessCapability::Feedback, None)?;
+        authorize_taste_profile(&store, ctx)?;
         let user_id = ctx.user_id.ok_or_else(|| {
             StoreError::Validation("Saved Content References require an authenticated User".into())
         })?;
@@ -5354,7 +5386,7 @@ impl AgentTools {
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
-        authorize_harness(&store, ctx, HarnessCapability::Feedback, None)?;
+        authorize_taste_profile(&store, ctx)?;
         let submission = store
             .submissions
             .get(&submission_id)
@@ -5384,7 +5416,7 @@ impl AgentTools {
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
-        authorize_harness(&store, ctx, HarnessCapability::Feedback, None)?;
+        authorize_taste_profile(&store, ctx)?;
         let Some(user_id) = ctx.user_id else {
             return Ok(());
         };
@@ -5415,7 +5447,7 @@ impl AgentTools {
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
-        authorize_harness(&store, ctx, HarnessCapability::Feedback, None)?;
+        authorize_taste_profile(&store, ctx)?;
         let Some(user_id) = ctx.user_id else {
             return Ok(());
         };
@@ -5456,7 +5488,7 @@ impl AgentTools {
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
-        authorize_harness(&store, ctx, HarnessCapability::Feedback, None)?;
+        authorize_taste_profile(&store, ctx)?;
         let prefs = store
             .user_preferences
             .entry((user_id, ctx.tenant_id))
@@ -5501,8 +5533,8 @@ impl AgentTools {
     ///
     /// # Errors
     ///
-    /// Returns an error when the Harness Grant lacks feedback access, no User is
-    /// authenticated, or local state cannot be read.
+    /// Returns an error when the interactive Harness Grant lacks feedback access,
+    /// no User is authenticated, or local state cannot be read.
     pub fn taste_profile(&self, ctx: &AuthContext) -> Result<TasteProfile, AgentToolsError> {
         let store = self
             .store
@@ -5519,9 +5551,7 @@ impl AgentTools {
             TasteProfileAllowedAction::Set,
             TasteProfileAllowedAction::Reset,
         ];
-        if interest_seed_evidence.active_seed_count > 0
-            && authorize_interest_seed_retraction(&store, ctx).is_ok()
-        {
+        if interest_seed_evidence.active_seed_count > 0 {
             allowed_actions.push(TasteProfileAllowedAction::Retract);
         }
         Ok(TasteProfile {
@@ -5572,7 +5602,7 @@ impl AgentTools {
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
-        authorize_interest_seed_retraction(&store, ctx)?;
+        authorize_taste_profile(&store, ctx)?;
         let mut projected = store.clone();
         let seed = projected
             .interest_seeds
@@ -5598,8 +5628,8 @@ impl AgentTools {
     ///
     /// # Errors
     ///
-    /// Returns an error when the Harness Grant lacks feedback access, no User is
-    /// authenticated, or persistence fails.
+    /// Returns an error when the interactive Harness Grant lacks feedback access,
+    /// no User is authenticated, or persistence fails.
     pub fn update_taste_profile(
         &self,
         ctx: &AuthContext,
@@ -5661,8 +5691,8 @@ impl AgentTools {
     ///
     /// # Errors
     ///
-    /// Returns an error when the Harness Grant lacks feedback access, no User is
-    /// authenticated, or persistence fails.
+    /// Returns an error when the caller lacks interactive private-profile authority,
+    /// no User is authenticated, or persistence fails.
     pub fn reset_learned_taste(
         &self,
         ctx: &AuthContext,
@@ -8407,24 +8437,31 @@ fn authorize_taste_profile(
     ctx: &AuthContext,
 ) -> Result<(), AgentToolsError> {
     authorize_harness(store, ctx, HarnessCapability::Feedback, None)?;
-    if harness_for_context(store, ctx)?.is_some_and(|harness| harness.grant.pod_ids.is_some()) {
-        return Err(AgentToolsError::Forbidden {
-            reason: "Taste Profile access requires an unscoped feedback grant".into(),
-        });
+    if let Some(harness) = harness_for_context(store, ctx)? {
+        if harness.grant.pod_ids.is_some() {
+            return Err(AgentToolsError::Forbidden {
+                reason: "Taste Profile access requires an unscoped feedback grant".into(),
+            });
+        }
+        if harness.kind != AgentHarnessKind::Interactive {
+            return Err(AgentToolsError::Forbidden {
+                reason: "Taste Profile access requires an interactive User action".into(),
+            });
+        }
     }
     Ok(())
 }
 
-fn authorize_interest_seed_retraction(
+fn authorize_interactive_user_action(
     store: &InMemoryStore,
     ctx: &AuthContext,
+    reason: &str,
 ) -> Result<(), AgentToolsError> {
-    authorize_taste_profile(store, ctx)?;
     if harness_for_context(store, ctx)?
         .is_some_and(|harness| harness.kind != AgentHarnessKind::Interactive)
     {
         return Err(AgentToolsError::Forbidden {
-            reason: "Interest Seed retraction requires an interactive User action".into(),
+            reason: reason.into(),
         });
     }
     Ok(())
@@ -9905,10 +9942,11 @@ fn feed_allowed_actions(
         ]);
     };
     let mut actions = Vec::new();
-    if harness
-        .grant
-        .capabilities
-        .contains(&HarnessCapability::Feedback)
+    if harness.kind == AgentHarnessKind::Interactive
+        && harness
+            .grant
+            .capabilities
+            .contains(&HarnessCapability::Feedback)
     {
         actions.extend([
             FeedAllowedAction::Save,

@@ -9,7 +9,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-pub const ENVELOPE_VERSION: u8 = 1;
+pub const ENVELOPE_VERSION: u8 = 2;
 const CREDENTIAL_SERVICE: &str = "dev.stumble.home-node";
 const OWNER_AUTHORITY_MARKER: &str = "present";
 

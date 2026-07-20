@@ -104,7 +104,7 @@ async fn retired_crawler_contract_remains_versioned_only_on_compatible_transport
     let cli_error: Value = serde_json::from_slice(&cli.stderr).unwrap();
 
     assert_eq!(http_error, mcp_error);
-    assert_eq!(cli_error["version"], 1);
+    assert_eq!(cli_error["version"], 2);
     assert_eq!(cli_error["error"]["code"], "usage_error");
     assert_eq!(http_error["code"], "legacy_contract_retired");
     assert_eq!(http_error["protocol_version"], CURRENT_PROTOCOL_VERSION);
@@ -149,7 +149,7 @@ async fn retired_submission_and_feedback_errors_are_transport_equivalent() {
         .unwrap();
     let cli_submission: Value = serde_json::from_slice(&cli_submission.stderr).unwrap();
     assert_eq!(http_submission, mcp_submission);
-    assert_eq!(cli_submission["version"], 1);
+    assert_eq!(cli_submission["version"], 2);
     assert_eq!(cli_submission["error"]["code"], "usage_error");
 
     let mcp_feedback: Value = serde_json::from_str(
@@ -181,7 +181,7 @@ async fn retired_submission_and_feedback_errors_are_transport_equivalent() {
         .unwrap();
     let cli_feedback: Value = serde_json::from_slice(&cli_feedback.stderr).unwrap();
     assert_eq!(http_feedback, mcp_feedback);
-    assert_eq!(cli_feedback["version"], 1);
+    assert_eq!(cli_feedback["version"], 2);
     assert_eq!(cli_feedback["error"]["code"], "usage_error");
 }
 

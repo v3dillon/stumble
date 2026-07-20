@@ -16,7 +16,7 @@ fi
 response="$(STUMBLE_HARNESS_CREDENTIAL="$TOKEN" "$STUMBLE" \
   --data-dir "$DATA_DIR" discover task list --state ready --limit 100)"
 tasks="$(printf '%s' "$response" | sed -E \
-  's/^\{"version":1,"data":\{"items":(\[.*\]),"next_cursor":(null|"[^"]*")\}\}$/\1/')"
+  's/^\{"version":2,"data":\{"items":(\[.*\]),"next_cursor":(null|"[^"]*")\}\}$/\1/')"
 if [[ "$tasks" == "$response" ]]; then
   printf 'stumble returned an unexpected Discovery Task response\n' >&2
   exit 1

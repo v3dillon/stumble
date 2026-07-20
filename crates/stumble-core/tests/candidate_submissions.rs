@@ -198,6 +198,14 @@ fn candidate_submission_rejects_unknown_media_reference_types() {
 }
 
 #[test]
+fn candidate_submission_rejects_unknown_top_level_fields() {
+    let mut request = serde_json::to_value(candidate_request(&[uuid::Uuid::now_v7()])).unwrap();
+    request["learning_enabled"] = serde_json::json!(true);
+
+    assert!(serde_json::from_value::<CandidateSubmissionRequest>(request).is_err());
+}
+
+#[test]
 fn candidate_submission_rejects_media_references_that_are_not_permitted_web_urls() {
     let tools = AgentTools::new(seed_store());
     let pod = create_test_pod(&tools, "invalid-media-reference");
