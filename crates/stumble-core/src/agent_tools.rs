@@ -6505,11 +6505,7 @@ impl AgentTools {
             .trust_policies
             .get(&(user_id, ctx.tenant_id))
             .ok_or_else(|| StoreError::Validation("Index Node is not configured".into()))?;
-        if !policy
-            .index_nodes
-            .iter()
-            .any(|index| index.base_url == index_base_url)
-        {
+        if !policy.retains_index_url(&index_base_url) {
             return Err(StoreError::Validation("Index Node is not configured".into()).into());
         }
         let result_count = response.results.len();
@@ -6754,16 +6750,11 @@ impl AgentTools {
                 if known
                     .received_from_index_url
                     .as_ref()
-                    .is_some_and(|source| {
-                        !policy
-                            .index_nodes
-                            .iter()
-                            .any(|index| index.base_url == *source)
-                    })
+                    .is_some_and(|source| !policy.retains_index_url(source))
                 {
                     return None;
                 }
-                if trust_policy_blocks_announcement(&policy, announcement) {
+                if policy.blocks_announcement(announcement) {
                     return None;
                 }
                 let searchable = format!(
@@ -6829,9 +6820,7 @@ impl AgentTools {
                         sample_set
                             .samples
                             .iter()
-                            .filter(|sample| {
-                                !trust_policy_blocks_content_reference(&policy, sample)
-                            })
+                            .filter(|sample| !policy.blocks_content_reference(sample))
                             .take(request.sample_size)
                             .cloned()
                             .collect()
@@ -9665,42 +9654,6 @@ fn feed_content_reference(item: &Submission) -> FeedContentReference {
     }
 }
 
-fn trust_policy_blocks_announcement(policy: &TrustPolicy, announcement: &PodAnnouncement) -> bool {
-    policy.blocked_nodes.contains(&announcement.origin_node_id)
-        || policy.blocked_pods.iter().any(|blocked| {
-            blocked.origin_node_id == announcement.origin_node_id
-                && blocked
-                    .pod_slug
-                    .eq_ignore_ascii_case(&announcement.pod_slug)
-        })
-        || policy.blocked_topics.iter().any(|topic| {
-            announcement.subject.to_lowercase().contains(topic)
-                || announcement.pod_name.to_lowercase().contains(topic)
-                || announcement.pod_slug.to_lowercase().contains(topic)
-        })
-}
-
-fn trust_policy_blocks_content_reference(
-    policy: &TrustPolicy,
-    reference: &FeedContentReference,
-) -> bool {
-    policy
-        .blocked_sources
-        .iter()
-        .any(|source| source.eq_ignore_ascii_case(&reference.source))
-        || policy.blocked_topics.iter().any(|topic| {
-            reference
-                .tags
-                .iter()
-                .any(|tag| tag.eq_ignore_ascii_case(topic))
-                || reference.title.to_lowercase().contains(topic)
-                || reference
-                    .summary
-                    .as_ref()
-                    .is_some_and(|summary| summary.to_lowercase().contains(topic))
-        })
-}
-
 fn retain_verified_pod_announcement(
     store: &mut InMemoryStore,
     announcement: PodAnnouncement,
@@ -9759,18 +9712,12 @@ fn explore_content_samples(
                 .contains_key(&(ContentItemId::from(item.id), pod.id))
         })
         .filter(|item| {
-            !policy
-                .blocked_sources
-                .iter()
-                .any(|source| source.eq_ignore_ascii_case(&item.domain))
-                && !policy.blocked_topics.iter().any(|topic| {
-                    item.tags.iter().any(|tag| tag.eq_ignore_ascii_case(topic))
-                        || item.title.to_lowercase().contains(topic)
-                        || item
-                            .summary
-                            .as_ref()
-                            .is_some_and(|summary| summary.to_lowercase().contains(topic))
-                })
+            !policy.blocks_source_and_topics(
+                &item.domain,
+                &item.tags,
+                &item.title,
+                item.summary.as_deref(),
+            )
         })
         .collect::<Vec<_>>();
     samples.sort_by(|left, right| {
@@ -11091,45 +11038,7 @@ fn normalize_pod_ids(mut pod_ids: Vec<PodId>) -> Vec<PodId> {
 }
 
 fn route_tokens(text: &str) -> Vec<String> {
-    let stop = [
-        "the",
-        "and",
-        "for",
-        "with",
-        "pod",
-        "this",
-        "that",
-        "from",
-        "into",
-        "links",
-        "link",
-        "discovery",
-        "personal",
-        "public",
-        "private",
-        "use",
-        "when",
-        "brief",
-        "style",
-        "good",
-        "bad",
-        "stuff",
-        "weird",
-    ];
-    let mut out = Vec::new();
-    for token in text
-        .split(|c: char| !c.is_alphanumeric())
-        .map(str::trim)
-        .filter(|token| token.len() > 3)
-    {
-        if !stop.contains(&token) && !out.iter().any(|existing| existing == token) {
-            out.push(token.to_string());
-        }
-        if out.len() >= 80 {
-            break;
-        }
-    }
-    out
+    discovery_tokens(text)
 }
 
 #[cfg(test)]

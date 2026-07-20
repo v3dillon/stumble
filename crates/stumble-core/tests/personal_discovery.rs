@@ -559,3 +559,927 @@ fn invalid_personal_execution_grants_are_denied_at_the_core_list_boundary() {
         ));
     }
 }
+
+struct TestDataDir(std::path::PathBuf);
+
+impl TestDataDir {
+    fn new(label: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "stumble-personal-discovery-{label}-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for TestDataDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn admin_harness(
+    tools: &AgentTools,
+    label: &str,
+    capabilities: Vec<HarnessCapability>,
+) -> AuthContext {
+    let owner = tools.default_auth_context().unwrap();
+    let issued = tools
+        .register_agent_harness(
+            &owner,
+            RegisterAgentHarnessRequest {
+                label: label.into(),
+                kind: AgentHarnessKind::Interactive,
+                capabilities,
+                pod_ids: None,
+            },
+        )
+        .unwrap();
+    tools
+        .authenticate_token(issued.token.expose())
+        .unwrap()
+        .unwrap()
+}
+
+fn create_public_pod(tools: &AgentTools, slug: &str, description: &str) -> Pod {
+    let proposer = admin_harness(
+        tools,
+        &format!("{slug} proposer"),
+        vec![HarnessCapability::PodCuration],
+    );
+    let approver = admin_harness(
+        tools,
+        &format!("{slug} approver"),
+        vec![HarnessCapability::Approval],
+    );
+    let pod = tools
+        .create_pod(
+            &proposer,
+            CreatePodRequest {
+                name: slug.replace('-', " "),
+                slug: slug.into(),
+                description: description.into(),
+                visibility: Visibility::Private,
+            },
+        )
+        .unwrap();
+    let now = Utc::now();
+    let proposal = tools
+        .create_pending_proposal(
+            &proposer,
+            SensitiveChange::PublishPod { pod_id: pod.id },
+            now,
+            now + chrono::Duration::hours(1),
+        )
+        .unwrap();
+    tools
+        .approve_pending_proposal(&approver, proposal.id, now)
+        .unwrap();
+    tools.pod_by_slug(slug, None).unwrap()
+}
+
+fn accept_public_item(
+    tools: &AgentTools,
+    pod: &Pod,
+    suffix: &str,
+    source_url: &str,
+    tags: Vec<String>,
+) {
+    let submitter = admin_harness(
+        tools,
+        &format!("{suffix} submitter"),
+        vec![HarnessCapability::CandidateSubmission],
+    );
+    let curator = admin_harness(
+        tools,
+        &format!("{suffix} curator"),
+        vec![HarnessCapability::PodCuration],
+    );
+    tools
+        .set_pod_curation_policy(&curator, pod.id, CurationPolicy::Manual, Utc::now())
+        .unwrap();
+    let candidate = tools
+        .submit_candidate(
+            &submitter,
+            CandidateSubmissionRequest {
+                target: CandidateSubmissionRequestTarget::PodPlacements {
+                    placements: vec![ProposedCandidatePlacement {
+                        pod_id: pod.id,
+                        reason: "Directly concerns the Pod subject".into(),
+                        confidence: CandidateConfidence::new(0.95).unwrap(),
+                    }],
+                    task_context: None,
+                },
+                evidence: CandidateSubmissionEvidence {
+                    source_url: source_url.into(),
+                    source_metadata: CandidateSourceMetadata {
+                        title: Some(format!("Reference {suffix}")),
+                        author: Some("Careful author".into()),
+                        published_at: None,
+                    },
+                    permitted_excerpt: Some("A permitted sample excerpt".into()),
+                    summary: Some("A useful public Content Reference".into()),
+                    content_type: CandidateContentType::Article,
+                    media_references: Vec::new(),
+                    tags,
+                    provenance: CandidateProvenance {
+                        discovered_at: Utc.with_ymd_and_hms(2026, 7, 17, 12, 0, 0).unwrap(),
+                        discovery_method: "browser_search".into(),
+                        referrer_url: None,
+                    },
+                    harness_idempotency_key: format!("worker-{suffix}"),
+                    client_idempotency_key: format!("client-{suffix}"),
+                },
+            },
+        )
+        .unwrap();
+    tools
+        .curate_candidate(&curator, candidate.candidate.id, Utc::now())
+        .unwrap();
+    tools
+        .review_candidate_placement(
+            &curator,
+            candidate.candidate.id,
+            pod.id,
+            PlacementReviewDecision::Accept,
+            None,
+            Utc::now(),
+        )
+        .unwrap();
+}
+
+fn approve_trust_policy_change(tools: &AgentTools, change: TrustPolicyChange) {
+    let proposer = admin_harness(
+        tools,
+        "trust proposer",
+        vec![HarnessCapability::Administration],
+    );
+    let approver = admin_harness(tools, "trust approver", vec![HarnessCapability::Approval]);
+    let now = Utc::now();
+    let proposal = tools
+        .request_trust_policy_change(&proposer, change, now)
+        .unwrap();
+    tools
+        .approve_pending_proposal(&approver, proposal.id, now)
+        .unwrap();
+}
+
+fn personal_manager(tools: &AgentTools) -> AuthContext {
+    harness(
+        tools,
+        "network lead manager",
+        AgentHarnessKind::Interactive,
+        vec![
+            HarnessCapability::PersonalDiscoveryManagement,
+            HarnessCapability::Feedback,
+            HarnessCapability::FeedRead,
+        ],
+    )
+}
+
+fn set_interest(tools: &AgentTools, manager: &AuthContext, topic: &str) {
+    let mut taste = UpdateTasteProfileRequest::default();
+    taste.interests = Some(vec![topic.into()]);
+    tools.update_taste_profile(manager, taste).unwrap();
+}
+
+fn import_verified_network_metadata(home: &AgentTools) -> (PodAnnouncement, PodExploreSamples) {
+    let origin_dir = TestDataDir::new("network-lead-origin");
+    let index_dir = TestDataDir::new("network-lead-index");
+    let origin = AgentTools::open_home_node(&origin_dir.0, seed_store).unwrap();
+    let index = AgentTools::open_home_node(&index_dir.0, seed_store).unwrap();
+    let pod = create_public_pod(
+        &origin,
+        "rust-systems",
+        "Rust ownership and distributed systems",
+    );
+    accept_public_item(
+        &origin,
+        &pod,
+        "network-allowed",
+        "https://allowed.example/systems-research",
+        vec!["systems".into(), "rust".into()],
+    );
+    accept_public_item(
+        &origin,
+        &pod,
+        "network-blocked-source",
+        "https://blocked.example/noise",
+        vec!["systems".into()],
+    );
+    let announcement = origin
+        .pod_announcement(
+            &origin.default_auth_context().unwrap(),
+            &pod.slug,
+            "https://origin.example/federation/pods/rust-systems",
+        )
+        .unwrap();
+    let samples = origin
+        .pod_explore_samples(&origin.default_auth_context().unwrap(), &announcement, 10)
+        .unwrap();
+    let endorser = create_public_pod(
+        &origin,
+        "systems-curators",
+        "Systems curators recommending careful research",
+    );
+    let endorser_announcement = origin
+        .pod_announcement(
+            &origin.default_auth_context().unwrap(),
+            &endorser.slug,
+            "https://origin.example/federation/pods/systems-curators",
+        )
+        .unwrap();
+    let curator = admin_harness(
+        &origin,
+        "network endorsement curator",
+        vec![HarnessCapability::PodCuration],
+    );
+    let endorsement = origin
+        .endorse_public_pod(
+            &curator,
+            &endorser_announcement,
+            &announcement,
+            "Careful systems research neighborhood".into(),
+        )
+        .unwrap();
+
+    index.index_pod_announcement(announcement.clone()).unwrap();
+    index
+        .index_pod_announcement(endorser_announcement.clone())
+        .unwrap();
+    index.index_pod_endorsement(endorsement.clone()).unwrap();
+    let search = index.search_pod_announcements("systems", 10).unwrap();
+
+    approve_trust_policy_change(
+        home,
+        TrustPolicyChange::AddIndexNode {
+            label: "network index".into(),
+            base_url: "https://network-index.example".into(),
+        },
+    );
+    approve_trust_policy_change(
+        home,
+        TrustPolicyChange::BlockSource {
+            source: "blocked.example".into(),
+        },
+    );
+    let reader = admin_harness(
+        home,
+        "network import reader",
+        vec![HarnessCapability::FeedRead],
+    );
+    home.accept_index_search_results(&reader, "https://network-index.example", search)
+        .unwrap();
+    // Peer/direct retention of the endorser so endorsement binding remains current.
+    home.index_pod_announcement(endorser_announcement).unwrap();
+    home.accept_pod_explore_samples(&reader, samples.clone())
+        .unwrap();
+    home.index_pod_endorsement(endorsement).unwrap();
+    (announcement, samples)
+}
+
+#[test]
+fn local_public_content_references_produce_adjacent_network_leads() {
+    let home_dir = TestDataDir::new("local-public-content-home");
+    let home = AgentTools::open_home_node(&home_dir.0, seed_store).unwrap();
+    let manager = personal_manager(&home);
+    set_interest(&home, &manager, "distributed systems");
+    let local_pod = create_public_pod(
+        &home,
+        "local-systems",
+        "Local distributed systems reading list",
+    );
+    accept_public_item(
+        &home,
+        &local_pod,
+        "local-public-ref",
+        "https://local-public.example/deep-dive",
+        vec!["systems".into()],
+    );
+    home.index_pod_announcement(
+        home.pod_announcement(
+            &home.default_auth_context().unwrap(),
+            &local_pod.slug,
+            "https://home.example/federation/pods/local-systems",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let plan = home
+        .request_personal_discovery(
+            &manager,
+            RequestPersonalDiscovery {
+                intent: None,
+                result_count: None,
+                idempotency_key: "local-public-content".into(),
+            },
+            Utc::now(),
+        )
+        .unwrap()
+        .plan;
+
+    assert!(plan.source_neighborhoods.iter().any(|source| {
+        source.signal == SourceAffinitySignal::Source("local-public.example".into())
+            && source.role == DiscoveryPlanSourceRole::Adjacent
+            && source.rationale.contains("local public Content Reference")
+    }));
+    assert!(plan.source_neighborhoods.iter().any(|source| {
+        matches!(
+            &source.signal,
+            SourceAffinitySignal::Community(slug) if slug == "local-systems"
+        ) && source.role == DiscoveryPlanSourceRole::Adjacent
+            && source.rationale.contains("Pod Announcement")
+    }));
+}
+
+#[test]
+fn verified_network_metadata_produces_adjacent_discovery_leads_with_provenance() {
+    let home_dir = TestDataDir::new("network-leads-home");
+    let home = AgentTools::open_home_node(&home_dir.0, seed_store).unwrap();
+    let manager = personal_manager(&home);
+    set_interest(&home, &manager, "distributed systems");
+    let subscription_count_before = home.store().read().unwrap().subscriptions.len();
+    let (_announcement, samples) = import_verified_network_metadata(&home);
+
+    let plan = home
+        .request_personal_discovery(
+            &manager,
+            RequestPersonalDiscovery {
+                intent: None,
+                result_count: None,
+                idempotency_key: "network-leads".into(),
+            },
+            Utc::now(),
+        )
+        .unwrap()
+        .plan;
+
+    let adjacent = plan
+        .source_neighborhoods
+        .iter()
+        .filter(|source| source.role == DiscoveryPlanSourceRole::Adjacent)
+        .collect::<Vec<_>>();
+    assert!(!adjacent.is_empty());
+    assert!(adjacent.iter().all(|source| {
+        source.rationale.contains("verified public")
+            || source.rationale.contains("local public Content Reference")
+    }));
+    assert!(adjacent.iter().any(|source| {
+        source.signal == SourceAffinitySignal::Source("allowed.example".into())
+            && source.rationale.contains("Explore sample")
+    }));
+    assert!(adjacent.iter().any(|source| {
+        matches!(
+            &source.signal,
+            SourceAffinitySignal::Community(slug) if slug == "rust-systems"
+        ) && (source.rationale.contains("Pod Announcement")
+            || source.rationale.contains("Pod Endorsement"))
+    }));
+    assert!(plan
+        .source_neighborhoods
+        .iter()
+        .filter(|source| source.role == DiscoveryPlanSourceRole::Adjacent)
+        .all(|source| !source.temporary));
+    assert_eq!(plan.allocation.adjacent, 3);
+    assert_eq!(
+        home.store().read().unwrap().subscriptions.len(),
+        subscription_count_before
+    );
+    // Explore samples retained locally still include blocked sources; the plan must not.
+    assert!(samples
+        .samples
+        .iter()
+        .any(|sample| sample.source == "blocked.example"));
+    assert!(plan
+        .source_neighborhoods
+        .iter()
+        .all(|source| { source.signal != SourceAffinitySignal::Source("blocked.example".into()) }));
+}
+
+#[test]
+fn invalid_stale_blocked_untrusted_or_withdrawn_metadata_cannot_influence_plans() {
+    let home_dir = TestDataDir::new("filtered-network-home");
+    let home = AgentTools::open_home_node(&home_dir.0, seed_store).unwrap();
+    let manager = personal_manager(&home);
+    set_interest(&home, &manager, "distributed systems");
+    let (announcement, samples) = import_verified_network_metadata(&home);
+
+    // Block the remote source domain through Trust Policy after import.
+    approve_trust_policy_change(
+        &home,
+        TrustPolicyChange::BlockSource {
+            source: "allowed.example".into(),
+        },
+    );
+    approve_trust_policy_change(
+        &home,
+        TrustPolicyChange::BlockPod {
+            origin_node_id: announcement.origin_node_id,
+            pod_slug: announcement.pod_slug.clone(),
+        },
+    );
+
+    let blocked_plan = home
+        .request_personal_discovery(
+            &manager,
+            RequestPersonalDiscovery {
+                intent: None,
+                result_count: None,
+                idempotency_key: "blocked-network".into(),
+            },
+            Utc::now(),
+        )
+        .unwrap()
+        .plan;
+    assert!(blocked_plan.source_neighborhoods.iter().all(|source| {
+        source.role != DiscoveryPlanSourceRole::Adjacent
+            || (!matches!(
+                &source.signal,
+                SourceAffinitySignal::Source(domain) if domain == "allowed.example"
+            ) && !matches!(
+                &source.signal,
+                SourceAffinitySignal::Community(slug) if slug == "rust-systems"
+            ))
+    }));
+
+    // Remove Index: announcements retained only via that Index must drop out of new plans.
+    let fresh_dir = TestDataDir::new("index-removed-home");
+    let index_dir = TestDataDir::new("index-removed-index");
+    let fresh = AgentTools::open_home_node(&fresh_dir.0, seed_store).unwrap();
+    let index = AgentTools::open_home_node(&index_dir.0, seed_store).unwrap();
+    let fresh_manager = personal_manager(&fresh);
+    set_interest(&fresh, &fresh_manager, "distributed systems");
+    index.index_pod_announcement(announcement.clone()).unwrap();
+    let search = index.search_pod_announcements("systems", 10).unwrap();
+    approve_trust_policy_change(
+        &fresh,
+        TrustPolicyChange::AddIndexNode {
+            label: "ephemeral index".into(),
+            base_url: "https://ephemeral-index.example".into(),
+        },
+    );
+    let reader = admin_harness(
+        &fresh,
+        "ephemeral reader",
+        vec![HarnessCapability::FeedRead],
+    );
+    fresh
+        .accept_index_search_results(&reader, "https://ephemeral-index.example", search)
+        .unwrap();
+    // Stale/mismatched samples (wrong announcement binding) must not produce leads.
+    let mut stale_samples = samples;
+    stale_samples.announcement_id = uuid::Uuid::now_v7();
+    assert!(fresh
+        .accept_pod_explore_samples(&reader, stale_samples)
+        .is_err());
+    approve_trust_policy_change(
+        &fresh,
+        TrustPolicyChange::RemoveIndexNode {
+            base_url: "https://ephemeral-index.example".into(),
+        },
+    );
+    let after_index_removal = fresh
+        .request_personal_discovery(
+            &fresh_manager,
+            RequestPersonalDiscovery {
+                intent: None,
+                result_count: None,
+                idempotency_key: "index-removed".into(),
+            },
+            Utc::now(),
+        )
+        .unwrap()
+        .plan;
+    assert!(after_index_removal
+        .source_neighborhoods
+        .iter()
+        .all(|source| source.role != DiscoveryPlanSourceRole::Adjacent
+            || !matches!(
+                &source.signal,
+                SourceAffinitySignal::Community(slug) if slug == "rust-systems"
+            )));
+
+    // Tampered (invalid signature) announcement cannot be retained.
+    let mut tampered = announcement;
+    tampered.subject = "attacker changed subject to systems".into();
+    assert!(fresh.index_pod_announcement(tampered).is_err());
+}
+
+#[test]
+fn local_relevance_discards_remote_index_scores_and_autonomous_planning_is_local_only() {
+    let home_dir = TestDataDir::new("local-relevance-home");
+    let home = AgentTools::open_home_node(&home_dir.0, seed_store).unwrap();
+    let manager = personal_manager(&home);
+    set_interest(&home, &manager, "distributed systems");
+    let (announcement, _) = import_verified_network_metadata(&home);
+
+    // Import a second announcement that would only match a private profile term if
+    // we wrongly issued a remote query; it stays unmatched because subjects differ.
+    let unrelated_dir = TestDataDir::new("unrelated-origin");
+    let index_dir = TestDataDir::new("unrelated-index");
+    let unrelated = AgentTools::open_home_node(&unrelated_dir.0, seed_store).unwrap();
+    let index = AgentTools::open_home_node(&index_dir.0, seed_store).unwrap();
+    let cooking = create_public_pod(
+        &unrelated,
+        "cooking-notes",
+        "Weeknight pasta and baking techniques",
+    );
+    let cooking_announcement = unrelated
+        .pod_announcement(
+            &unrelated.default_auth_context().unwrap(),
+            &cooking.slug,
+            "https://unrelated.example/federation/pods/cooking-notes",
+        )
+        .unwrap();
+    index
+        .index_pod_announcement(cooking_announcement.clone())
+        .unwrap();
+    // Re-index the systems pod with a low remote score path; accept both via Index.
+    index.index_pod_announcement(announcement.clone()).unwrap();
+    let search = index.search_pod_announcements("", 10).unwrap();
+    let reader = admin_harness(
+        &home,
+        "local relevance reader",
+        vec![HarnessCapability::FeedRead],
+    );
+    home.accept_index_search_results(&reader, "https://network-index.example", search)
+        .unwrap();
+
+    let plan = home
+        .request_personal_discovery(
+            &manager,
+            RequestPersonalDiscovery {
+                intent: None,
+                result_count: None,
+                idempotency_key: "local-relevance".into(),
+            },
+            Utc::now(),
+        )
+        .unwrap()
+        .plan;
+
+    assert!(plan.source_neighborhoods.iter().any(|source| {
+        matches!(
+            &source.signal,
+            SourceAffinitySignal::Community(slug) if slug == "rust-systems"
+        ) && source.role == DiscoveryPlanSourceRole::Adjacent
+    }));
+    assert!(plan.source_neighborhoods.iter().all(|source| {
+        !matches!(
+            &source.signal,
+            SourceAffinitySignal::Community(slug) if slug == "cooking-notes"
+        )
+    }));
+    // Plan rationales stay aggregate and never leak private matching inputs.
+    let serialized = serde_json::to_string(&plan).unwrap();
+    assert!(!serialized.contains("matching_topics"));
+    assert!(!serialized.contains("InterestSeed"));
+    assert!(!serialized.contains("DiscoveryLead"));
+    assert!(!serialized.contains("local_relevance"));
+    assert!(!serialized.contains("TasteProfile"));
+    for source in &plan.source_neighborhoods {
+        if source.role == DiscoveryPlanSourceRole::Adjacent {
+            assert!(
+                source.rationale.starts_with("adjacent exploration from"),
+                "unexpected rationale {}",
+                source.rationale
+            );
+            assert!(!source.rationale.contains("distributed systems"));
+        }
+    }
+}
+
+#[test]
+fn explicit_explore_query_remains_distinct_from_autonomous_personal_discovery() {
+    let home_dir = TestDataDir::new("explore-distinct-home");
+    let home = AgentTools::open_home_node(&home_dir.0, seed_store).unwrap();
+    let manager = personal_manager(&home);
+    set_interest(&home, &manager, "distributed systems");
+    import_verified_network_metadata(&home);
+
+    let explored = home
+        .explore_public_pods(
+            &manager,
+            ExploreRequest::new("rust ownership", 10, 5).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(explored.query, "rust ownership");
+    assert!(!explored.results.is_empty());
+
+    let plan = home
+        .request_personal_discovery(
+            &manager,
+            RequestPersonalDiscovery {
+                intent: None,
+                result_count: None,
+                idempotency_key: "explore-distinct".into(),
+            },
+            Utc::now(),
+        )
+        .unwrap()
+        .plan;
+    // Autonomous plan does not embed the explicit Explore query.
+    let serialized = serde_json::to_string(&plan).unwrap();
+    assert!(!serialized.contains("rust ownership"));
+    assert_ne!(
+        serde_json::to_value(&plan).unwrap()["intent"],
+        serde_json::json!({"kind":"topic","value":"rust ownership"})
+    );
+}
+
+#[test]
+fn network_lead_selection_does_not_create_subscription_import_state_or_browser_authority() {
+    let home_dir = TestDataDir::new("no-side-effects-home");
+    let home = AgentTools::open_home_node(&home_dir.0, seed_store).unwrap();
+    let manager = personal_manager(&home);
+    set_interest(&home, &manager, "distributed systems");
+    import_verified_network_metadata(&home);
+    let store_guard = home.store();
+    let before = {
+        let store = store_guard.read().unwrap();
+        (
+            store.subscriptions.len(),
+            store.accepted_placement_projections.len(),
+            store.agent_harnesses.len(),
+            store.pods.len(),
+        )
+    };
+    drop(store_guard);
+
+    let created = home
+        .request_personal_discovery(
+            &manager,
+            RequestPersonalDiscovery {
+                intent: None,
+                result_count: None,
+                idempotency_key: "no-side-effects".into(),
+            },
+            Utc::now(),
+        )
+        .unwrap();
+    assert!(created
+        .plan
+        .source_neighborhoods
+        .iter()
+        .any(|source| source.role == DiscoveryPlanSourceRole::Adjacent));
+
+    let store_guard = home.store();
+    let after = {
+        let store = store_guard.read().unwrap();
+        (
+            store.subscriptions.len(),
+            store.accepted_placement_projections.len(),
+            store.agent_harnesses.len(),
+            store.pods.len(),
+        )
+    };
+    assert_eq!(before.0, after.0);
+    assert_eq!(before.1, after.1);
+    assert_eq!(before.2, after.2);
+    assert_eq!(before.3, after.3);
+    assert!(created.task.target.pod().is_none());
+}
+
+#[test]
+fn network_leads_fill_only_adjacent_allocation_unless_user_evidence_corroborates() {
+    let home_dir = TestDataDir::new("adjacent-only-home");
+    let home = AgentTools::open_home_node(&home_dir.0, seed_store).unwrap();
+    let manager = personal_manager(&home);
+    set_interest(&home, &manager, "distributed systems");
+    import_verified_network_metadata(&home);
+
+    let plan = home
+        .request_personal_discovery(
+            &manager,
+            RequestPersonalDiscovery {
+                intent: None,
+                result_count: Some(10),
+                idempotency_key: "adjacent-only".into(),
+            },
+            Utc::now(),
+        )
+        .unwrap()
+        .plan;
+    assert_eq!(plan.allocation.proven, 7);
+    assert_eq!(plan.allocation.adjacent, 3);
+    for source in &plan.source_neighborhoods {
+        let is_network = source.rationale.contains("adjacent exploration from");
+        if is_network {
+            assert_eq!(source.role, DiscoveryPlanSourceRole::Adjacent);
+        }
+    }
+    assert!(plan
+        .source_neighborhoods
+        .iter()
+        .filter(|source| source.role == DiscoveryPlanSourceRole::Proven)
+        .all(|source| !source.rationale.contains("adjacent exploration from")));
+}
+
+#[test]
+fn restart_trust_and_equivalent_metadata_replacement_are_deterministic() {
+    let home_dir = TestDataDir::new("deterministic-network-home");
+    let home = AgentTools::initialize_home_node(&home_dir.0, seed_store).unwrap();
+    let owner = home.local_owner_auth_context().unwrap();
+    let mut taste = UpdateTasteProfileRequest::default();
+    taste.interests = Some(vec!["distributed systems".into()]);
+    home.update_taste_profile(&owner, taste).unwrap();
+    import_verified_network_metadata(&home);
+    let now = Utc.with_ymd_and_hms(2026, 7, 20, 15, 0, 0).unwrap();
+    let first = home
+        .request_personal_discovery(
+            &owner,
+            RequestPersonalDiscovery {
+                intent: None,
+                result_count: None,
+                idempotency_key: "deterministic-network".into(),
+            },
+            now,
+        )
+        .unwrap();
+    drop(home);
+
+    let restarted = AgentTools::open_initialized_home_node(&home_dir.0).unwrap();
+    let owner = restarted.local_owner_auth_context().unwrap();
+    let retried = restarted
+        .request_personal_discovery(
+            &owner,
+            RequestPersonalDiscovery {
+                intent: None,
+                result_count: None,
+                idempotency_key: "deterministic-network".into(),
+            },
+            now,
+        )
+        .unwrap();
+    assert_eq!(retried, first);
+
+    // Equivalent re-import of the same verified announcement yields the same adjacent signals
+    // when building a fresh plan (new idempotency key).
+    let second = restarted
+        .request_personal_discovery(
+            &owner,
+            RequestPersonalDiscovery {
+                intent: None,
+                result_count: None,
+                idempotency_key: "deterministic-network-2".into(),
+            },
+            now,
+        )
+        .unwrap()
+        .plan;
+    let first_adjacent = first
+        .plan
+        .source_neighborhoods
+        .iter()
+        .filter(|source| source.role == DiscoveryPlanSourceRole::Adjacent)
+        .map(|source| source.signal.clone())
+        .collect::<Vec<_>>();
+    let second_adjacent = second
+        .source_neighborhoods
+        .iter()
+        .filter(|source| source.role == DiscoveryPlanSourceRole::Adjacent)
+        .map(|source| source.signal.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(first_adjacent, second_adjacent);
+}
+
+#[test]
+fn private_discovery_lead_types_remain_absent_from_federation_and_outbound_artifacts() {
+    let home_dir = TestDataDir::new("privacy-network-home");
+    let home = AgentTools::open_home_node(&home_dir.0, seed_store).unwrap();
+    let manager = personal_manager(&home);
+    set_interest(&home, &manager, "secret-private-topic");
+    // Also plant a network lead that would match systems, not the secret topic.
+    import_verified_network_metadata(&home);
+    home.request_personal_discovery(
+        &manager,
+        RequestPersonalDiscovery {
+            intent: Some(PersonalDiscoveryIntent::Topic(
+                "secret-private-topic".into(),
+            )),
+            result_count: None,
+            idempotency_key: "privacy-network".into(),
+        },
+        Utc::now(),
+    )
+    .unwrap();
+
+    let federation = home.default_auth_context().unwrap();
+    let public_pods = home.list_public_pods(&federation).unwrap();
+    let manifests = public_pods
+        .iter()
+        .map(|pod| {
+            home.federation_pod_manifest(&federation, &pod.slug)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let events = public_pods
+        .iter()
+        .map(|pod| home.federation_pod_events(&federation, &pod.slug).unwrap())
+        .collect::<Vec<_>>();
+    let packages = public_pods
+        .iter()
+        .map(|pod| home.export_skill_pack(&federation, &pod.slug).unwrap())
+        .collect::<Vec<_>>();
+    let announcements = home
+        .store()
+        .read()
+        .unwrap()
+        .known_pod_announcements
+        .values()
+        .map(|known| known.announcement.clone())
+        .collect::<Vec<_>>();
+    let samples = home
+        .store()
+        .read()
+        .unwrap()
+        .pod_explore_sample_sets
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    let endorsements = home
+        .store()
+        .read()
+        .unwrap()
+        .pod_endorsements
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    let index_search = home.search_pod_announcements("systems", 10).unwrap();
+    let explored = home
+        .explore_public_pods(&manager, ExploreRequest::new("systems", 10, 5).unwrap())
+        .unwrap();
+    let relayed = {
+        // Relay surface requires a trusted peer; create a disposable peer node.
+        let peer_dir = TestDataDir::new("privacy-peer");
+        let peer = AgentTools::open_home_node(&peer_dir.0, seed_store).unwrap();
+        let peer_info = peer
+            .node_info(&peer.default_auth_context().unwrap())
+            .unwrap();
+        let proposer = admin_harness(
+            &home,
+            "privacy peer proposer",
+            vec![HarnessCapability::Administration],
+        );
+        let approver = admin_harness(
+            &home,
+            "privacy peer approver",
+            vec![HarnessCapability::Approval],
+        );
+        let now = Utc::now();
+        let proposal = home
+            .request_add_trusted_peer(
+                &proposer,
+                peer_info.display_name.clone(),
+                "https://privacy-peer.example".into(),
+                peer_info.public_key.clone(),
+                now,
+            )
+            .unwrap();
+        home.approve_pending_proposal(&approver, proposal.id, now)
+            .unwrap();
+        let trusted = home
+            .trusted_peers(&proposer)
+            .unwrap()
+            .into_iter()
+            .find(|trusted| trusted.public_key == peer_info.public_key)
+            .unwrap();
+        home.relay_pod_announcements(&proposer, trusted.id).unwrap()
+    };
+
+    let outbound = serde_json::to_string(&serde_json::json!({
+        "node": home.node_info(&federation).unwrap(),
+        "pods": public_pods,
+        "manifests": manifests,
+        "events": events,
+        "packages": packages,
+        "announcements": announcements,
+        "samples": samples,
+        "endorsements": endorsements,
+        "index_search": index_search,
+        "explore": explored,
+        "relayed": relayed,
+    }))
+    .unwrap();
+    for forbidden in [
+        "secret-private-topic",
+        "DiscoveryLead",
+        "discovery_lead",
+        "InterestSeed",
+        "interest_seed",
+        "TasteProfile",
+        "matching_topics",
+        "SourceAffinity",
+        "local_relevance",
+        "DiscoveryPlan",
+        "discovery_plan",
+        "PersonalDiscovery",
+    ] {
+        assert!(
+            !outbound.contains(forbidden),
+            "outbound artifact leaked private marker {forbidden}"
+        );
+    }
+}

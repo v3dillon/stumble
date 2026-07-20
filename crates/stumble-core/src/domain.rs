@@ -535,6 +535,124 @@ impl TrustPolicy {
             blocked_topics: std::collections::BTreeSet::new(),
         }
     }
+
+    /// Whether announcements received only from this Index base URL remain eligible.
+    #[must_use]
+    pub fn retains_index_url(&self, source: &str) -> bool {
+        self.index_nodes
+            .iter()
+            .any(|index| index.base_url == source)
+    }
+
+    /// Whether a public Pod Announcement is excluded by node, pod, or topic blocks.
+    ///
+    /// Topic matching lowercases announcement text and checks `contains` against the
+    /// stored blocked topic string (Explore semantics — policy topics are not re-cased).
+    #[must_use]
+    pub fn blocks_announcement(&self, announcement: &PodAnnouncement) -> bool {
+        self.blocked_nodes.contains(&announcement.origin_node_id)
+            || self.blocked_pods.iter().any(|blocked| {
+                blocked.origin_node_id == announcement.origin_node_id
+                    && blocked
+                        .pod_slug
+                        .eq_ignore_ascii_case(&announcement.pod_slug)
+            })
+            || self.blocked_topics.iter().any(|topic| {
+                announcement.subject.to_lowercase().contains(topic)
+                    || announcement.pod_name.to_lowercase().contains(topic)
+                    || announcement.pod_slug.to_lowercase().contains(topic)
+            })
+    }
+
+    /// Whether a public Pod is excluded by node or pod blocks.
+    #[must_use]
+    pub fn blocks_pod(&self, origin_node_id: NodeIdentityId, pod_slug: &str) -> bool {
+        self.blocked_nodes.contains(&origin_node_id)
+            || self.blocked_pods.iter().any(|blocked| {
+                blocked.origin_node_id == origin_node_id
+                    && blocked.pod_slug.eq_ignore_ascii_case(pod_slug)
+            })
+    }
+
+    /// Whether a Content Reference sample is excluded by source or topic blocks.
+    ///
+    /// Topic matching lowercases title/summary and checks `contains` against the
+    /// stored blocked topic string (Explore semantics — policy topics are not re-cased).
+    #[must_use]
+    pub fn blocks_content_reference(&self, reference: &FeedContentReference) -> bool {
+        self.blocks_source_and_topics(
+            &reference.source,
+            &reference.tags,
+            &reference.title,
+            reference.summary.as_deref(),
+        )
+    }
+
+    /// Whether a source domain and topic-bearing fields are excluded by Trust Policy.
+    #[must_use]
+    pub fn blocks_source_and_topics(
+        &self,
+        source: &str,
+        tags: &[String],
+        title: &str,
+        summary: Option<&str>,
+    ) -> bool {
+        self.blocked_sources
+            .iter()
+            .any(|blocked| blocked.eq_ignore_ascii_case(source))
+            || self.blocked_topics.iter().any(|topic| {
+                tags.iter().any(|tag| tag.eq_ignore_ascii_case(topic))
+                    || title.to_lowercase().contains(topic)
+                    || summary.is_some_and(|summary| summary.to_lowercase().contains(topic))
+            })
+    }
+}
+
+/// Shared discovery tokenization used by Explore routing and Personal Discovery matching.
+///
+/// Splits on non-alphanumeric characters, drops tokens of length ≤ 3 and a fixed stop
+/// list, preserves input case, and caps output at 80 tokens.
+#[must_use]
+pub(crate) fn discovery_tokens(text: &str) -> Vec<String> {
+    let stop = [
+        "the",
+        "and",
+        "for",
+        "with",
+        "pod",
+        "this",
+        "that",
+        "from",
+        "into",
+        "links",
+        "link",
+        "discovery",
+        "personal",
+        "public",
+        "private",
+        "use",
+        "when",
+        "brief",
+        "style",
+        "good",
+        "bad",
+        "stuff",
+        "weird",
+    ];
+    let mut out = Vec::new();
+    for token in text
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::trim)
+        .filter(|token| token.len() > 3)
+    {
+        if !stop.contains(&token) && !out.iter().any(|existing| existing == token) {
+            out.push(token.to_string());
+        }
+        if out.len() >= 80 {
+            break;
+        }
+    }
+    out
 }
 
 /// Sensitive local Trust Policy edit requiring independent approval.
@@ -1874,12 +1992,78 @@ pub struct DiscoveryPlanTopic {
     pub temporary: bool,
 }
 
+/// Whether a selected source neighborhood fills proven or adjacent allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DiscoveryPlanSourceRole {
+    /// Drawn from explicit preferences or corroborated User evidence.
+    #[default]
+    Proven,
+    /// Adjacent exploration, including network-matched Discovery Leads.
+    Adjacent,
+}
+
 /// One selected source neighborhood with aggregate evidence only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveryPlanSourceNeighborhood {
     pub signal: SourceAffinitySignal,
     pub rationale: String,
     pub temporary: bool,
+    /// Proven vs adjacent allocation role for this neighborhood.
+    #[serde(default)]
+    pub role: DiscoveryPlanSourceRole,
+}
+
+/// Provenance of a private Discovery Lead from verified public Stumble metadata.
+///
+/// Leads and their matching inputs remain Home Node private state and must never
+/// appear in federation, Explore, announcement, or Index serialization.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DiscoveryLeadProvenance {
+    /// Compact signed public Pod advertisement retained locally.
+    PodAnnouncement {
+        announcement_id: Uuid,
+        origin_node_id: NodeIdentityId,
+        pod_slug: String,
+    },
+    /// Bounded Origin-signed Explore sample Content Reference.
+    ExploreSample {
+        announcement_id: Uuid,
+        sample_artifact_id: Uuid,
+        source: String,
+    },
+    /// Signed optional endorsement of a currently known public Pod.
+    Endorsement {
+        endorsement_id: Uuid,
+        endorsed_node_id: NodeIdentityId,
+        endorsed_pod_slug: String,
+    },
+    /// Locally available accepted Content Reference on a public Pod.
+    PublicContentReference {
+        content_item_id: ContentItemId,
+        pod_id: PodId,
+        source: String,
+    },
+}
+
+/// Private potential source neighborhood before plan selection.
+///
+/// Produced only from verified, currently trusted, non-blocked public metadata
+/// already local to the Home Node. Relevance is always recomputed locally.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct DiscoveryLead {
+    /// Generic source neighborhood the lead proposes for exploration.
+    pub signal: SourceAffinitySignal,
+    /// Public subject tokens used for local matching (not private profile terms).
+    pub public_topics: Vec<String>,
+    /// Inspectable origin of the lead within the local reservoir.
+    pub provenance: DiscoveryLeadProvenance,
+    /// Locally recomputed relevance; remote Index scores are never authoritative.
+    pub local_relevance: f32,
 }
 
 /// Finite proven-neighborhood and adjacent-exploration quotas.

@@ -1,3 +1,5 @@
+mod network_leads;
+
 use crate::agent_tools::AgentToolsError;
 use crate::domain::*;
 use crate::interest_seeds::{source_affinity_is_blocked, taste_profile_projections};
@@ -231,15 +233,16 @@ pub(crate) fn build_plan(
 
     let mut ranked_sources = projections
         .source_affinities
-        .into_iter()
+        .iter()
         .filter(|affinity| affinity.weight > 0.0 && !affinity.explicitly_blocked)
         .map(|affinity| RankedSource {
             priority: 1,
             weight: affinity.weight,
             source: DiscoveryPlanSourceNeighborhood {
-                signal: affinity.signal,
+                signal: affinity.signal.clone(),
                 rationale: "corroborated aggregate User evidence".into(),
                 temporary: false,
+                role: DiscoveryPlanSourceRole::Proven,
             },
         })
         .collect::<Vec<_>>();
@@ -258,6 +261,7 @@ pub(crate) fn build_plan(
                 signal,
                 rationale: "temporary similar-link intent for this run".into(),
                 temporary: true,
+                role: DiscoveryPlanSourceRole::Proven,
             },
         });
     }
@@ -275,6 +279,32 @@ pub(crate) fn build_plan(
         .map(|candidate| candidate.source)
         .collect::<Vec<_>>();
     source_neighborhoods.truncate(MAX_SELECTED_SOURCE_NEIGHBORHOODS);
+    seen_sources = source_neighborhoods
+        .iter()
+        .map(|source| source.signal.clone())
+        .collect();
+
+    // Network leads only occupy remaining neighborhood slots and only as adjacent.
+    // Capacity counts successfully inserted neighborhoods only so proven-signal
+    // collisions do not underfill adjacent slots.
+    let adjacent_slots =
+        MAX_SELECTED_SOURCE_NEIGHBORHOODS.saturating_sub(source_neighborhoods.len());
+    let adjacent_cap = adjacent_slots.min(network_leads::MAX_ADJACENT_NETWORK_SOURCES);
+    if adjacent_cap > 0 {
+        let matching = network_leads::NetworkMatchContext::from_plan(
+            preferences,
+            &topics,
+            &source_neighborhoods,
+            &projections,
+        );
+        let leads = network_leads::produce_network_discovery_leads(store, user_id, tenant_id);
+        let matched = network_leads::match_network_leads_locally(&leads, &matching, preferences);
+        source_neighborhoods.extend(network_leads::select_adjacent_from_matched(
+            matched,
+            &mut seen_sources,
+            adjacent_cap,
+        ));
+    }
 
     let proven = (result_count.saturating_mul(7).saturating_add(9)) / 10;
     Ok(DiscoveryPlan {
@@ -400,5 +430,134 @@ mod tests {
         assert_eq!(selected.len(), 5);
         assert!(!selected.contains(&"a.example"));
         assert!(selected.contains(&"f.example"));
+    }
+
+    #[test]
+    fn adjacent_slots_fill_despite_proven_overlap_with_top_network_leads() {
+        // When a top-ranked network lead equals a proven SourceAffinity, adjacent
+        // fill must still reach min(remaining, 3) with only non-proven signals.
+        let user_id = Uuid::now_v7();
+        let node_id = Uuid::now_v7();
+        let mut store = InMemoryStore::default();
+        store.user_preferences.insert(
+            (user_id, None),
+            UserPreferences {
+                user_id,
+                tenant_id: None,
+                interests: vec!["distributed systems".into()],
+                blocked_topics: vec![],
+                blocked_sources: vec![],
+                blocked_source_affinities: vec![],
+                preferred_brief_length: 7,
+                preferred_discovery_mode: DiscoveryMode::DeepMatch,
+                recurrence_penalty_days: RecurrencePenaltyDays::default(),
+            },
+        );
+        // Proven SourceAffinity equal to the top network sample source.
+        for _ in 0..4 {
+            store.taste_learning_evidence.push(TasteLearningEvidence {
+                id: Uuid::now_v7(),
+                user_id,
+                tenant_id: None,
+                signal: LearnedTasteSignal::Source("allowed.example".into()),
+                kind: LearnedTasteEvidenceKind::MoreLikeThis,
+                direction: TasteEvidenceDirection::Supporting,
+                created_at: Utc::now(),
+            });
+        }
+
+        // Distinct network leads that match the interest; one collides with proven.
+        let leads = vec![
+            DiscoveryLead {
+                signal: SourceAffinitySignal::Source("allowed.example".into()),
+                public_topics: vec!["systems".into(), "distributed".into()],
+                provenance: DiscoveryLeadProvenance::ExploreSample {
+                    announcement_id: Uuid::now_v7(),
+                    sample_artifact_id: Uuid::now_v7(),
+                    source: "allowed.example".into(),
+                },
+                local_relevance: 0.0,
+            },
+            DiscoveryLead {
+                signal: SourceAffinitySignal::Source("network-a.example".into()),
+                public_topics: vec!["systems".into()],
+                provenance: DiscoveryLeadProvenance::ExploreSample {
+                    announcement_id: Uuid::now_v7(),
+                    sample_artifact_id: Uuid::now_v7(),
+                    source: "network-a.example".into(),
+                },
+                local_relevance: 0.0,
+            },
+            DiscoveryLead {
+                signal: SourceAffinitySignal::Source("network-b.example".into()),
+                public_topics: vec!["systems".into()],
+                provenance: DiscoveryLeadProvenance::ExploreSample {
+                    announcement_id: Uuid::now_v7(),
+                    sample_artifact_id: Uuid::now_v7(),
+                    source: "network-b.example".into(),
+                },
+                local_relevance: 0.0,
+            },
+            DiscoveryLead {
+                signal: SourceAffinitySignal::Community("rust-systems".into()),
+                public_topics: vec!["systems".into(), "distributed".into()],
+                provenance: DiscoveryLeadProvenance::PodAnnouncement {
+                    announcement_id: Uuid::now_v7(),
+                    origin_node_id: node_id,
+                    pod_slug: "rust-systems".into(),
+                },
+                local_relevance: 0.0,
+            },
+        ];
+        let preferences = store.user_preferences.get(&(user_id, None));
+        let projections =
+            crate::interest_seeds::taste_profile_projections(&store, user_id, None, preferences);
+        let matching = network_leads::NetworkMatchContext {
+            topics: std::collections::BTreeSet::from([
+                "distributed".to_string(),
+                "systems".to_string(),
+            ]),
+            sources: projections
+                .source_affinities
+                .iter()
+                .filter(|affinity| affinity.weight > 0.0)
+                .map(|affinity| affinity.signal.clone())
+                .collect(),
+        };
+        assert!(matching
+            .sources
+            .contains(&SourceAffinitySignal::Source("allowed.example".into())));
+
+        let matched = network_leads::match_network_leads_locally(&leads, &matching, preferences);
+        // Proven overlap ranks highest; take-before-skip would underfill.
+        assert_eq!(
+            matched.first().map(|lead| &lead.signal),
+            Some(&SourceAffinitySignal::Source("allowed.example".into()))
+        );
+
+        let mut seen_sources =
+            HashSet::from([SourceAffinitySignal::Source("allowed.example".into())]);
+        let remaining = MAX_SELECTED_SOURCE_NEIGHBORHOODS.saturating_sub(1);
+        let adjacent_cap = remaining.min(network_leads::MAX_ADJACENT_NETWORK_SOURCES);
+        let adjacent =
+            network_leads::select_adjacent_from_matched(matched, &mut seen_sources, adjacent_cap);
+
+        assert_eq!(adjacent.len(), adjacent_cap);
+        assert!(adjacent.iter().all(|source| {
+            source.role == DiscoveryPlanSourceRole::Adjacent
+                && source.signal != SourceAffinitySignal::Source("allowed.example".into())
+                && source.rationale.contains("adjacent exploration from")
+        }));
+        let adjacent_signals: HashSet<_> = adjacent
+            .iter()
+            .map(|source| source.signal.clone())
+            .collect();
+        assert!(
+            adjacent_signals.contains(&SourceAffinitySignal::Source("network-a.example".into()))
+        );
+        assert!(
+            adjacent_signals.contains(&SourceAffinitySignal::Source("network-b.example".into()))
+        );
+        assert!(adjacent_signals.contains(&SourceAffinitySignal::Community("rust-systems".into())));
     }
 }
