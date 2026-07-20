@@ -21,17 +21,33 @@ if [[ "$tasks" == "$response" ]]; then
   printf 'stumble returned an unexpected Discovery Task response\n' >&2
   exit 1
 fi
+
+# Inspectable schedule backpressure for Personal Discovery schedules (same identities as list/claim).
+schedules_response="$(STUMBLE_HARNESS_CREDENTIAL="$TOKEN" "$STUMBLE" \
+  --data-dir "$DATA_DIR" discover personal schedule list 2>/dev/null || true)"
+if [[ -n "$schedules_response" ]]; then
+  schedule_backpressure="$(printf '%s' "$schedules_response" | sed -E \
+    's/^\{"version":2,"data":(\[.*\])\}$/\1/')"
+  if [[ "$schedule_backpressure" == "$schedules_response" ]]; then
+    schedule_backpressure='[]'
+  fi
+else
+  schedule_backpressure='[]'
+fi
+
 compact="${tasks//$'\n'/}"
 compact="${compact// /}"
 emit_event() {
-  printf '{"type":"discovery_ready","tasks":%s}\n' "$tasks"
+  printf '{"type":"discovery_ready","tasks":%s,"schedule_backpressure":%s}\n' \
+    "$tasks" "$schedule_backpressure"
 }
 
 mkdir -p "$(dirname "$EVENT_PATH")"
 umask 077
 event_tmp="$EVENT_PATH.tmp.$$"
 if [[ "$compact" == "[]" ]]; then
-  printf '{"type":"discovery_idle","tasks":[]}\n' >"$event_tmp"
+  printf '{"type":"discovery_idle","tasks":[],"schedule_backpressure":%s}\n' \
+    "$schedule_backpressure" >"$event_tmp"
   mv -f "$event_tmp" "$EVENT_PATH"
   exit 0
 fi

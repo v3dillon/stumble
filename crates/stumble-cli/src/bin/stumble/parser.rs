@@ -174,6 +174,28 @@ pub(super) enum PersonalDiscoveryWorkflow {
     DismissBatch(IdArgs),
     ReviewBatch(IdArgs),
     ReviewItem(InputArgs),
+    Schedule {
+        #[command(subcommand)]
+        command: PersonalScheduleWorkflow,
+    },
+    NotifyBatch(IdArgs),
+}
+
+#[derive(Subcommand)]
+pub(super) enum PersonalScheduleWorkflow {
+    Create(InputArgs),
+    List,
+    Show(IdArgs),
+    Update(UpdateScheduleArgs),
+    Disable(IdArgs),
+    Remove(IdArgs),
+}
+
+#[derive(Args)]
+pub(super) struct UpdateScheduleArgs {
+    pub(super) id: String,
+    #[arg(long, value_hint = ValueHint::FilePath)]
+    pub(super) input: PathBuf,
 }
 
 #[derive(Subcommand)]

@@ -222,6 +222,24 @@ pub fn router_with_options(
         )
         .route("/personal-discovery", post(request_personal_discovery))
         .route(
+            "/personal-discovery/schedules",
+            get(list_personal_discovery_schedules).post(create_personal_discovery_schedule),
+        )
+        .route(
+            "/personal-discovery/schedules/:id",
+            get(personal_discovery_schedule)
+                .patch(update_personal_discovery_schedule)
+                .delete(remove_personal_discovery_schedule),
+        )
+        .route(
+            "/personal-discovery/schedules/:id/disable",
+            post(disable_personal_discovery_schedule),
+        )
+        .route(
+            "/discovery-result-batches/:id/notify",
+            post(attempt_discovery_results_ready_notification),
+        )
+        .route(
             "/discovery-result-batches",
             get(list_discovery_result_batches).post(complete_discovery_result_batch),
         )
@@ -676,6 +694,95 @@ async fn request_personal_discovery(
         request,
         chrono::Utc::now(),
     )?))
+}
+
+async fn list_personal_discovery_schedules(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<PersonalDiscoveryScheduleStatus>>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.list_personal_discovery_schedules(
+        &ctx,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn create_personal_discovery_schedule(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<CreatePersonalDiscoveryScheduleRequest>,
+) -> Result<Json<PersonalDiscoveryScheduleStatus>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.create_personal_discovery_schedule(
+        &ctx,
+        request,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn personal_discovery_schedule(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<PersonalDiscoveryScheduleId>,
+) -> Result<Json<PersonalDiscoveryScheduleStatus>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.personal_discovery_schedule(
+        &ctx,
+        id,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn update_personal_discovery_schedule(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<PersonalDiscoveryScheduleId>,
+    Json(request): Json<UpdatePersonalDiscoveryScheduleRequest>,
+) -> Result<Json<PersonalDiscoveryScheduleStatus>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.update_personal_discovery_schedule(
+        &ctx,
+        id,
+        request,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn disable_personal_discovery_schedule(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<PersonalDiscoveryScheduleId>,
+) -> Result<Json<PersonalDiscoveryScheduleStatus>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.disable_personal_discovery_schedule(
+        &ctx,
+        id,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn remove_personal_discovery_schedule(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<PersonalDiscoveryScheduleId>,
+) -> Result<Json<PersonalDiscoverySchedule>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(
+        state.tools.remove_personal_discovery_schedule(&ctx, id)?,
+    ))
+}
+
+async fn attempt_discovery_results_ready_notification(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<DiscoveryResultBatchId>,
+) -> Result<Json<DiscoveryResultsReadyNotificationOutcome>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(
+        state
+            .tools
+            .attempt_discovery_results_ready_notification(&ctx, id, chrono::Utc::now())?,
+    ))
 }
 
 async fn list_discovery_result_batches(

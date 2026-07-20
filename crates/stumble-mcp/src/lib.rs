@@ -355,6 +355,64 @@ impl McpToolRouter {
                     chrono::Utc::now(),
                 )?))
             }
+            CreatePersonalDiscoverySchedule => {
+                let request = serde_json::from_value(call.arguments)?;
+                Ok(json!(self.tools.create_personal_discovery_schedule(
+                    &self.ctx,
+                    request,
+                    chrono::Utc::now(),
+                )?))
+            }
+            ListPersonalDiscoverySchedules => Ok(json!(self
+                .tools
+                .list_personal_discovery_schedules(&self.ctx, chrono::Utc::now())?)),
+            GetPersonalDiscoverySchedule => {
+                let schedule_id = arg_string(&call.arguments, "schedule_id")?.parse()?;
+                Ok(json!(self.tools.personal_discovery_schedule(
+                    &self.ctx,
+                    schedule_id,
+                    chrono::Utc::now(),
+                )?))
+            }
+            UpdatePersonalDiscoverySchedule => {
+                let schedule_id = arg_string(&call.arguments, "schedule_id")?.parse()?;
+                let mut body = call.arguments;
+                if let Some(object) = body.as_object_mut() {
+                    object.remove("schedule_id");
+                }
+                let request = serde_json::from_value(body)?;
+                Ok(json!(self.tools.update_personal_discovery_schedule(
+                    &self.ctx,
+                    schedule_id,
+                    request,
+                    chrono::Utc::now(),
+                )?))
+            }
+            DisablePersonalDiscoverySchedule => {
+                let schedule_id = arg_string(&call.arguments, "schedule_id")?.parse()?;
+                Ok(json!(self.tools.disable_personal_discovery_schedule(
+                    &self.ctx,
+                    schedule_id,
+                    chrono::Utc::now(),
+                )?))
+            }
+            RemovePersonalDiscoverySchedule => {
+                let schedule_id = arg_string(&call.arguments, "schedule_id")?.parse()?;
+                Ok(json!(self.tools.remove_personal_discovery_schedule(
+                    &self.ctx,
+                    schedule_id
+                )?))
+            }
+            AttemptDiscoveryResultsReadyNotification => {
+                let batch_id = arg_string(&call.arguments, "batch_id")?.parse()?;
+                Ok(json!(self
+                    .tools
+                    .attempt_discovery_results_ready_notification(
+                        &self.ctx,
+                        batch_id,
+                        chrono::Utc::now(),
+                    )?))
+            }
             GetPodPackage => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
                 Ok(json!(self.tools.get_skill_pack(&self.ctx, &pod_slug)?))

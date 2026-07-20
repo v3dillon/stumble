@@ -264,6 +264,31 @@ impl std::str::FromStr for DiscoveryResultBatchId {
     }
 }
 
+/// Stable local identity of a private Personal Discovery schedule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PersonalDiscoveryScheduleId(Uuid);
+
+impl From<Uuid> for PersonalDiscoveryScheduleId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl std::fmt::Display for PersonalDiscoveryScheduleId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::str::FromStr for PersonalDiscoveryScheduleId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse().map(Self)
+    }
+}
+
 /// Positive, bounded duration of a Discovery Task lease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -1927,6 +1952,10 @@ pub enum HarnessWriteOperation {
     RetractInterestSeed,
     CreateDiscoveryTask,
     RequestPersonalDiscovery,
+    CreatePersonalDiscoverySchedule,
+    UpdatePersonalDiscoverySchedule,
+    DisablePersonalDiscoverySchedule,
+    RemovePersonalDiscoverySchedule,
     ClaimDiscoveryTask,
     RenewDiscoveryTaskLease,
     CompleteDiscoveryTask,
@@ -1935,6 +1964,7 @@ pub enum HarnessWriteOperation {
     DismissDiscoveryResultBatch,
     MarkDiscoveryResultBatchReviewed,
     ReviewDiscoveryResultItem,
+    AttemptDiscoveryResultsReadyNotification,
 }
 
 /// Current lifecycle state with state-specific lease data.
@@ -1975,6 +2005,14 @@ pub enum DiscoveryTaskOrigin {
         idempotency_key: String,
         /// Interactive Harness that requested the plan.
         requested_by: Option<AgentHarnessId>,
+    },
+    /// Due work derived from one named private Personal Discovery schedule.
+    ///
+    /// Identity for a schedule period is `(schedule_id, due_at)`; materialization is
+    /// idempotent across retries, restarts, concurrent wakeups, and scheduler changes.
+    PersonalScheduled {
+        /// Schedule that produced this period's task.
+        schedule_id: PersonalDiscoveryScheduleId,
     },
 }
 
@@ -2136,6 +2174,206 @@ pub struct DiscoveryPlan {
 pub struct RequestedPersonalDiscovery {
     pub plan: DiscoveryPlan,
     pub task: DiscoveryTask,
+}
+
+/// Recurrence for a private Personal Discovery schedule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PersonalDiscoveryCadence {
+    Hourly,
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+impl PersonalDiscoveryCadence {
+    /// Deterministic period start used as the task due time for materialization.
+    #[must_use]
+    pub fn period_start(self, now: DateTime<Utc>) -> DateTime<Utc> {
+        use chrono::{Datelike, Timelike};
+        match self {
+            Self::Hourly => now
+                .with_minute(0)
+                .and_then(|value| value.with_second(0))
+                .and_then(|value| value.with_nanosecond(0))
+                .expect("BUG: zero is a valid time component"),
+            Self::Daily => now
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .expect("BUG: midnight is valid")
+                .and_utc(),
+            Self::Weekly => {
+                let monday = now.date_naive()
+                    - chrono::Duration::days(i64::from(now.weekday().num_days_from_monday()));
+                monday
+                    .and_hms_opt(0, 0, 0)
+                    .expect("BUG: midnight is valid")
+                    .and_utc()
+            }
+            Self::Monthly => chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .expect("BUG: first day of a valid month is valid")
+                .and_utc(),
+        }
+    }
+}
+
+/// How a completed scheduled batch may be delivered to the User.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PersonalDiscoveryDeliveryMode {
+    /// Emit at most one results-ready notification attempt when the harness supports delivery.
+    NotifyWhenSupported,
+    /// Retain the batch silently for later retrieval without a notification attempt.
+    QueueOnly,
+}
+
+/// Optional temporary focus and avoidance for one schedule's runs.
+///
+/// Does not change durable Taste Profile preferences.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct PersonalDiscoveryScheduleIntent {
+    /// Temporary focus topics applied when a period's plan materializes.
+    pub focus_topics: Vec<String>,
+    /// Temporary avoidance topics applied only to this schedule's plans.
+    pub avoid_topics: Vec<String>,
+}
+
+impl PersonalDiscoveryScheduleIntent {
+    /// Creates temporary schedule focus and avoidance instructions.
+    #[must_use]
+    pub fn new(focus_topics: Vec<String>, avoid_topics: Vec<String>) -> Self {
+        Self {
+            focus_topics,
+            avoid_topics,
+        }
+    }
+}
+
+/// Request to create a named private Personal Discovery schedule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct CreatePersonalDiscoveryScheduleRequest {
+    /// User-visible unique name within the User's private schedules.
+    pub name: String,
+    pub cadence: PersonalDiscoveryCadence,
+    #[serde(default)]
+    pub intent: PersonalDiscoveryScheduleIntent,
+    /// Finite batch size for each materialized run (1..=100).
+    #[serde(default)]
+    pub result_count: Option<u16>,
+    pub delivery_mode: PersonalDiscoveryDeliveryMode,
+}
+
+/// Partial update for an existing private Personal Discovery schedule.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "snake_case")]
+pub struct UpdatePersonalDiscoveryScheduleRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cadence: Option<PersonalDiscoveryCadence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<PersonalDiscoveryScheduleIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_count: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_mode: Option<PersonalDiscoveryDeliveryMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+/// Named private opt-in Personal Discovery schedule.
+///
+/// Local private state only; never federated and independent of Pod Source Rules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonalDiscoverySchedule {
+    pub id: PersonalDiscoveryScheduleId,
+    pub user_id: UserId,
+    pub tenant_id: Option<TenantId>,
+    pub name: String,
+    pub cadence: PersonalDiscoveryCadence,
+    pub intent: PersonalDiscoveryScheduleIntent,
+    pub result_count: u16,
+    pub delivery_mode: PersonalDiscoveryDeliveryMode,
+    /// Disabled schedules retain configuration but do not materialize due work.
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Inspectable reason a schedule is not materializing due work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PersonalDiscoveryScheduleBackpressure {
+    /// No backpressure; the schedule may materialize when due and ready.
+    None,
+    /// A prior completed batch is still Ready for review or dismissal.
+    UnreviewedBatch {
+        batch_id: DiscoveryResultBatchId,
+        task_id: DiscoveryTaskId,
+    },
+    /// A prior period's task is still pending or leased.
+    InFlightTask { task_id: DiscoveryTaskId },
+}
+
+/// Schedule configuration plus inspectable dormancy and backpressure state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonalDiscoveryScheduleStatus {
+    pub schedule: PersonalDiscoverySchedule,
+    /// True when cold-start readiness is below threshold (schedule remains dormant).
+    pub readiness_dormant: bool,
+    pub backpressure: PersonalDiscoveryScheduleBackpressure,
+    /// Period start that would materialize if not dormant, disabled, or backpressured.
+    pub current_period_start: DateTime<Utc>,
+    /// Task already materialized for the current period, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_period_task_id: Option<DiscoveryTaskId>,
+}
+
+/// Private one-shot notice that a scheduled Discovery Result Batch is ready.
+///
+/// Distinct from batch review state and from notification delivery attempts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryResultsReadyEvent {
+    pub id: Uuid,
+    pub user_id: UserId,
+    pub tenant_id: Option<TenantId>,
+    pub schedule_id: PersonalDiscoveryScheduleId,
+    pub batch_id: DiscoveryResultBatchId,
+    pub task_id: DiscoveryTaskId,
+    pub delivery_mode: PersonalDiscoveryDeliveryMode,
+    pub created_at: DateTime<Utc>,
+    /// Set after the single allowed notification attempt (notify-when-supported only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_attempted_at: Option<DateTime<Utc>>,
+}
+
+/// Outcome of attempting one-shot results-ready notification delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DiscoveryResultsReadyNotificationOutcome {
+    /// First notify-when-supported attempt; batch remains Ready / unreviewed.
+    ShouldNotify {
+        event: DiscoveryResultsReadyEvent,
+        batch: DiscoveryResultBatch,
+    },
+    /// A prior attempt already consumed the one-shot allowance.
+    AlreadyAttempted {
+        event: DiscoveryResultsReadyEvent,
+        batch: DiscoveryResultBatch,
+    },
+    /// Queue-only delivery retains the batch silently without notification.
+    QueueOnly {
+        event: DiscoveryResultsReadyEvent,
+        batch: DiscoveryResultBatch,
+    },
 }
 
 /// Lifecycle of a private Discovery Result Batch, distinct from task completion.

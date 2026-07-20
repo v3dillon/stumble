@@ -5,16 +5,18 @@ use super::{
 };
 use crate::parser::{
     CandidateStatus, CandidateWorkflow, DiscoverWorkflow, PersonalDiscoveryWorkflow,
-    ReviewDecision, TaskStateFilter, TaskWorkflow,
+    PersonalScheduleWorkflow, ReviewDecision, TaskStateFilter, TaskWorkflow,
 };
 use serde_json::json;
 use stumble_cli::{read_json_input, ErrorBody, ExitStatusCategory};
 use stumble_core::{
     AgentTools, AuthContext, CandidateConfidence, CandidateId, CandidateReviewState,
-    CandidateSubmissionRequest, CompleteDiscoveryResultBatchRequest, CurationRationale,
-    DiscoveryPlanId, DiscoveryResultBatchId, DiscoveryTask, DiscoveryTaskId, DiscoveryTaskState,
-    PlacementReviewDecision, RequestPersonalDiscovery, ReviewDiscoveryResultItemRequest,
-    RouteCandidatePlacementRequest, StoreError,
+    CandidateSubmissionRequest, CompleteDiscoveryResultBatchRequest,
+    CreatePersonalDiscoveryScheduleRequest, CurationRationale, DiscoveryPlanId,
+    DiscoveryResultBatchId, DiscoveryTask, DiscoveryTaskId, DiscoveryTaskState,
+    PersonalDiscoveryScheduleId, PlacementReviewDecision, RequestPersonalDiscovery,
+    ReviewDiscoveryResultItemRequest, RouteCandidatePlacementRequest, StoreError,
+    UpdatePersonalDiscoveryScheduleRequest,
 };
 
 pub(super) fn execute(
@@ -129,6 +131,97 @@ fn execute_personal(
             serde_json::to_value(
                 tools
                     .review_discovery_result_item(actor, request, chrono::Utc::now())
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error)
+        }
+        PersonalDiscoveryWorkflow::Schedule { command } => {
+            execute_personal_schedule(command, tools, actor)
+        }
+        PersonalDiscoveryWorkflow::NotifyBatch(args) => {
+            let id = parse_id::<DiscoveryResultBatchId>(&args.id)?;
+            serde_json::to_value(
+                tools
+                    .attempt_discovery_results_ready_notification(actor, id, chrono::Utc::now())
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error)
+        }
+    }
+}
+
+fn execute_personal_schedule(
+    command: PersonalScheduleWorkflow,
+    tools: &AgentTools,
+    actor: &AuthContext,
+) -> CliResult {
+    match command {
+        PersonalScheduleWorkflow::Create(args) => {
+            let request: CreatePersonalDiscoveryScheduleRequest = serde_json::from_value(
+                read_json_input(&args.input)
+                    .map_err(|error| (error, ExitStatusCategory::ValidationOrConflict))?,
+            )
+            .map_err(|error| {
+                (
+                    ErrorBody::new("invalid_input", error.to_string()),
+                    ExitStatusCategory::ValidationOrConflict,
+                )
+            })?;
+            serde_json::to_value(
+                tools
+                    .create_personal_discovery_schedule(actor, request, chrono::Utc::now())
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error)
+        }
+        PersonalScheduleWorkflow::List => serde_json::to_value(
+            tools
+                .list_personal_discovery_schedules(actor, chrono::Utc::now())
+                .map_err(agent_tools_error)?,
+        )
+        .map_err(internal_error),
+        PersonalScheduleWorkflow::Show(args) => {
+            let id = parse_id::<PersonalDiscoveryScheduleId>(&args.id)?;
+            serde_json::to_value(
+                tools
+                    .personal_discovery_schedule(actor, id, chrono::Utc::now())
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error)
+        }
+        PersonalScheduleWorkflow::Update(args) => {
+            let id = parse_id::<PersonalDiscoveryScheduleId>(&args.id)?;
+            let request: UpdatePersonalDiscoveryScheduleRequest = serde_json::from_value(
+                read_json_input(&args.input)
+                    .map_err(|error| (error, ExitStatusCategory::ValidationOrConflict))?,
+            )
+            .map_err(|error| {
+                (
+                    ErrorBody::new("invalid_input", error.to_string()),
+                    ExitStatusCategory::ValidationOrConflict,
+                )
+            })?;
+            serde_json::to_value(
+                tools
+                    .update_personal_discovery_schedule(actor, id, request, chrono::Utc::now())
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error)
+        }
+        PersonalScheduleWorkflow::Disable(args) => {
+            let id = parse_id::<PersonalDiscoveryScheduleId>(&args.id)?;
+            serde_json::to_value(
+                tools
+                    .disable_personal_discovery_schedule(actor, id, chrono::Utc::now())
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error)
+        }
+        PersonalScheduleWorkflow::Remove(args) => {
+            let id = parse_id::<PersonalDiscoveryScheduleId>(&args.id)?;
+            serde_json::to_value(
+                tools
+                    .remove_personal_discovery_schedule(actor, id)
                     .map_err(agent_tools_error)?,
             )
             .map_err(internal_error)

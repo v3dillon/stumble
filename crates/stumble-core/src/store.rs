@@ -84,6 +84,11 @@ pub struct InMemoryStore {
     pub discovery_result_batches: HashMap<DiscoveryResultBatchId, DiscoveryResultBatch>,
     /// Replaceable learning evidence produced by deliberate Discovery Result item actions.
     pub(crate) discovery_result_item_learning_links: Vec<DiscoveryResultItemLearningLink>,
+    /// Named private Personal Discovery schedules (never federated).
+    pub personal_discovery_schedules:
+        HashMap<PersonalDiscoveryScheduleId, PersonalDiscoverySchedule>,
+    /// One-shot private Discovery-results-ready Events keyed by batch id.
+    pub discovery_results_ready_events: HashMap<DiscoveryResultBatchId, DiscoveryResultsReadyEvent>,
     pub candidates: HashMap<CandidateId, Candidate>,
     pub candidate_submissions: HashMap<CandidateSubmissionId, CandidateSubmission>,
     pub(crate) interest_seeds: HashMap<(UserId, CandidateId), InterestSeed>,
@@ -145,6 +150,10 @@ struct PersistedStore {
     discovery_result_batches: Vec<DiscoveryResultBatch>,
     #[serde(default)]
     discovery_result_item_learning_links: Vec<DiscoveryResultItemLearningLink>,
+    #[serde(default)]
+    personal_discovery_schedules: Vec<PersonalDiscoverySchedule>,
+    #[serde(default)]
+    discovery_results_ready_events: Vec<DiscoveryResultsReadyEvent>,
     #[serde(default)]
     candidates: Vec<Candidate>,
     #[serde(default)]
@@ -360,6 +369,16 @@ impl From<&InMemoryStore> for PersistedStore {
             discovery_result_item_learning_links: store
                 .discovery_result_item_learning_links
                 .clone(),
+            personal_discovery_schedules: store
+                .personal_discovery_schedules
+                .values()
+                .cloned()
+                .collect(),
+            discovery_results_ready_events: store
+                .discovery_results_ready_events
+                .values()
+                .cloned()
+                .collect(),
             candidates: store.candidates.values().cloned().collect(),
             candidate_submissions: store.candidate_submissions.values().cloned().collect(),
             interest_seeds: store.interest_seeds.values().cloned().collect(),
@@ -516,6 +535,16 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .map(|batch| (batch.id, batch))
                 .collect(),
             discovery_result_item_learning_links: snapshot.discovery_result_item_learning_links,
+            personal_discovery_schedules: snapshot
+                .personal_discovery_schedules
+                .into_iter()
+                .map(|schedule| (schedule.id, schedule))
+                .collect(),
+            discovery_results_ready_events: snapshot
+                .discovery_results_ready_events
+                .into_iter()
+                .map(|event| (event.batch_id, event))
+                .collect(),
             candidates: snapshot
                 .candidates
                 .into_iter()
@@ -743,6 +772,8 @@ const STORE_COLLECTIONS: &[&str] = &[
     "discovery_plans",
     "discovery_result_batches",
     "discovery_result_item_learning_links",
+    "personal_discovery_schedules",
+    "discovery_results_ready_events",
     "candidates",
     "candidate_submissions",
     "interest_seeds",

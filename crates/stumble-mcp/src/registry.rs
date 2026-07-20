@@ -95,6 +95,13 @@ pub(crate) enum McpTool {
     DismissDiscoveryResultBatch,
     MarkDiscoveryResultBatchReviewed,
     ReviewDiscoveryResultItem,
+    CreatePersonalDiscoverySchedule,
+    ListPersonalDiscoverySchedules,
+    GetPersonalDiscoverySchedule,
+    UpdatePersonalDiscoverySchedule,
+    DisablePersonalDiscoverySchedule,
+    RemovePersonalDiscoverySchedule,
+    AttemptDiscoveryResultsReadyNotification,
     GetPodPackage,
     ExportPodPackage,
     ImportPodPackage,
@@ -168,6 +175,13 @@ pub(crate) fn definitions() -> &'static [ToolDefinition] {
         d(Tool::DismissDiscoveryResultBatch, "dismiss_discovery_result_batch", PersonalDiscoveryManagement, uuid_schema("batch_id"), Blocking, published(29, "Dismiss Discovery Result Batch", "Dismiss an entire ready batch without creating item-level learning evidence.", false, true)),
         d(Tool::MarkDiscoveryResultBatchReviewed, "mark_discovery_result_batch_reviewed", PersonalDiscoveryManagement, uuid_schema("batch_id"), Blocking, hidden("Mark Discovery Result Batch Reviewed", "Mark a ready batch reviewed without item-level learning evidence.", false, false)),
         d(Tool::ReviewDiscoveryResultItem, "review_discovery_result_item", PersonalDiscoveryManagement, review_result_item_schema(), Blocking, published(30, "Review Discovery Result Item", "Deliberately save, place, reinforce, reject, or ignore one private Discovery Result Batch item.", false, false)),
+        d(Tool::CreatePersonalDiscoverySchedule, "create_personal_discovery_schedule", PersonalDiscoveryManagement, personal_schedule_schema(), Blocking, published(31, "Create Personal Discovery Schedule", "Create a named private Personal Discovery schedule with cadence, optional focus and avoidance, batch size, and delivery mode.", false, false)),
+        d(Tool::ListPersonalDiscoverySchedules, "list_personal_discovery_schedules", PersonalPlanAccess, empty_schema(), Blocking, published(32, "List Personal Discovery Schedules", "List private Personal Discovery schedules with inspectable backpressure state.", true, false)),
+        d(Tool::GetPersonalDiscoverySchedule, "get_personal_discovery_schedule", PersonalPlanAccess, uuid_schema("schedule_id"), Blocking, published(33, "Inspect Personal Discovery Schedule", "Inspect one private Personal Discovery schedule and its backpressure state.", true, false)),
+        d(Tool::UpdatePersonalDiscoverySchedule, "update_personal_discovery_schedule", PersonalDiscoveryManagement, update_personal_schedule_schema(), Blocking, published(34, "Update Personal Discovery Schedule", "Update cadence, temporary intent, batch size, delivery mode, or enabled state for a private schedule.", false, false)),
+        d(Tool::DisablePersonalDiscoverySchedule, "disable_personal_discovery_schedule", PersonalDiscoveryManagement, uuid_schema("schedule_id"), Blocking, hidden("Disable Personal Discovery Schedule", "Disable a private schedule without deleting its configuration.", false, true)),
+        d(Tool::RemovePersonalDiscoverySchedule, "remove_personal_discovery_schedule", PersonalDiscoveryManagement, uuid_schema("schedule_id"), Blocking, hidden("Remove Personal Discovery Schedule", "Remove a private schedule configuration.", false, true)),
+        d(Tool::AttemptDiscoveryResultsReadyNotification, "attempt_discovery_results_ready_notification", PersonalPlanAccess, uuid_schema("batch_id"), Blocking, published(35, "Attempt Results-ready Notification", "Perform the single notify-when-supported attempt for a completed scheduled batch without marking it reviewed.", false, false)),
         d(Tool::GetPodPackage, "get_pod_package", Public, string_schema("pod_slug"), Blocking, published(1, "Read Pod Package", "Read the versioned context, curation instructions, and Source Rules for one Pod.", true, false)),
         d(Tool::ExportPodPackage, "export_pod_package", CapabilityOnly(Capability::PackageManagement), string_schema("pod_slug"), Blocking, hidden("Export Pod Package", "Export a portable Pod Package.", true, false)),
         d(Tool::ImportPodPackage, "import_pod_package", CapabilityOnly(Capability::PackageManagement), object_schema(json!({"pod_slug": {"type": "string"}, "files": {"type": "object"}}), &["pod_slug", "files"]), Blocking, hidden("Import Pod Package", "Import Pod Package files.", false, false)),
@@ -323,6 +337,53 @@ fn personal_discovery_schema() -> Value {
             "idempotency_key": {"type": "string"}
         }),
         &["idempotency_key"],
+    )
+}
+
+fn personal_schedule_schema() -> Value {
+    object_schema(
+        json!({
+            "name": {"type": "string"},
+            "cadence": {"type": "string", "enum": ["hourly", "daily", "weekly", "monthly"]},
+            "intent": {
+                "type": "object",
+                "properties": {
+                    "focus_topics": {"type": "array", "items": {"type": "string"}},
+                    "avoid_topics": {"type": "array", "items": {"type": "string"}}
+                },
+                "additionalProperties": false
+            },
+            "result_count": {"type": ["integer", "null"], "minimum": 1, "maximum": 100},
+            "delivery_mode": {"type": "string", "enum": ["notify_when_supported", "queue_only"]}
+        }),
+        &["name", "cadence", "delivery_mode"],
+    )
+}
+
+fn update_personal_schedule_schema() -> Value {
+    object_schema(
+        json!({
+            "schedule_id": uuid(),
+            "name": {"type": ["string", "null"]},
+            "cadence": {"type": ["string", "null"], "enum": ["hourly", "daily", "weekly", "monthly"]},
+            "intent": {
+                "oneOf": [
+                    {"type": "null"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "focus_topics": {"type": "array", "items": {"type": "string"}},
+                            "avoid_topics": {"type": "array", "items": {"type": "string"}}
+                        },
+                        "additionalProperties": false
+                    }
+                ]
+            },
+            "result_count": {"type": ["integer", "null"], "minimum": 1, "maximum": 100},
+            "delivery_mode": {"type": ["string", "null"], "enum": ["notify_when_supported", "queue_only"]},
+            "enabled": {"type": ["boolean", "null"]}
+        }),
+        &["schedule_id"],
     )
 }
 

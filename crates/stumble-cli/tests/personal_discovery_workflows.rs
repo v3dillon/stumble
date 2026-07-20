@@ -387,3 +387,63 @@ fn cli_reviews_result_item_and_exposes_allowed_actions() {
         .iter()
         .any(|action| action == "not_for_me"));
 }
+
+#[test]
+fn cli_manages_schedules_and_exposes_backpressure_state() {
+    let environment = Environment::new();
+    let input = environment.root.join("schedule.json");
+    fs::write(
+        &input,
+        r#"{"name":"daily","cadence":"daily","result_count":5,"delivery_mode":"notify_when_supported"}"#,
+    )
+    .unwrap();
+    let created = environment.run(
+        None,
+        &[
+            "discover",
+            "personal",
+            "schedule",
+            "create",
+            "--input",
+            input.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(created["data"]["schedule"]["name"], "daily");
+    assert_eq!(created["data"]["backpressure"]["kind"], "none");
+    let schedule_id = created["data"]["schedule"]["id"].as_str().unwrap();
+
+    let listed = environment.run(None, &["discover", "personal", "schedule", "list"]);
+    assert_eq!(listed["data"].as_array().unwrap().len(), 1);
+
+    let worker = environment.run(
+        None,
+        &[
+            "node",
+            "harness",
+            "register",
+            "--label",
+            "schedule-worker",
+            "--kind",
+            "unattended",
+            "--capability",
+            "personal_discovery_execution",
+        ],
+    )["data"]["credential"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let worker_list = environment.run(Some(&worker), &["discover", "personal", "schedule", "list"]);
+    assert_eq!(worker_list["data"].as_array().unwrap().len(), 1);
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_stumble"))
+        .env("STUMBLE_DATA_DIR", &environment.data_dir)
+        .env(
+            "STUMBLE_CREDENTIAL_STORE_DIR",
+            environment.root.join("credentials"),
+        )
+        .env("STUMBLE_HARNESS_CREDENTIAL", &worker)
+        .args(["discover", "personal", "schedule", "disable", schedule_id])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}

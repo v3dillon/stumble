@@ -1,12 +1,17 @@
 mod network_leads;
 mod result_batches;
 mod review;
+pub(crate) mod schedules;
 
 pub(crate) use result_batches::build_discovery_result_batch;
 pub(crate) use review::{
     clear_discovery_result_learning, discovery_result_allowed_actions, ensure_private_inbox,
     record_discovery_result_learning, set_discovery_result_learning_link,
     DiscoveryResultLearningInput,
+};
+pub(crate) use schedules::{
+    ensure_results_ready_event, materialize_due_personal_schedules, normalize_intent,
+    notification_state_for_schedule, schedule_status, validate_name, validate_result_count,
 };
 
 use crate::agent_tools::AgentToolsError;
@@ -24,6 +29,8 @@ const MAX_SELECTED_SOURCE_NEIGHBORHOODS: usize = 5;
 pub(crate) struct PreparedPersonalDiscoveryRequest {
     pub(crate) result_count: u16,
     intent: Option<PreparedPersonalDiscoveryIntent>,
+    focus_topics: Vec<String>,
+    avoid_topics: Vec<String>,
 }
 
 enum PreparedPersonalDiscoveryIntent {
@@ -132,6 +139,23 @@ pub(crate) fn prepare_request(
     Ok(PreparedPersonalDiscoveryRequest {
         result_count,
         intent,
+        focus_topics: Vec::new(),
+        avoid_topics: Vec::new(),
+    })
+}
+
+/// Prepares a Personal Discovery run from a schedule's batch size and temporary intent.
+pub(crate) fn prepare_schedule_run(
+    schedule: &PersonalDiscoverySchedule,
+) -> Result<PreparedPersonalDiscoveryRequest, AgentToolsError> {
+    let result_count =
+        validate_result_count(schedule.result_count).map_err(StoreError::Validation)?;
+    let intent = normalize_intent(schedule.intent.clone()).map_err(StoreError::Validation)?;
+    Ok(PreparedPersonalDiscoveryRequest {
+        result_count,
+        intent: None,
+        focus_topics: intent.focus_topics,
+        avoid_topics: intent.avoid_topics,
     })
 }
 
@@ -221,6 +245,25 @@ pub(crate) fn build_plan(
             topic: DiscoveryPlanTopic {
                 value: topic.trim().to_lowercase(),
                 rationale: "temporary intent for this run".into(),
+                temporary: true,
+            },
+        });
+    }
+    for topic in &request.focus_topics {
+        if topic_is_blocked(preferences, topic)
+            || request
+                .avoid_topics
+                .iter()
+                .any(|avoid| avoid.eq_ignore_ascii_case(topic))
+        {
+            continue;
+        }
+        ranked_topics.push(RankedTopic {
+            priority: 3,
+            weight: f32::INFINITY,
+            topic: DiscoveryPlanTopic {
+                value: topic.trim().to_lowercase(),
+                rationale: "temporary schedule focus for this run".into(),
                 temporary: true,
             },
         });
@@ -316,6 +359,17 @@ pub(crate) fn build_plan(
     }
 
     let proven = (result_count.saturating_mul(7).saturating_add(9)) / 10;
+    let mut blocked_topics = preferences
+        .map(|preferences| preferences.blocked_topics.clone())
+        .unwrap_or_default();
+    for topic in &request.avoid_topics {
+        if !blocked_topics
+            .iter()
+            .any(|blocked| blocked.eq_ignore_ascii_case(topic))
+        {
+            blocked_topics.push(topic.clone());
+        }
+    }
     Ok(DiscoveryPlan {
         id: Uuid::now_v7().into(),
         user_id,
@@ -334,9 +388,7 @@ pub(crate) fn build_plan(
             max_per_community: 2,
             canonical_deduplication: true,
             suppress_recently_reviewed: true,
-            blocked_topics: preferences
-                .map(|preferences| preferences.blocked_topics.clone())
-                .unwrap_or_default(),
+            blocked_topics,
             blocked_sources: preferences
                 .map(|preferences| preferences.blocked_sources.clone())
                 .unwrap_or_default(),
@@ -426,6 +478,8 @@ mod tests {
             PreparedPersonalDiscoveryRequest {
                 result_count: 10,
                 intent: None,
+                focus_topics: Vec::new(),
+                avoid_topics: Vec::new(),
             },
             Utc::now(),
         )

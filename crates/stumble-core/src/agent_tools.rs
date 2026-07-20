@@ -9,8 +9,10 @@ use crate::interest_seeds::{
 };
 use crate::personal_discovery::{
     build_discovery_result_batch, build_plan, clear_discovery_result_learning,
-    discovery_result_allowed_actions, ensure_private_inbox, prepare_request, readiness,
-    record_discovery_result_learning, retry, set_discovery_result_learning_link,
+    discovery_result_allowed_actions, ensure_private_inbox, ensure_results_ready_event,
+    materialize_due_personal_schedules, normalize_intent, notification_state_for_schedule,
+    prepare_request, readiness, record_discovery_result_learning, retry, schedule_status,
+    set_discovery_result_learning_link, validate_name, validate_result_count,
     DiscoveryResultLearningInput,
 };
 use crate::ranking::{rank_discovery, RankingInput};
@@ -2623,6 +2625,348 @@ impl AgentTools {
         Ok(RequestedPersonalDiscovery { plan, task })
     }
 
+    /// Creates a named private Personal Discovery schedule.
+    pub fn create_personal_discovery_schedule(
+        &self,
+        ctx: &AuthContext,
+        request: CreatePersonalDiscoveryScheduleRequest,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PersonalDiscoveryScheduleStatus, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_management(&store, ctx)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Personal Discovery requires an authenticated User".into())
+        })?;
+        let name = validate_name(&request.name).map_err(StoreError::Validation)?;
+        let intent = normalize_intent(request.intent).map_err(StoreError::Validation)?;
+        let result_count = validate_result_count(request.result_count.unwrap_or(10))
+            .map_err(StoreError::Validation)?;
+        if store.personal_discovery_schedules.values().any(|schedule| {
+            schedule.user_id == user_id
+                && schedule.tenant_id == ctx.tenant_id
+                && schedule.name.eq_ignore_ascii_case(&name)
+        }) {
+            return Err(
+                StoreError::Duplicate(format!("Personal Discovery schedule named {name}")).into(),
+            );
+        }
+        let schedule = PersonalDiscoverySchedule {
+            id: Uuid::now_v7().into(),
+            user_id,
+            tenant_id: ctx.tenant_id,
+            name,
+            cadence: request.cadence,
+            intent,
+            result_count,
+            delivery_mode: request.delivery_mode,
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        };
+        let mut staged = store.clone();
+        staged
+            .personal_discovery_schedules
+            .insert(schedule.id, schedule.clone());
+        record_harness_write(
+            &mut staged,
+            ctx,
+            HarnessWriteOperation::CreatePersonalDiscoverySchedule,
+            None,
+        );
+        self.persist_locked(&mut staged)?;
+        *store = staged;
+        Ok(schedule_status(&store, schedule, now))
+    }
+
+    /// Lists private Personal Discovery schedules with inspectable backpressure.
+    pub fn list_personal_discovery_schedules(
+        &self,
+        ctx: &AuthContext,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Vec<PersonalDiscoveryScheduleStatus>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_schedule_read(&store, ctx)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Personal Discovery requires an authenticated User".into())
+        })?;
+        let mut schedules: Vec<_> = store
+            .personal_discovery_schedules
+            .values()
+            .filter(|schedule| schedule.user_id == user_id && schedule.tenant_id == ctx.tenant_id)
+            .cloned()
+            .map(|schedule| schedule_status(&store, schedule, now))
+            .collect();
+        schedules.sort_by(|left, right| {
+            left.schedule
+                .name
+                .cmp(&right.schedule.name)
+                .then_with(|| left.schedule.id.cmp(&right.schedule.id))
+        });
+        Ok(schedules)
+    }
+
+    /// Inspects one private Personal Discovery schedule and its backpressure state.
+    pub fn personal_discovery_schedule(
+        &self,
+        ctx: &AuthContext,
+        schedule_id: PersonalDiscoveryScheduleId,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PersonalDiscoveryScheduleStatus, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_schedule_read(&store, ctx)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Personal Discovery requires an authenticated User".into())
+        })?;
+        let schedule = store
+            .personal_discovery_schedules
+            .get(&schedule_id)
+            .ok_or_else(|| StoreError::NotFound("Personal Discovery schedule".into()))?
+            .clone();
+        if schedule.user_id != user_id || schedule.tenant_id != ctx.tenant_id {
+            return Err(AgentToolsError::Forbidden {
+                reason: "Personal Discovery schedule belongs to another User".into(),
+            });
+        }
+        Ok(schedule_status(&store, schedule, now))
+    }
+
+    /// Updates configuration of a private Personal Discovery schedule.
+    pub fn update_personal_discovery_schedule(
+        &self,
+        ctx: &AuthContext,
+        schedule_id: PersonalDiscoveryScheduleId,
+        request: UpdatePersonalDiscoveryScheduleRequest,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PersonalDiscoveryScheduleStatus, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_management(&store, ctx)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Personal Discovery requires an authenticated User".into())
+        })?;
+        let existing = store
+            .personal_discovery_schedules
+            .get(&schedule_id)
+            .ok_or_else(|| StoreError::NotFound("Personal Discovery schedule".into()))?
+            .clone();
+        if existing.user_id != user_id || existing.tenant_id != ctx.tenant_id {
+            return Err(AgentToolsError::Forbidden {
+                reason: "Personal Discovery schedule belongs to another User".into(),
+            });
+        }
+        let name = match request.name {
+            Some(name) => validate_name(&name).map_err(StoreError::Validation)?,
+            None => existing.name.clone(),
+        };
+        if store.personal_discovery_schedules.values().any(|schedule| {
+            schedule.id != schedule_id
+                && schedule.user_id == user_id
+                && schedule.tenant_id == ctx.tenant_id
+                && schedule.name.eq_ignore_ascii_case(&name)
+        }) {
+            return Err(
+                StoreError::Duplicate(format!("Personal Discovery schedule named {name}")).into(),
+            );
+        }
+        let intent = match request.intent {
+            Some(intent) => normalize_intent(intent).map_err(StoreError::Validation)?,
+            None => existing.intent.clone(),
+        };
+        let result_count = match request.result_count {
+            Some(count) => validate_result_count(count).map_err(StoreError::Validation)?,
+            None => existing.result_count,
+        };
+        let schedule = PersonalDiscoverySchedule {
+            id: existing.id,
+            user_id: existing.user_id,
+            tenant_id: existing.tenant_id,
+            name,
+            cadence: request.cadence.unwrap_or(existing.cadence),
+            intent,
+            result_count,
+            delivery_mode: request.delivery_mode.unwrap_or(existing.delivery_mode),
+            enabled: request.enabled.unwrap_or(existing.enabled),
+            created_at: existing.created_at,
+            updated_at: now,
+        };
+        let mut staged = store.clone();
+        staged
+            .personal_discovery_schedules
+            .insert(schedule.id, schedule.clone());
+        record_harness_write(
+            &mut staged,
+            ctx,
+            HarnessWriteOperation::UpdatePersonalDiscoverySchedule,
+            None,
+        );
+        self.persist_locked(&mut staged)?;
+        *store = staged;
+        Ok(schedule_status(&store, schedule, now))
+    }
+
+    /// Disables a schedule without removing its configuration history.
+    pub fn disable_personal_discovery_schedule(
+        &self,
+        ctx: &AuthContext,
+        schedule_id: PersonalDiscoveryScheduleId,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PersonalDiscoveryScheduleStatus, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_management(&store, ctx)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Personal Discovery requires an authenticated User".into())
+        })?;
+        let mut schedule = store
+            .personal_discovery_schedules
+            .get(&schedule_id)
+            .ok_or_else(|| StoreError::NotFound("Personal Discovery schedule".into()))?
+            .clone();
+        if schedule.user_id != user_id || schedule.tenant_id != ctx.tenant_id {
+            return Err(AgentToolsError::Forbidden {
+                reason: "Personal Discovery schedule belongs to another User".into(),
+            });
+        }
+        schedule.enabled = false;
+        schedule.updated_at = now;
+        let mut staged = store.clone();
+        staged
+            .personal_discovery_schedules
+            .insert(schedule.id, schedule.clone());
+        record_harness_write(
+            &mut staged,
+            ctx,
+            HarnessWriteOperation::DisablePersonalDiscoverySchedule,
+            None,
+        );
+        self.persist_locked(&mut staged)?;
+        *store = staged;
+        Ok(schedule_status(&store, schedule, now))
+    }
+
+    /// Removes a private Personal Discovery schedule configuration.
+    ///
+    /// Historical tasks, plans, batches, and results-ready events remain inspectable.
+    pub fn remove_personal_discovery_schedule(
+        &self,
+        ctx: &AuthContext,
+        schedule_id: PersonalDiscoveryScheduleId,
+    ) -> Result<PersonalDiscoverySchedule, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_management(&store, ctx)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Personal Discovery requires an authenticated User".into())
+        })?;
+        let schedule = store
+            .personal_discovery_schedules
+            .get(&schedule_id)
+            .ok_or_else(|| StoreError::NotFound("Personal Discovery schedule".into()))?
+            .clone();
+        if schedule.user_id != user_id || schedule.tenant_id != ctx.tenant_id {
+            return Err(AgentToolsError::Forbidden {
+                reason: "Personal Discovery schedule belongs to another User".into(),
+            });
+        }
+        let mut staged = store.clone();
+        staged.personal_discovery_schedules.remove(&schedule_id);
+        record_harness_write(
+            &mut staged,
+            ctx,
+            HarnessWriteOperation::RemovePersonalDiscoverySchedule,
+            None,
+        );
+        self.persist_locked(&mut staged)?;
+        *store = staged;
+        Ok(schedule)
+    }
+
+    /// Attempts the single notify-when-supported delivery for a completed scheduled batch.
+    ///
+    /// Delivery never marks the batch reviewed. Queue-only batches retain silently.
+    pub fn attempt_discovery_results_ready_notification(
+        &self,
+        ctx: &AuthContext,
+        batch_id: DiscoveryResultBatchId,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<DiscoveryResultsReadyNotificationOutcome, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_schedule_read(&store, ctx)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Personal Discovery requires an authenticated User".into())
+        })?;
+        let batch = store
+            .discovery_result_batches
+            .get(&batch_id)
+            .ok_or_else(|| StoreError::NotFound("Discovery Result Batch".into()))?
+            .clone();
+        if batch.user_id != user_id || batch.tenant_id != ctx.tenant_id {
+            return Err(AgentToolsError::Forbidden {
+                reason: "Discovery Result Batch belongs to another User".into(),
+            });
+        }
+        let event = store
+            .discovery_results_ready_events
+            .get(&batch_id)
+            .ok_or_else(|| StoreError::NotFound("Discovery-results-ready Event".into()))?
+            .clone();
+        match event.delivery_mode {
+            PersonalDiscoveryDeliveryMode::QueueOnly => {
+                return Ok(DiscoveryResultsReadyNotificationOutcome::QueueOnly { event, batch });
+            }
+            PersonalDiscoveryDeliveryMode::NotifyWhenSupported => {}
+        }
+        if event.notification_attempted_at.is_some()
+            || batch.notification_state == DiscoveryResultNotificationState::Delivered
+        {
+            return Ok(DiscoveryResultsReadyNotificationOutcome::AlreadyAttempted { event, batch });
+        }
+        let mut staged = store.clone();
+        let event = {
+            let event = staged
+                .discovery_results_ready_events
+                .get_mut(&batch_id)
+                .expect("BUG: event exists after lookup");
+            event.notification_attempted_at = Some(now);
+            event.clone()
+        };
+        let batch = {
+            let batch = staged
+                .discovery_result_batches
+                .get_mut(&batch_id)
+                .expect("BUG: batch exists after lookup");
+            batch.notification_state = DiscoveryResultNotificationState::Delivered;
+            batch.clone()
+        };
+        record_harness_write(
+            &mut staged,
+            ctx,
+            HarnessWriteOperation::AttemptDiscoveryResultsReadyNotification,
+            None,
+        );
+        self.persist_locked(&mut staged)?;
+        *store = staged;
+        Ok(DiscoveryResultsReadyNotificationOutcome::ShouldNotify { event, batch })
+    }
+
     /// Atomically completes a leased Personal Discovery Task into one ordered result batch.
     ///
     /// # Errors
@@ -2712,7 +3056,7 @@ impl AgentTools {
             }
         }
         let ordered_refs: Vec<&CandidateSubmission> = ordered.iter().collect();
-        let batch = build_discovery_result_batch(
+        let mut batch = build_discovery_result_batch(
             &store,
             &plan,
             request.task_id,
@@ -2722,10 +3066,28 @@ impl AgentTools {
             now,
         );
 
+        let scheduled = match task.origin {
+            DiscoveryTaskOrigin::PersonalScheduled { schedule_id } => {
+                let delivery_mode = store
+                    .personal_discovery_schedules
+                    .get(&schedule_id)
+                    .map(|schedule| schedule.delivery_mode)
+                    .unwrap_or(PersonalDiscoveryDeliveryMode::QueueOnly);
+                Some((schedule_id, delivery_mode))
+            }
+            _ => None,
+        };
+        if let Some((_, delivery_mode)) = scheduled {
+            batch.notification_state = notification_state_for_schedule(delivery_mode);
+        }
+
         let mut staged = store.clone();
         staged
             .discovery_result_batches
             .insert(batch.id, batch.clone());
+        if let Some((schedule_id, delivery_mode)) = scheduled {
+            ensure_results_ready_event(&mut staged, schedule_id, delivery_mode, &batch, now);
+        }
         let task = staged
             .discovery_tasks
             .get_mut(&request.task_id)
@@ -3319,15 +3681,40 @@ impl AgentTools {
         ctx: &AuthContext,
         now: chrono::DateTime<Utc>,
     ) -> Result<Vec<DiscoveryTask>, AgentToolsError> {
-        let can_materialize = {
+        let (can_materialize_pods, can_materialize_personal) = {
             let store = self
                 .store
                 .read()
                 .map_err(|_| AgentToolsError::LockPoisoned)?;
-            authorize_harness(&store, ctx, HarnessCapability::DiscoveryTasks, None).is_ok()
+            (
+                authorize_harness(&store, ctx, HarnessCapability::DiscoveryTasks, None).is_ok(),
+                authorize_personal_discovery_execution(&store, ctx).is_ok()
+                    || authorize_personal_discovery_management(&store, ctx).is_ok(),
+            )
         };
-        if can_materialize {
+        if can_materialize_pods {
             self.materialize_due_discovery_tasks(ctx, now)?;
+        }
+        if can_materialize_personal {
+            if let Some(user_id) = ctx.user_id {
+                let mut store = self
+                    .store
+                    .write()
+                    .map_err(|_| AgentToolsError::LockPoisoned)?;
+                let created =
+                    materialize_due_personal_schedules(&mut store, user_id, ctx.tenant_id, now)?;
+                for _ in &created {
+                    record_harness_write(
+                        &mut store,
+                        ctx,
+                        HarnessWriteOperation::CreateDiscoveryTask,
+                        None,
+                    );
+                }
+                if !created.is_empty() {
+                    self.persist_locked(&mut store)?;
+                }
+            }
         }
         let store = self
             .store
@@ -9637,6 +10024,17 @@ fn authorize_personal_discovery_execution(
         }
     }
     Ok(())
+}
+
+/// Management or execution may inspect schedules and backpressure; only management may mutate.
+fn authorize_personal_discovery_schedule_read(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+) -> Result<(), AgentToolsError> {
+    if authorize_personal_discovery_management(store, ctx).is_ok() {
+        return Ok(());
+    }
+    authorize_personal_discovery_execution(store, ctx)
 }
 
 fn authorize_harness_for_new_pod(

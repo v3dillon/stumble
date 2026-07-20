@@ -361,3 +361,52 @@ fn mcp_manager_reviews_result_item_and_returns_taste_evidence() {
         .iter()
         .any(|action| action == "save"));
 }
+
+#[test]
+fn mcp_manages_schedules_and_workers_inspect_backpressure() {
+    let tools = AgentTools::new(seed_store());
+    let manager = router(
+        &tools,
+        "manager",
+        AgentHarnessKind::Interactive,
+        HarnessCapability::PersonalDiscoveryManagement,
+    );
+    let worker = router(
+        &tools,
+        "worker",
+        AgentHarnessKind::Unattended,
+        HarnessCapability::PersonalDiscoveryExecution,
+    );
+
+    let created = manager
+        .call(McpToolCall {
+            tool: "create_personal_discovery_schedule".into(),
+            arguments: json!({
+                "name": "weekly",
+                "cadence": "weekly",
+                "result_count": 8,
+                "delivery_mode": "queue_only"
+            }),
+        })
+        .unwrap();
+    assert_eq!(created["schedule"]["name"], "weekly");
+    let schedule_id = created["schedule"]["id"].as_str().unwrap();
+
+    let listed = worker
+        .call(McpToolCall {
+            tool: "list_personal_discovery_schedules".into(),
+            arguments: json!({}),
+        })
+        .unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["backpressure"]["kind"], "none");
+
+    let denied = worker.call(McpToolCall {
+        tool: "update_personal_discovery_schedule".into(),
+        arguments: json!({
+            "schedule_id": schedule_id,
+            "delivery_mode": "notify_when_supported"
+        }),
+    });
+    assert!(denied.is_err());
+}

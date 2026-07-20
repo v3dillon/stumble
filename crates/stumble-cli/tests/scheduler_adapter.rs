@@ -32,7 +32,7 @@ fn wake_adapter_emits_or_invokes_discovery_ready_without_browser_control() {
     let fixture = TestDir::new();
     let stumble = fixture.executable(
         "stumble",
-        "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >\"$ARGS_PATH\"\nprintf '%s\\n' \"$STUMBLE_HARNESS_CREDENTIAL\" >\"$CREDENTIAL_PATH\"\nprintf '{\"version\":2,\"data\":{\"items\":[{\"id\":\"task-1\"}],\"next_cursor\":null}}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >>\"$ARGS_PATH\"\nprintf '%s\\n' \"$STUMBLE_HARNESS_CREDENTIAL\" >\"$CREDENTIAL_PATH\"\nif [[ \"$*\" == *\"schedule list\"* ]]; then\n  printf '{\"version\":2,\"data\":[{\"schedule\":{\"id\":\"sched-1\",\"name\":\"daily\"},\"backpressure\":{\"kind\":\"none\"}}]}\\n'\nelse\n  printf '{\"version\":2,\"data\":{\"items\":[{\"id\":\"task-1\"}],\"next_cursor\":null}}\\n'\nfi\n",
     );
     let event_path = fixture.0.join("event.json");
     let args_path = fixture.0.join("args.txt");
@@ -55,15 +55,13 @@ fn wake_adapter_emits_or_invokes_discovery_ready_without_browser_control() {
         .unwrap();
     assert!(emitted.status.success());
     assert!(String::from_utf8_lossy(&emitted.stdout).contains("discovery_ready"));
-    assert!(std::fs::read_to_string(&event_path)
-        .unwrap()
-        .contains("task-1"));
-    assert_eq!(
-        std::fs::read_to_string(&args_path).unwrap().trim(),
-        "--data-dir ".to_owned()
-            + fixture.0.to_str().unwrap()
-            + " discover task list --state ready --limit 100"
-    );
+    let event = std::fs::read_to_string(&event_path).unwrap();
+    assert!(event.contains("task-1"));
+    assert!(event.contains("schedule_backpressure"));
+    assert!(event.contains("sched-1"));
+    let args = std::fs::read_to_string(&args_path).unwrap();
+    assert!(args.contains("discover task list --state ready --limit 100"));
+    assert!(args.contains("discover personal schedule list"));
     assert_eq!(
         std::fs::read_to_string(&credential_path).unwrap().trim(),
         "scoped-token"
@@ -89,7 +87,7 @@ fn wake_adapter_emits_idle_for_an_empty_canonical_task_page() {
     let fixture = TestDir::new();
     let stumble = fixture.executable(
         "stumble",
-        "#!/usr/bin/env bash\nprintf '{\"version\":2,\"data\":{\"items\":[],\"next_cursor\":null}}\\n'\n",
+        "#!/usr/bin/env bash\nif [[ \"$*\" == *\"schedule list\"* ]]; then\n  printf '{\"version\":2,\"data\":[{\"backpressure\":{\"kind\":\"unreviewed_batch\"}}]}\\n'\nelse\n  printf '{\"version\":2,\"data\":{\"items\":[],\"next_cursor\":null}}\\n'\nfi\n",
     );
     let event_path = fixture.0.join("idle-event.json");
     let wake =
@@ -103,8 +101,9 @@ fn wake_adapter_emits_idle_for_an_empty_canonical_task_page() {
         .unwrap();
 
     assert!(output.status.success());
-    assert_eq!(
-        std::fs::read_to_string(event_path).unwrap(),
-        "{\"type\":\"discovery_idle\",\"tasks\":[]}\n"
-    );
+    let event = std::fs::read_to_string(event_path).unwrap();
+    assert!(event.contains("\"type\":\"discovery_idle\""));
+    assert!(event.contains("\"tasks\":[]"));
+    assert!(event.contains("schedule_backpressure"));
+    assert!(event.contains("unreviewed_batch"));
 }

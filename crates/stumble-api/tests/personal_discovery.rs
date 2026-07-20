@@ -370,3 +370,88 @@ async fn http_reviews_result_item_with_learning_and_authorization_errors() {
         .iter()
         .any(|action| action == "more_like_this"));
 }
+
+#[tokio::test]
+async fn http_manages_schedules_and_exposes_backpressure() {
+    let tools = AgentTools::new(seed_store());
+    let manager = tools
+        .register_agent_harness(
+            &tools.default_auth_context().unwrap(),
+            RegisterAgentHarnessRequest {
+                label: "manager".into(),
+                kind: AgentHarnessKind::Interactive,
+                capabilities: vec![HarnessCapability::PersonalDiscoveryManagement],
+                pod_ids: None,
+            },
+        )
+        .unwrap();
+    let worker = tools
+        .register_agent_harness(
+            &tools.default_auth_context().unwrap(),
+            RegisterAgentHarnessRequest {
+                label: "worker".into(),
+                kind: AgentHarnessKind::Unattended,
+                capabilities: vec![HarnessCapability::PersonalDiscoveryExecution],
+                pod_ids: None,
+            },
+        )
+        .unwrap();
+    let manager_auth = format!("Bearer {}", manager.token.expose());
+    let worker_auth = format!("Bearer {}", worker.token.expose());
+    let app = router(tools);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/personal-discovery/schedules")
+                .header("content-type", "application/json")
+                .header("authorization", &manager_auth)
+                .body(Body::from(
+                    json!({
+                        "name": "daily",
+                        "cadence": "daily",
+                        "result_count": 5,
+                        "delivery_mode": "notify_when_supported"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let created: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(created["schedule"]["name"], "daily");
+    assert_eq!(created["backpressure"]["kind"], "none");
+    let schedule_id = created["schedule"]["id"].as_str().unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/personal-discovery/schedules")
+                .header("authorization", &worker_auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(format!(
+                "/personal-discovery/schedules/{schedule_id}/disable"
+            ))
+            .header("authorization", &worker_auth)
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
