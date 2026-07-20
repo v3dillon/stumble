@@ -138,6 +138,115 @@ and Discovery Tasks, and scope curators and readers to the public Pod. Use
 content reads. The subscriber calls the public Pod URL outbound; never copy an
 Origin token, Harness Grant, Candidate, or Discovery Task to the Home Node.
 
+## Personal Discovery skill (Agent Harness)
+
+Personal Discovery is User-scoped work. Do **not** ask the User to name
+platforms such as X or Hacker News. The Home Node chooses source neighborhoods
+from private Interest Seeds, Source Affinities, explicit Taste Profile settings,
+and locally matched public Discovery Leads.
+
+Register **two distinct Harness Grants** against the same Home Node:
+
+1. **Interactive management** (`interactive` kind):
+   `personal_discovery_management`, `feedback`, and usually
+   `candidate_submission` for User URL intake.
+2. **Unattended execution** (`unattended` kind):
+   `personal_discovery_execution` only. The worker may claim tasks, read only
+   its pinned Discovery Plan, submit provenance-bearing Candidates, report
+   source availability, and complete a result batch. It must not read the full
+   Taste Profile, edit schedules, or broaden Browser Grants.
+
+### Generic interest-based discovery
+
+When the User says something like “find me something interesting”:
+
+1. Call `personal_discovery_readiness` (or `discover personal readiness`).
+2. If not ready, help the User submit a few URLs with learning enabled, set an
+   explicit interest, or supply temporary topic intent — still without asking
+   them to name platforms.
+3. Call `request_personal_discovery` with a retry-safe `idempotency_key` and
+   optional finite `result_count` (default 10). Do not select a Pod or source.
+4. With the worker grant: `list_ready_discovery_tasks` → `claim_discovery_task`
+   → `get_discovery_plan` (only the minimized plan).
+5. Browse planned source neighborhoods through the User-approved Browser
+   Connector under Browser Grants. Inspect broadly; submit only a finite
+   shortlist of provenance-bearing Candidates bound to the task and allocation
+   role (`proven` / `adjacent`).
+6. Report availability facts without credentials via
+   `report_discovery_source_availability`.
+7. Complete with `complete_discovery_result_batch` (this also completes the
+   Personal Discovery Task). Present the ready batch to the User with
+   provenance, allocation evidence, and inspectable shortfalls.
+
+### User-assisted login
+
+Authentication stays outside Stumble. On-demand runs may surface at most one
+authentication-needed notice while continuing accessible planned work.
+Scheduled runs never wait for login: they skip unavailable authenticated
+sources, reallocate within plan policy, and finish with inspectable reasons.
+
+### Result presentation and explicit feedback
+
+Present the Discovery Result Batch as structured results. Offer deliberate
+actions only: Save, Add to Pod, More like this, Not for me, Ignore, or dismiss
+the batch. Silence and ignored items create **no** learning. Agent-found
+Candidates never train the Taste Profile by themselves. Explicit feedback
+changes later plans; review is independent of notification delivery.
+
+### Schedules and scheduled fallback
+
+Named private schedules configure cadence, optional temporary focus/avoidance,
+batch size, and delivery mode (`notify_when_supported` or `queue_only`). Each
+schedule allows only one unreviewed result batch (backpressure). On-demand
+discovery remains available under schedule backpressure.
+
+If the Agent Harness has its own scheduler, wake and claim the same due tasks.
+If it does not, use Stumble’s local Scheduler Adapter — both paths materialize
+the same idempotent Discovery Task identities:
+
+```bash
+export STUMBLE_DATA_DIR="$HOME/.stumble/nodes/home"
+export STUMBLE_DISCOVERY_TOKEN='<personal_discovery_execution token>'
+export STUMBLE_CLI="$PWD/target/release/stumble"
+export STUMBLE_DISCOVERY_HARNESS_COMMAND='/absolute/path/to/harness-command'
+scripts/wake-discovery.sh
+```
+
+The adapter calls `stumble discover task list --state ready` and inspects
+schedule backpressure. Listing materializes due work; repeated invocations
+return the same task identities. On macOS, install with
+`scripts/install-discovery-launchd.sh`. Elsewhere use cron (or equivalent) with
+the same environment. The event file is mode-restricted and defaults to
+`<data-dir>/discovery-ready.json`. After a scheduled completion, attempt
+results-ready notification at most once; queue-only mode retains the batch
+silently.
+
+### Privacy and recovery
+
+Interest Seeds, Source Affinities, Discovery Plans, schedules, result batches,
+and reactions are private Home Node state. They never enter Pod Events,
+packages, announcements, Explore artifacts, or subscription synchronization.
+Back up the full node directory while stopped; restore and restart with the
+same `--data-dir` to resume grants, plans, batches, and schedules together.
+
+Example management grant:
+
+```bash
+target/release/stumble --data-dir ~/.stumble/nodes/home node harness register \
+  --label "Personal discovery manager" --kind interactive \
+  --capability personal_discovery_management \
+  --capability feedback \
+  --capability candidate_submission
+```
+
+Example worker grant:
+
+```bash
+target/release/stumble --data-dir ~/.stumble/nodes/home node harness register \
+  --label "Personal discovery worker" --kind unattended \
+  --capability personal_discovery_execution
+```
+
 ## Personal Discovery browser sessions and source availability
 
 The Agent Harness owns login and browser control through its User-approved
@@ -167,29 +276,13 @@ Report availability with `report_discovery_source_availability` (MCP) or
 `POST /discovery-tasks/:id/source-availability` (HTTP) while holding the task
 lease. Inspect private notices with `list_authentication_needed_notices`.
 
-## Scheduling fallback
+## Scheduling fallback (Pod and Personal Discovery)
 
 If the Agent Harness has no scheduler, the local adapter materializes due tasks
-and either writes a private `discovery_ready` event or invokes one explicitly
-configured harness command. It never controls a browser:
-
-```bash
-export STUMBLE_DATA_DIR="$HOME/.stumble/nodes/home"
-export STUMBLE_DISCOVERY_TOKEN='<scoped one-time token>'
-export STUMBLE_CLI="$PWD/target/release/stumble"
-export STUMBLE_DISCOVERY_HARNESS_COMMAND='/absolute/path/to/harness-command'
-scripts/wake-discovery.sh
-```
-
-The adapter calls `stumble discover task list --state ready`. Listing
-automatically creates due work from the current Source Rules, and repeated
-invocations return the same task identities rather than duplicating work.
-
-On macOS, install the same adapter as a private launchd job with
-`scripts/install-discovery-launchd.sh`. On other systems, invoke
-`scripts/wake-discovery.sh` from cron or an equivalent scheduler with the same
-environment. The event file is mode-restricted and defaults to
-`<data-dir>/discovery-ready.json`.
+for both Pod Source Rules and Personal Discovery schedules and either writes a
+private `discovery_ready` event or invokes one explicitly configured harness
+command. It never controls a browser. See the Personal Discovery skill section
+above for the environment variables and launchd/cron install path.
 
 ## Direct two-node federation
 

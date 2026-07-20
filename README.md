@@ -63,10 +63,28 @@ Find, subscribe to, curate, and govern Pods.
 
 ## `discover`
 
-Run discovery work and curate submitted candidates.
+Run discovery work and curate submitted candidates. Personal Discovery is
+User-scoped: the Home Node chooses sources from private evidence so the User
+does not need to name platforms.
 
 | Command | Description |
 | --- | --- |
+| `stumble discover personal readiness` | Check Personal Discovery readiness. |
+| `stumble discover personal request` | Request a minimized plan and task. |
+| `stumble discover personal plan` | Inspect a Discovery Plan. |
+| `stumble discover personal complete-batch` | Complete a result batch for a claimed task. |
+| `stumble discover personal batches` | List private result batches. |
+| `stumble discover personal batch` | Show one result batch. |
+| `stumble discover personal dismiss-batch` | Dismiss a batch without item-level learning. |
+| `stumble discover personal review-batch` | Mark a batch reviewed. |
+| `stumble discover personal review-item` | Save, place, reinforce, reject, or ignore one item. |
+| `stumble discover personal notify-batch` | One-shot results-ready notification attempt. |
+| `stumble discover personal schedule create` | Create a named private schedule. |
+| `stumble discover personal schedule list` | List schedules and backpressure. |
+| `stumble discover personal schedule show` | Inspect one schedule. |
+| `stumble discover personal schedule update` | Update schedule configuration. |
+| `stumble discover personal schedule disable` | Disable a schedule. |
+| `stumble discover personal schedule remove` | Remove a schedule. |
 | `stumble discover task list` | List discovery tasks. |
 | `stumble discover task show` | Show one discovery task. |
 | `stumble discover task claim` | Claim a task lease. |

@@ -20,7 +20,7 @@ use tower::ServiceExt;
 
 pub struct PersistentNode {
     pub tools: AgentTools,
-    _data_dir: TestDataDir,
+    data_dir: TestDataDir,
 }
 
 impl PersistentNode {
@@ -28,10 +28,20 @@ impl PersistentNode {
         let data_dir = TestDataDir::new(label);
         let tools = AgentTools::open_home_node(data_dir.path(), seed_store)
             .expect("open persistent test node");
-        Self {
-            tools,
-            _data_dir: data_dir,
-        }
+        Self { tools, data_dir }
+    }
+
+    /// Drop in-memory handles and reopen the same SQLite Home Node directory.
+    pub fn reopen(self) -> Self {
+        let data_dir = self.data_dir;
+        drop(self.tools);
+        let tools = AgentTools::open_initialized_home_node(data_dir.path())
+            .expect("reopen persistent test node");
+        Self { tools, data_dir }
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        self.data_dir.path()
     }
 
     pub fn harness(
@@ -40,7 +50,17 @@ impl PersistentNode {
         capabilities: Vec<HarnessCapability>,
         pod_ids: Option<Vec<PodId>>,
     ) -> ScopedHarness {
-        ScopedHarness::register(&self.tools, label, capabilities, pod_ids)
+        self.harness_kind(label, AgentHarnessKind::Interactive, capabilities, pod_ids)
+    }
+
+    pub fn harness_kind(
+        &self,
+        label: &str,
+        kind: AgentHarnessKind,
+        capabilities: Vec<HarnessCapability>,
+        pod_ids: Option<Vec<PodId>>,
+    ) -> ScopedHarness {
+        ScopedHarness::register_kind(&self.tools, label, kind, capabilities, pod_ids)
     }
 
     pub fn mcp(&self, harness: &ScopedHarness) -> McpClient {
@@ -78,12 +98,28 @@ impl ScopedHarness {
         capabilities: Vec<HarnessCapability>,
         pod_ids: Option<Vec<PodId>>,
     ) -> Self {
+        Self::register_kind(
+            tools,
+            label,
+            AgentHarnessKind::Interactive,
+            capabilities,
+            pod_ids,
+        )
+    }
+
+    pub fn register_kind(
+        tools: &AgentTools,
+        label: &str,
+        kind: AgentHarnessKind,
+        capabilities: Vec<HarnessCapability>,
+        pod_ids: Option<Vec<PodId>>,
+    ) -> Self {
         let response = tools
             .register_agent_harness(
                 &tools.default_auth_context().expect("node owner context"),
                 RegisterAgentHarnessRequest {
                     label: label.into(),
-                    kind: AgentHarnessKind::Interactive,
+                    kind,
                     capabilities,
                     pod_ids,
                 },
@@ -263,19 +299,30 @@ impl McpToolResult {
     }
 
     pub fn is_error(&self) -> bool {
-        self.0["result"]["isError"]
-            .as_bool()
-            .expect("MCP tool error marker")
+        if self.0.get("error").is_some() {
+            return true;
+        }
+        self.0["result"]["isError"].as_bool().unwrap_or(true)
     }
 
-    pub fn error_text(&self) -> &str {
-        self.content_text()
+    pub fn error_text(&self) -> String {
+        if let Some(error) = self.0.get("error") {
+            return error.to_string();
+        }
+        self.0["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("unknown MCP tool error")
+            .to_owned()
     }
 
     pub fn content_text(&self) -> &str {
         self.0["result"]["content"][0]["text"]
             .as_str()
             .expect("MCP tool error text")
+    }
+
+    pub fn raw(&self) -> &Value {
+        &self.0
     }
 
     fn decode<T: DeserializeOwned>(&self, label: &str) -> T {
