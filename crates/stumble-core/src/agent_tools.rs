@@ -7,7 +7,7 @@ use crate::interest_seeds::{
     candidate_submission_taste_signals, interest_seed_evidence, record_interest_seed,
     reset_interest_seed_evidence, source_affinity_is_blocked, taste_profile_projections,
 };
-use crate::personal_discovery::{build_plan, readiness, retry, validate_request};
+use crate::personal_discovery::{build_plan, prepare_request, readiness, retry};
 use crate::ranking::{rank_discovery, RankingInput};
 use crate::signing::{
     hash_api_token, new_plaintext_api_token, sign_pod_announcement, sign_pod_endorsement,
@@ -2569,7 +2569,9 @@ impl AgentTools {
         let user_id = ctx.user_id.ok_or_else(|| {
             StoreError::Validation("Personal Discovery requires an authenticated User".into())
         })?;
-        let result_count = validate_request(&request)?;
+        let prepared = prepare_request(&request)?;
+        let result_count = prepared.result_count;
+        let requested_intent = prepared.persisted_intent();
         if let Some(existing) = retry(
             &store,
             user_id,
@@ -2577,7 +2579,8 @@ impl AgentTools {
             &request.idempotency_key,
             ctx.harness_id,
         ) {
-            if existing.plan.intent != request.intent || existing.plan.result_count != result_count
+            if existing.plan.intent != requested_intent
+                || existing.plan.result_count != result_count
             {
                 return Err(AgentToolsError::PersonalDiscoveryIdempotencyConflict);
             }
@@ -2586,14 +2589,7 @@ impl AgentTools {
         if request.intent.is_none() && !readiness(&store, user_id, ctx.tenant_id).ready {
             return Err(AgentToolsError::PersonalDiscoveryNotReady);
         }
-        let plan = build_plan(
-            &store,
-            user_id,
-            ctx.tenant_id,
-            request.intent.clone(),
-            result_count,
-            now,
-        )?;
+        let plan = build_plan(&store, user_id, ctx.tenant_id, prepared, now)?;
         let task = DiscoveryTask {
             id: Uuid::now_v7().into(),
             target: DiscoveryTaskTarget::Personal {

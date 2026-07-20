@@ -10,6 +10,29 @@ use uuid::Uuid;
 const MAX_SELECTED_TOPICS: usize = 5;
 const MAX_SELECTED_SOURCE_NEIGHBORHOODS: usize = 5;
 
+pub(crate) struct PreparedPersonalDiscoveryRequest {
+    pub(crate) result_count: u16,
+    intent: Option<PreparedPersonalDiscoveryIntent>,
+}
+
+enum PreparedPersonalDiscoveryIntent {
+    Topic(String),
+    SimilarToUrl { value: String, domain: String },
+}
+
+impl PreparedPersonalDiscoveryRequest {
+    pub(crate) fn persisted_intent(&self) -> Option<PersonalDiscoveryIntent> {
+        self.intent.as_ref().map(|intent| match intent {
+            PreparedPersonalDiscoveryIntent::Topic(value) => {
+                PersonalDiscoveryIntent::Topic(value.clone())
+            }
+            PreparedPersonalDiscoveryIntent::SimilarToUrl { value, .. } => {
+                PersonalDiscoveryIntent::SimilarToUrl(value.clone())
+            }
+        })
+    }
+}
+
 pub(crate) fn readiness(
     store: &InMemoryStore,
     user_id: UserId,
@@ -50,7 +73,9 @@ pub(crate) fn readiness(
     }
 }
 
-pub(crate) fn validate_request(request: &RequestPersonalDiscovery) -> Result<u16, AgentToolsError> {
+pub(crate) fn prepare_request(
+    request: &RequestPersonalDiscovery,
+) -> Result<PreparedPersonalDiscoveryRequest, AgentToolsError> {
     if request.idempotency_key.trim().is_empty() {
         return Err(StoreError::Validation("idempotency key must not be empty".into()).into());
     }
@@ -61,17 +86,40 @@ pub(crate) fn validate_request(request: &RequestPersonalDiscovery) -> Result<u16
         )
         .into());
     }
-    match request.intent.as_ref() {
+    let intent = match request.intent.as_ref() {
         Some(PersonalDiscoveryIntent::Topic(topic)) if topic.trim().is_empty() => {
-            Err(StoreError::Validation("temporary topic must not be empty".into()).into())
+            return Err(StoreError::Validation("temporary topic must not be empty".into()).into());
         }
-        Some(PersonalDiscoveryIntent::SimilarToUrl(url)) => canonicalize_web_url(url)
-            .map(|_| result_count)
-            .map_err(|error| {
-                StoreError::Validation(format!("invalid temporary reference: {error}")).into()
-            }),
-        _ => Ok(result_count),
-    }
+        Some(PersonalDiscoveryIntent::Topic(topic)) => {
+            Some(PreparedPersonalDiscoveryIntent::Topic(topic.clone()))
+        }
+        Some(PersonalDiscoveryIntent::SimilarToUrl(url)) => {
+            let canonical = canonicalize_web_url(url).map_err(|error| {
+                StoreError::Validation(format!("invalid temporary reference: {error}"))
+            })?;
+            let parsed = Url::parse(&canonical).map_err(|error| {
+                StoreError::Validation(format!("invalid temporary reference: {error}"))
+            })?;
+            if !parsed.username().is_empty() || parsed.password().is_some() {
+                return Err(StoreError::Validation(
+                    "temporary reference must not include credentials".into(),
+                )
+                .into());
+            }
+            let domain = parsed.domain().map(str::to_lowercase).ok_or_else(|| {
+                StoreError::Validation("temporary reference has no domain".into())
+            })?;
+            Some(PreparedPersonalDiscoveryIntent::SimilarToUrl {
+                value: url.clone(),
+                domain,
+            })
+        }
+        None => None,
+    };
+    Ok(PreparedPersonalDiscoveryRequest {
+        result_count,
+        intent,
+    })
 }
 
 pub(crate) fn retry(
@@ -108,10 +156,12 @@ pub(crate) fn build_plan(
     store: &InMemoryStore,
     user_id: UserId,
     tenant_id: Option<TenantId>,
-    intent: Option<PersonalDiscoveryIntent>,
-    result_count: u16,
+    request: PreparedPersonalDiscoveryRequest,
     now: chrono::DateTime<Utc>,
 ) -> Result<DiscoveryPlan, AgentToolsError> {
+    let result_count = request.result_count;
+    let persisted_intent = request.persisted_intent();
+    let intent = request.intent;
     let preferences = store.user_preferences.get(&(user_id, tenant_id));
     let projections = taste_profile_projections(store, user_id, tenant_id, preferences);
     let mut ranked_topics = Vec::new();
@@ -146,7 +196,7 @@ pub(crate) fn build_plan(
             },
         })
     }));
-    if let Some(PersonalDiscoveryIntent::Topic(topic)) = &intent {
+    if let Some(PreparedPersonalDiscoveryIntent::Topic(topic)) = &intent {
         if topic_is_blocked(preferences, topic) {
             return Err(
                 StoreError::Validation("temporary topic is explicitly blocked".into()).into(),
@@ -191,14 +241,8 @@ pub(crate) fn build_plan(
             },
         })
         .collect::<Vec<_>>();
-    if let Some(PersonalDiscoveryIntent::SimilarToUrl(url)) = &intent {
-        let canonical =
-            canonicalize_web_url(url).map_err(|error| StoreError::Validation(error.to_string()))?;
-        let domain = Url::parse(&canonical)
-            .ok()
-            .and_then(|url| url.domain().map(str::to_lowercase))
-            .ok_or_else(|| StoreError::Validation("temporary reference has no domain".into()))?;
-        let signal = SourceAffinitySignal::Source(domain);
+    if let Some(PreparedPersonalDiscoveryIntent::SimilarToUrl { domain, .. }) = &intent {
+        let signal = SourceAffinitySignal::Source(domain.clone());
         if preferences.is_some_and(|preferences| source_affinity_is_blocked(preferences, &signal)) {
             return Err(StoreError::Validation(
                 "temporary reference source is explicitly blocked".into(),
@@ -259,7 +303,7 @@ pub(crate) fn build_plan(
                 .map(|preferences| preferences.blocked_source_affinities.clone())
                 .unwrap_or_default(),
         },
-        intent,
+        intent: persisted_intent,
         created_at: now,
     })
 }
@@ -290,6 +334,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn request_preparation_rejects_credential_bearing_temporary_urls() {
+        let result = prepare_request(&RequestPersonalDiscovery {
+            intent: Some(PersonalDiscoveryIntent::SimilarToUrl(
+                "https://user:password@example.com/article".into(),
+            )),
+            result_count: None,
+            idempotency_key: "credential-bearing-url".into(),
+        });
+
+        assert!(matches!(
+            result,
+            Err(AgentToolsError::Store(StoreError::Validation(message)))
+                if message.contains("credentials")
+        ));
+    }
+
+    #[test]
     fn strongest_source_affinities_survive_minimization() {
         let user_id = Uuid::now_v7();
         let mut store = InMemoryStore::default();
@@ -317,7 +378,17 @@ mod tests {
             }
         }
 
-        let plan = build_plan(&store, user_id, None, None, 10, Utc::now()).unwrap();
+        let plan = build_plan(
+            &store,
+            user_id,
+            None,
+            PreparedPersonalDiscoveryRequest {
+                result_count: 10,
+                intent: None,
+            },
+            Utc::now(),
+        )
+        .unwrap();
         let selected = plan
             .source_neighborhoods
             .iter()

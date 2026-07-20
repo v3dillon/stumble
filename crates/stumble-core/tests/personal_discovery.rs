@@ -303,6 +303,41 @@ fn explicit_blocks_reject_conflicting_temporary_intent() {
 }
 
 #[test]
+fn credential_bearing_temporary_urls_never_enter_a_discovery_plan() {
+    let tools = AgentTools::new(seed_store());
+    let manager = harness(
+        &tools,
+        "credential safety manager",
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::PersonalDiscoveryManagement],
+    );
+
+    let error = tools
+        .request_personal_discovery(
+            &manager,
+            RequestPersonalDiscovery {
+                intent: Some(PersonalDiscoveryIntent::SimilarToUrl(
+                    "https://user:password@example.com/article".into(),
+                )),
+                result_count: None,
+                idempotency_key: "credential-bearing-url".into(),
+            },
+            Utc::now(),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        AgentToolsError::Store(StoreError::Validation(message))
+            if message.contains("credentials")
+    ));
+    let store = tools.store();
+    let store = store.read().unwrap();
+    assert!(store.discovery_plans.is_empty());
+    assert!(store.discovery_tasks.is_empty());
+}
+
+#[test]
 fn minimized_topic_selection_keeps_explicit_preferences_ahead_of_learned_signals() {
     let tools = AgentTools::new(seed_store());
     let manager = harness(
