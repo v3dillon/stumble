@@ -7,3 +7,13 @@ A Home Node may receive an unchanged signed announcement from an explicitly trus
 Changes to trusted peers, configured Index Nodes, and local Pod, node, source, or topic blocks pass through Pending Proposal approval. `explore_public_pods` applies that User-owned Trust Policy and does not create a Subscription. For an unsubscribed remote Pod, the Origin may separately produce a bounded signed `PodExploreSamples` artifact; the Home Node accepts it only for the exact current announcement and filters its Content References locally. Signed Pod Endorsements likewise bind the exact known current announcements of both public Pods before adding bounded, inspectable local ranking evidence. Neither signatures nor endorsements establish a global quality or reputation score.
 
 The focused temporary-SQLite acceptance coverage is in `crates/stumble-core/tests/discovery_substrate.rs`. Direct outbound addressing remains covered in `crates/stumble-cli/tests/direct_subscription.rs`.
+
+## Personal Discovery authenticated sources
+
+Personal Discovery may plan authenticated source neighborhoods, but authentication
+remains harness-owned. The Agent Harness reports privacy-safe availability facts
+and Browser Grant eligibility; Stumble stores those facts privately, never
+credentials. Scheduled Personal Discovery skips unavailable authenticated sources
+and reallocates within plan policy without waiting for login. On-demand runs may
+emit a one-shot authentication-needed notice while continuing accessible work.
+See `docs/first-release.md` and ADR-0017 / ADR-0025 / ADR-0012.

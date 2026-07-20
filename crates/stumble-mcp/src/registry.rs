@@ -90,6 +90,9 @@ pub(crate) enum McpTool {
     RequestPersonalDiscovery,
     GetDiscoveryPlan,
     CompleteDiscoveryResultBatch,
+    ReportDiscoverySourceAvailability,
+    GetDiscoveryTaskSourceAvailability,
+    ListAuthenticationNeededNotices,
     ListDiscoveryResultBatches,
     GetDiscoveryResultBatch,
     DismissDiscoveryResultBatch,
@@ -170,6 +173,9 @@ pub(crate) fn definitions() -> &'static [ToolDefinition] {
         d(Tool::RequestPersonalDiscovery, "request_personal_discovery", PersonalDiscoveryManagement, personal_discovery_schema(), Blocking, published(24, "Request Personal Discovery", "Create a retry-safe minimized Discovery Plan and User-scoped task without selecting a Pod or source.", false, false)),
         d(Tool::GetDiscoveryPlan, "get_discovery_plan", PersonalPlanAccess, uuid_schema("discovery_plan_id"), Blocking, published(25, "Read Discovery Plan", "Read an authorized minimized task-specific Discovery Plan.", true, false)),
         d(Tool::CompleteDiscoveryResultBatch, "complete_discovery_result_batch", DiscoveryExecution, complete_batch_schema(), Blocking, published(26, "Complete Discovery Result Batch", "Atomically complete a claimed Personal Discovery Task into one private ordered result batch.", false, false)),
+        d(Tool::ReportDiscoverySourceAvailability, "report_discovery_source_availability", DiscoveryExecution, report_source_availability_schema(), Blocking, published(36, "Report Source Availability", "Report planned source availability and Browser Grant eligibility facts without credentials, cookies, tokens, or browser state.", false, false)),
+        d(Tool::GetDiscoveryTaskSourceAvailability, "get_discovery_task_source_availability", PersonalPlanAccess, uuid_schema("task_id"), Blocking, published(37, "Inspect Task Source Availability", "Inspect lease-scoped private source availability facts for one Personal Discovery Task.", true, false)),
+        d(Tool::ListAuthenticationNeededNotices, "list_authentication_needed_notices", PersonalDiscoveryManagement, empty_schema(), Blocking, published(38, "List Authentication-needed Notices", "List one-shot private authentication-needed notices for unavailable sources.", true, false)),
         d(Tool::ListDiscoveryResultBatches, "list_discovery_result_batches", PersonalDiscoveryManagement, empty_schema(), Blocking, published(27, "List Discovery Result Batches", "List private Discovery Result Batches for the authenticated User.", true, false)),
         d(Tool::GetDiscoveryResultBatch, "get_discovery_result_batch", PersonalDiscoveryManagement, uuid_schema("batch_id"), Blocking, published(28, "Inspect Discovery Result Batch", "Inspect one private Discovery Result Batch and its Candidate provenance.", true, false)),
         d(Tool::DismissDiscoveryResultBatch, "dismiss_discovery_result_batch", PersonalDiscoveryManagement, uuid_schema("batch_id"), Blocking, published(29, "Dismiss Discovery Result Batch", "Dismiss an entire ready batch without creating item-level learning evidence.", false, true)),
@@ -334,7 +340,12 @@ fn personal_discovery_schema() -> Value {
                 ]
             },
             "result_count": {"type": ["integer", "null"], "minimum": 1, "maximum": 100},
-            "idempotency_key": {"type": "string"}
+            "idempotency_key": {"type": "string"},
+            "browser_grant_eligible_sources": {
+                "type": ["array", "null"],
+                "items": {"type": "string"},
+                "description": "Optional Browser Grant eligibility set that restricts planned sources; never broadened by Taste Profile, Pod Package, or Discovery Leads."
+            }
         }),
         &["idempotency_key"],
     )
@@ -406,6 +417,45 @@ fn review_result_item_schema() -> Value {
     )
 }
 
+fn source_availability_item_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "source": {"type": "string"},
+            "state": {
+                "type": "string",
+                "enum": [
+                    "available",
+                    "authentication_required",
+                    "session_expired",
+                    "inaccessible",
+                    "browser_grant_ineligible"
+                ]
+            },
+            "reason": {"type": "string"}
+        },
+        "required": ["source", "state"],
+        "additionalProperties": false
+    })
+}
+
+fn report_source_availability_schema() -> Value {
+    object_schema(
+        json!({
+            "task_id": uuid(),
+            "reports": {
+                "type": "array",
+                "items": source_availability_item_schema()
+            },
+            "browser_grant_eligible_sources": {
+                "type": ["array", "null"],
+                "items": {"type": "string"}
+            }
+        }),
+        &["task_id", "reports"],
+    )
+}
+
 fn complete_batch_schema() -> Value {
     object_schema(
         json!({
@@ -413,15 +463,11 @@ fn complete_batch_schema() -> Value {
             "submission_ids": {"type": "array", "items": uuid()},
             "source_availability": {
                 "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "source": {"type": "string"},
-                        "reason": {"type": "string"}
-                    },
-                    "required": ["source", "reason"],
-                    "additionalProperties": false
-                }
+                "items": source_availability_item_schema()
+            },
+            "browser_grant_eligible_sources": {
+                "type": ["array", "null"],
+                "items": {"type": "string"}
             }
         }),
         &["task_id", "submission_ids"],

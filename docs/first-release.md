@@ -138,6 +138,35 @@ and Discovery Tasks, and scope curators and readers to the public Pod. Use
 content reads. The subscriber calls the public Pod URL outbound; never copy an
 Origin token, Harness Grant, Candidate, or Discovery Task to the Home Node.
 
+## Personal Discovery browser sessions and source availability
+
+The Agent Harness owns login and browser control through its User-approved
+Browser Connector and Browser Grants. Stumble never receives credentials,
+cookies, tokens, or raw browser state. Workers report only availability facts
+(`available`, `authentication_required`, `session_expired`, `inaccessible`,
+`browser_grant_ineligible`) and optional Browser Grant eligibility for planned
+source neighborhoods.
+
+Browser Grant eligibility restricts planning and execution. Taste Profile
+evidence, Pod Packages, Discovery Leads, remote Index metadata, and
+worker-supplied content cannot broaden Browser Grants or authorize account
+mutations.
+
+- **On-demand runs** may request User-assisted login for a valuable unavailable
+  authenticated source while continuing accessible planned work. At most one
+  authentication-needed notice is emitted per unavailable source state; the
+  notice becomes eligible again only after availability changes (for example a
+  restored session later expires).
+- **Scheduled runs never wait for authentication** and never attempt login.
+  They skip unavailable authenticated sources, reallocate remaining quota
+  within plan policy, and complete with inspectable reasons such as
+  `authentication_skipped_scheduled`. Failure of one source never discards
+  valid task-bound results already collected from other sources.
+
+Report availability with `report_discovery_source_availability` (MCP) or
+`POST /discovery-tasks/:id/source-availability` (HTTP) while holding the task
+lease. Inspect private notices with `list_authentication_needed_notices`.
+
 ## Scheduling fallback
 
 If the Agent Harness has no scheduler, the local adapter materializes due tasks

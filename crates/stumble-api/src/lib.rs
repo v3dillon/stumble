@@ -243,6 +243,14 @@ pub fn router_with_options(
             "/discovery-result-batches",
             get(list_discovery_result_batches).post(complete_discovery_result_batch),
         )
+        .route(
+            "/discovery-tasks/:id/source-availability",
+            get(discovery_task_source_availability).post(report_discovery_source_availability),
+        )
+        .route(
+            "/personal-discovery/authentication-needed-notices",
+            get(list_authentication_needed_notices),
+        )
         .route("/discovery-result-batches/:id", get(discovery_result_batch))
         .route(
             "/discovery-result-batches/:id/dismiss",
@@ -804,6 +812,42 @@ async fn complete_discovery_result_batch(
         request,
         chrono::Utc::now(),
     )?))
+}
+
+async fn report_discovery_source_availability(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(task_id): Path<DiscoveryTaskId>,
+    Json(mut request): Json<ReportDiscoverySourceAvailabilityRequest>,
+) -> Result<Json<ReportedDiscoverySourceAvailability>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    request.task_id = task_id;
+    Ok(Json(state.tools.report_discovery_source_availability(
+        &ctx,
+        request,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn discovery_task_source_availability(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(task_id): Path<DiscoveryTaskId>,
+) -> Result<Json<DiscoveryTaskSourceAvailability>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(
+        state
+            .tools
+            .discovery_task_source_availability(&ctx, task_id)?,
+    ))
+}
+
+async fn list_authentication_needed_notices(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AuthenticationNeededNotice>>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.list_authentication_needed_notices(&ctx)?))
 }
 
 async fn discovery_result_batch(

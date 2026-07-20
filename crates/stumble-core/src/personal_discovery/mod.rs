@@ -2,8 +2,10 @@ mod network_leads;
 mod result_batches;
 mod review;
 pub(crate) mod schedules;
+pub(crate) mod source_availability;
 
 pub(crate) use result_batches::build_discovery_result_batch;
+pub(crate) use result_batches::BatchAvailabilityInput;
 pub(crate) use review::{
     clear_discovery_result_learning, discovery_result_allowed_actions, ensure_private_inbox,
     record_discovery_result_learning, set_discovery_result_learning_link,
@@ -12,6 +14,11 @@ pub(crate) use review::{
 pub(crate) use schedules::{
     ensure_results_ready_event, materialize_due_personal_schedules, normalize_intent,
     notification_state_for_schedule, schedule_status, validate_name, validate_result_count,
+};
+pub(crate) use source_availability::{
+    evaluate_authentication_notices, filter_neighborhoods_by_browser_grant,
+    normalize_browser_grant_eligibility, normalize_reports, resolve_completion_reports,
+    task_is_scheduled, upsert_task_source_availability, TaskAvailabilityIdentity,
 };
 
 use crate::agent_tools::AgentToolsError;
@@ -31,6 +38,8 @@ pub(crate) struct PreparedPersonalDiscoveryRequest {
     intent: Option<PreparedPersonalDiscoveryIntent>,
     focus_topics: Vec<String>,
     avoid_topics: Vec<String>,
+    /// Optional Browser Grant eligibility that restricts planned neighborhoods.
+    browser_grant_eligible_sources: Option<Vec<String>>,
 }
 
 enum PreparedPersonalDiscoveryIntent {
@@ -136,15 +145,23 @@ pub(crate) fn prepare_request(
         }
         None => None,
     };
+    let browser_grant_eligible_sources = source_availability::normalize_browser_grant_eligibility(
+        request.browser_grant_eligible_sources.clone(),
+    )
+    .map_err(StoreError::Validation)?;
     Ok(PreparedPersonalDiscoveryRequest {
         result_count,
         intent,
         focus_topics: Vec::new(),
         avoid_topics: Vec::new(),
+        browser_grant_eligible_sources,
     })
 }
 
 /// Prepares a Personal Discovery run from a schedule's batch size and temporary intent.
+///
+/// Schedules never receive Browser Grant eligibility from Taste Profile, Pod Package,
+/// or Discovery Leads; unattended workers report eligibility at execution time.
 pub(crate) fn prepare_schedule_run(
     schedule: &PersonalDiscoverySchedule,
 ) -> Result<PreparedPersonalDiscoveryRequest, AgentToolsError> {
@@ -156,6 +173,7 @@ pub(crate) fn prepare_schedule_run(
         intent: None,
         focus_topics: intent.focus_topics,
         avoid_topics: intent.avoid_topics,
+        browser_grant_eligible_sources: None,
     })
 }
 
@@ -358,6 +376,13 @@ pub(crate) fn build_plan(
         ));
     }
 
+    // Browser Grant eligibility restricts after taste/lead selection and never expands
+    // from those signals. Unreported eligibility leaves neighborhoods unrestricted.
+    source_neighborhoods = filter_neighborhoods_by_browser_grant(
+        source_neighborhoods,
+        request.browser_grant_eligible_sources.as_deref(),
+    );
+
     let proven = (result_count.saturating_mul(7).saturating_add(9)) / 10;
     let mut blocked_topics = preferences
         .map(|preferences| preferences.blocked_topics.clone())
@@ -434,6 +459,7 @@ mod tests {
             )),
             result_count: None,
             idempotency_key: "credential-bearing-url".into(),
+            browser_grant_eligible_sources: None,
         });
 
         assert!(matches!(
@@ -480,6 +506,7 @@ mod tests {
                 intent: None,
                 focus_topics: Vec::new(),
                 avoid_topics: Vec::new(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -493,6 +520,46 @@ mod tests {
         assert_eq!(selected.len(), 5);
         assert!(!selected.contains(&"a.example"));
         assert!(selected.contains(&"f.example"));
+    }
+
+    #[test]
+    fn browser_grant_eligibility_restricts_plan_and_is_not_broadened_by_taste() {
+        let user_id = Uuid::now_v7();
+        let mut store = InMemoryStore::default();
+        for source in ["taste-a.example", "taste-b.example", "open.example"] {
+            for _ in 0..3 {
+                store.taste_learning_evidence.push(TasteLearningEvidence {
+                    id: Uuid::now_v7(),
+                    user_id,
+                    tenant_id: None,
+                    signal: LearnedTasteSignal::Source(source.into()),
+                    kind: LearnedTasteEvidenceKind::MoreLikeThis,
+                    direction: TasteEvidenceDirection::Supporting,
+                    created_at: Utc::now(),
+                });
+            }
+        }
+
+        let plan = build_plan(
+            &store,
+            user_id,
+            None,
+            PreparedPersonalDiscoveryRequest {
+                result_count: 10,
+                intent: None,
+                focus_topics: Vec::new(),
+                avoid_topics: Vec::new(),
+                browser_grant_eligible_sources: Some(vec!["open.example".into()]),
+            },
+            Utc::now(),
+        )
+        .unwrap();
+        let selected: Vec<_> = plan
+            .source_neighborhoods
+            .iter()
+            .map(|source| source.signal.key().1.to_string())
+            .collect();
+        assert_eq!(selected, vec!["open.example".to_string()]);
     }
 
     #[test]

@@ -10,10 +10,12 @@ use crate::interest_seeds::{
 use crate::personal_discovery::{
     build_discovery_result_batch, build_plan, clear_discovery_result_learning,
     discovery_result_allowed_actions, ensure_private_inbox, ensure_results_ready_event,
-    materialize_due_personal_schedules, normalize_intent, notification_state_for_schedule,
-    prepare_request, readiness, record_discovery_result_learning, retry, schedule_status,
-    set_discovery_result_learning_link, validate_name, validate_result_count,
-    DiscoveryResultLearningInput,
+    evaluate_authentication_notices, materialize_due_personal_schedules,
+    normalize_browser_grant_eligibility, normalize_intent, normalize_reports,
+    notification_state_for_schedule, prepare_request, readiness, record_discovery_result_learning,
+    resolve_completion_reports, retry, schedule_status, set_discovery_result_learning_link,
+    task_is_scheduled, upsert_task_source_availability, validate_name, validate_result_count,
+    BatchAvailabilityInput, DiscoveryResultLearningInput, TaskAvailabilityIdentity,
 };
 use crate::ranking::{rank_discovery, RankingInput};
 use crate::signing::{
@@ -2967,6 +2969,141 @@ impl AgentTools {
         Ok(DiscoveryResultsReadyNotificationOutcome::ShouldNotify { event, batch })
     }
 
+    /// Reports planned source availability facts for a leased Personal Discovery Task.
+    ///
+    /// Stores availability facts only — never credentials, cookies, tokens, or browser state.
+    /// On-demand runs may emit at most one authentication-needed notice per unavailable
+    /// source state; scheduled runs never wait for authentication.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the caller does not hold the task lease, reports contain
+    /// authentication material, authorization is denied, or persistence fails.
+    pub fn report_discovery_source_availability(
+        &self,
+        ctx: &AuthContext,
+        request: ReportDiscoverySourceAvailabilityRequest,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<ReportedDiscoverySourceAvailability, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let (pod_id, harness_id) =
+            authorized_discovery_task_mutation(&store, ctx, request.task_id)?;
+        if pod_id.is_some() {
+            return Err(StoreError::Validation(
+                "report_discovery_source_availability requires a Personal Discovery Task".into(),
+            )
+            .into());
+        }
+        let task = store
+            .discovery_tasks
+            .get(&request.task_id)
+            .ok_or_else(|| StoreError::NotFound("Discovery Task".into()))?
+            .clone();
+        let plan_id = task
+            .target
+            .discovery_plan_id()
+            .ok_or_else(|| StoreError::Validation("Personal Discovery Task missing plan".into()))?;
+        let plan = store
+            .discovery_plans
+            .get(&plan_id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("Discovery Plan".into()))?;
+        let DiscoveryTaskState::Leased(lease) = &task.state else {
+            return Err(AgentToolsError::TaskLeaseRequired);
+        };
+        if lease.harness_id != harness_id || lease.expires_at <= now {
+            return Err(AgentToolsError::TaskLeaseRequired);
+        }
+
+        let reports = normalize_reports(request.reports).map_err(StoreError::Validation)?;
+        let eligible = normalize_browser_grant_eligibility(request.browser_grant_eligible_sources)
+            .map_err(StoreError::Validation)?;
+        let scheduled = task_is_scheduled(&task);
+
+        let mut staged = store.clone();
+        let availability = upsert_task_source_availability(
+            &mut staged,
+            TaskAvailabilityIdentity {
+                task_id: request.task_id,
+                user_id: plan.user_id,
+                tenant_id: plan.tenant_id,
+                reported_by: harness_id,
+            },
+            reports.clone(),
+            eligible,
+            now,
+        );
+        let authentication_notices = evaluate_authentication_notices(
+            &mut staged,
+            plan.user_id,
+            plan.tenant_id,
+            request.task_id,
+            scheduled,
+            &availability.reports,
+            now,
+        );
+        record_harness_write(
+            &mut staged,
+            ctx,
+            HarnessWriteOperation::ReportDiscoverySourceAvailability,
+            None,
+        );
+        self.persist_locked(&mut staged)?;
+        *store = staged;
+        Ok(ReportedDiscoverySourceAvailability {
+            availability,
+            authentication_notices,
+        })
+    }
+
+    /// Lists private authentication-needed notices for the authenticated User.
+    pub fn list_authentication_needed_notices(
+        &self,
+        ctx: &AuthContext,
+    ) -> Result<Vec<AuthenticationNeededNotice>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_management(&store, ctx)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Personal Discovery requires an authenticated User".into())
+        })?;
+        let mut notices: Vec<_> = store
+            .authentication_needed_notices
+            .iter()
+            .filter(|notice| notice.user_id == user_id && notice.tenant_id == ctx.tenant_id)
+            .cloned()
+            .collect();
+        notices.sort_by_key(|notice| (notice.first_emitted_at, notice.id));
+        Ok(notices)
+    }
+
+    /// Inspects lease-scoped source availability for one Personal Discovery Task.
+    pub fn discovery_task_source_availability(
+        &self,
+        ctx: &AuthContext,
+        task_id: DiscoveryTaskId,
+    ) -> Result<DiscoveryTaskSourceAvailability, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_schedule_read(&store, ctx)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Personal Discovery requires an authenticated User".into())
+        })?;
+        store
+            .discovery_task_source_availability
+            .get(&task_id)
+            .filter(|entry| entry.user_id == user_id && entry.tenant_id == ctx.tenant_id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("Discovery Task source availability".into()).into())
+    }
+
     /// Atomically completes a leased Personal Discovery Task into one ordered result batch.
     ///
     /// # Errors
@@ -3023,6 +3160,14 @@ impl AgentTools {
         }
         let lease = lease.clone();
 
+        let (resolved_reports, eligible) = resolve_completion_reports(
+            &store,
+            request.task_id,
+            request.source_availability,
+            request.browser_grant_eligible_sources,
+        )
+        .map_err(StoreError::Validation)?;
+
         let mut seen_ids = HashSet::new();
         let mut ordered = Vec::with_capacity(request.submission_ids.len());
         for submission_id in &request.submission_ids {
@@ -3056,17 +3201,21 @@ impl AgentTools {
             }
         }
         let ordered_refs: Vec<&CandidateSubmission> = ordered.iter().collect();
+        let scheduled = task_is_scheduled(&task);
         let mut batch = build_discovery_result_batch(
             &store,
             &plan,
             request.task_id,
             &ordered_refs,
             &store.candidates,
-            &request.source_availability,
+            BatchAvailabilityInput {
+                reported: &resolved_reports,
+                scheduled,
+            },
             now,
         );
 
-        let scheduled = match task.origin {
+        let scheduled_delivery = match task.origin {
             DiscoveryTaskOrigin::PersonalScheduled { schedule_id } => {
                 let delivery_mode = store
                     .personal_discovery_schedules
@@ -3077,15 +3226,36 @@ impl AgentTools {
             }
             _ => None,
         };
-        if let Some((_, delivery_mode)) = scheduled {
+        if let Some((_, delivery_mode)) = scheduled_delivery {
             batch.notification_state = notification_state_for_schedule(delivery_mode);
         }
 
         let mut staged = store.clone();
+        upsert_task_source_availability(
+            &mut staged,
+            TaskAvailabilityIdentity {
+                task_id: request.task_id,
+                user_id: plan.user_id,
+                tenant_id: plan.tenant_id,
+                reported_by: harness_id,
+            },
+            resolved_reports.clone(),
+            eligible,
+            now,
+        );
+        let _notices = evaluate_authentication_notices(
+            &mut staged,
+            plan.user_id,
+            plan.tenant_id,
+            request.task_id,
+            scheduled,
+            &resolved_reports,
+            now,
+        );
         staged
             .discovery_result_batches
             .insert(batch.id, batch.clone());
-        if let Some((schedule_id, delivery_mode)) = scheduled {
+        if let Some((schedule_id, delivery_mode)) = scheduled_delivery {
             ensure_results_ready_event(&mut staged, schedule_id, delivery_mode, &batch, now);
         }
         let task = staged

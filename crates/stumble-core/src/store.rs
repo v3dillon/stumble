@@ -89,6 +89,11 @@ pub struct InMemoryStore {
         HashMap<PersonalDiscoveryScheduleId, PersonalDiscoverySchedule>,
     /// One-shot private Discovery-results-ready Events keyed by batch id.
     pub discovery_results_ready_events: HashMap<DiscoveryResultBatchId, DiscoveryResultsReadyEvent>,
+    /// Lease-scoped private planned source availability facts (never auth material).
+    pub discovery_task_source_availability:
+        HashMap<DiscoveryTaskId, DiscoveryTaskSourceAvailability>,
+    /// Private one-shot authentication-needed notices keyed by emission identity.
+    pub authentication_needed_notices: Vec<AuthenticationNeededNotice>,
     pub candidates: HashMap<CandidateId, Candidate>,
     pub candidate_submissions: HashMap<CandidateSubmissionId, CandidateSubmission>,
     pub(crate) interest_seeds: HashMap<(UserId, CandidateId), InterestSeed>,
@@ -154,6 +159,10 @@ struct PersistedStore {
     personal_discovery_schedules: Vec<PersonalDiscoverySchedule>,
     #[serde(default)]
     discovery_results_ready_events: Vec<DiscoveryResultsReadyEvent>,
+    #[serde(default)]
+    discovery_task_source_availability: Vec<DiscoveryTaskSourceAvailability>,
+    #[serde(default)]
+    authentication_needed_notices: Vec<AuthenticationNeededNotice>,
     #[serde(default)]
     candidates: Vec<Candidate>,
     #[serde(default)]
@@ -379,6 +388,12 @@ impl From<&InMemoryStore> for PersistedStore {
                 .values()
                 .cloned()
                 .collect(),
+            discovery_task_source_availability: store
+                .discovery_task_source_availability
+                .values()
+                .cloned()
+                .collect(),
+            authentication_needed_notices: store.authentication_needed_notices.clone(),
             candidates: store.candidates.values().cloned().collect(),
             candidate_submissions: store.candidate_submissions.values().cloned().collect(),
             interest_seeds: store.interest_seeds.values().cloned().collect(),
@@ -545,6 +560,12 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .into_iter()
                 .map(|event| (event.batch_id, event))
                 .collect(),
+            discovery_task_source_availability: snapshot
+                .discovery_task_source_availability
+                .into_iter()
+                .map(|entry| (entry.task_id, entry))
+                .collect(),
+            authentication_needed_notices: snapshot.authentication_needed_notices,
             candidates: snapshot
                 .candidates
                 .into_iter()
@@ -774,6 +795,8 @@ const STORE_COLLECTIONS: &[&str] = &[
     "discovery_result_item_learning_links",
     "personal_discovery_schedules",
     "discovery_results_ready_events",
+    "discovery_task_source_availability",
+    "authentication_needed_notices",
     "candidates",
     "candidate_submissions",
     "interest_seeds",
@@ -1181,6 +1204,8 @@ fn record_key(
         "feedback_events" => return Ok(serde_json::to_string(value)?),
         "harness_write_audit" => &["id"],
         "discovery_result_item_learning_links" => &["batch_id", "candidate_id"],
+        "discovery_task_source_availability" => &["task_id"],
+        "authentication_needed_notices" => &["id"],
         "taste_learning_evidence" => &["id"],
         _ => &["id"],
     };

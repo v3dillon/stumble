@@ -191,7 +191,9 @@ impl std::str::FromStr for CandidateSubmissionId {
     }
 }
 /// Stable local identity of a [`DiscoveryTask`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 #[serde(transparent)]
 pub struct DiscoveryTaskId(Uuid);
 
@@ -1961,6 +1963,7 @@ pub enum HarnessWriteOperation {
     CompleteDiscoveryTask,
     FailDiscoveryTask,
     CompleteDiscoveryResultBatch,
+    ReportDiscoverySourceAvailability,
     DismissDiscoveryResultBatch,
     MarkDiscoveryResultBatchReviewed,
     ReviewDiscoveryResultItem,
@@ -2049,6 +2052,12 @@ pub struct RequestPersonalDiscovery {
     #[serde(default)]
     pub result_count: Option<u16>,
     pub idempotency_key: String,
+    /// Optional Browser Grant eligibility that restricts planned source neighborhoods.
+    ///
+    /// When present, only these generic source locators may be selected. Taste Profile
+    /// evidence, Pod Packages, and Discovery Leads never broaden this set.
+    #[serde(default)]
+    pub browser_grant_eligible_sources: Option<Vec<String>>,
 }
 
 /// One selected topic with an inspectable, aggregate rationale.
@@ -2601,16 +2610,168 @@ pub enum DiscoveryResultAvailabilityReason {
     },
     /// Overall shortfall after policy enforcement (no invented results).
     Underfilled { requested: u16, filled: u16 },
+    /// Scheduled run skipped an authenticated source without waiting or logging in.
+    AuthenticationSkippedScheduled { source: String, reason: String },
+    /// On-demand run continued after requesting User-assisted login for a source.
+    AuthenticationAssistanceRequested { source: String, reason: String },
+    /// Planned source was outside the harness-reported Browser Grant eligibility set.
+    BrowserGrantIneligible { source: String, reason: String },
 }
 
-/// Worker-reported unavailability for a planned source neighborhood.
+/// Structured availability fact for a planned source neighborhood.
+///
+/// Facts only: never credentials, cookies, tokens, or raw browser state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SourceAvailabilityState {
+    /// Source is reachable under the harness Browser Connector session.
+    Available,
+    /// Source needs User-assisted login; harness owns the session outside Stumble.
+    AuthenticationRequired,
+    /// Prior session expired; restore requires User assistance outside Stumble.
+    SessionExpired,
+    /// Source cannot be reached for a non-auth reason (network, outage, etc.).
+    Inaccessible,
+    /// Browser Grant does not permit this planned source for the harness.
+    BrowserGrantIneligible,
+}
+
+impl SourceAvailabilityState {
+    /// Whether this state indicates authentication assistance may be valuable.
+    #[must_use]
+    pub const fn authentication_required(self) -> bool {
+        matches!(self, Self::AuthenticationRequired | Self::SessionExpired)
+    }
+
+    /// Whether the source is usable for discovery work right now.
+    #[must_use]
+    pub const fn is_available(self) -> bool {
+        matches!(self, Self::Available)
+    }
+
+    /// Stable fingerprint component so notice eligibility reopens after state changes.
+    #[must_use]
+    pub const fn fingerprint_label(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::AuthenticationRequired => "authentication_required",
+            Self::SessionExpired => "session_expired",
+            Self::Inaccessible => "inaccessible",
+            Self::BrowserGrantIneligible => "browser_grant_ineligible",
+        }
+    }
+}
+
+/// Worker-reported availability for a planned source neighborhood.
+///
+/// Rejects unknown fields so workers cannot smuggle credentials or browser state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct ReportedSourceAvailability {
-    /// Generic source locator the worker could not use.
+    /// Generic source locator (domain or affinity key), never a credential.
     pub source: String,
-    /// Inspectable harness reason (for example authentication or unreachable).
+    /// Structured availability without auth material.
+    pub state: SourceAvailabilityState,
+    /// Inspectable harness reason (for example session expired or grant missing).
+    #[serde(default)]
     pub reason: String,
+}
+
+impl ReportedSourceAvailability {
+    /// Whether authentication assistance is indicated for this report.
+    #[must_use]
+    pub const fn authentication_required(&self) -> bool {
+        self.state.authentication_required()
+    }
+
+    /// Stable fingerprint for one-shot authentication-needed notice suppression.
+    #[must_use]
+    pub fn state_fingerprint(&self) -> String {
+        format!(
+            "{}:{}",
+            self.source.trim().to_ascii_lowercase(),
+            self.state.fingerprint_label()
+        )
+    }
+}
+
+/// Lease-scoped private snapshot of planned source availability for one task.
+///
+/// Stores availability facts only. Never credentials, cookies, tokens, or browser state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryTaskSourceAvailability {
+    pub task_id: DiscoveryTaskId,
+    pub user_id: UserId,
+    pub tenant_id: Option<TenantId>,
+    pub reported_by: AgentHarnessId,
+    /// Latest availability reports keyed by normalized source locator.
+    pub reports: Vec<ReportedSourceAvailability>,
+    /// When set, only these sources are Browser-Grant-eligible for this task.
+    ///
+    /// Never broadened by Taste Profile, Pod Package, Discovery Lead, or remote metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_grant_eligible_sources: Option<Vec<String>>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Request for a leased worker to report planned source availability facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct ReportDiscoverySourceAvailabilityRequest {
+    /// Claimed Personal Discovery Task these facts apply to.
+    ///
+    /// HTTP adapters may supply this from the path and leave the body field defaulted.
+    #[serde(default)]
+    pub task_id: DiscoveryTaskId,
+    /// Availability facts for planned source neighborhoods (no auth material).
+    pub reports: Vec<ReportedSourceAvailability>,
+    /// Optional Browser Grant eligibility set that restricts — never broadens — access.
+    #[serde(default)]
+    pub browser_grant_eligible_sources: Option<Vec<String>>,
+}
+
+/// Private one-shot authentication-needed notice for an unavailable source state.
+///
+/// Emitted at most once per `(user, source, state fingerprint)` until availability changes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthenticationNeededNotice {
+    pub id: Uuid,
+    pub user_id: UserId,
+    pub tenant_id: Option<TenantId>,
+    /// Generic source locator needing User-assisted login outside Stumble.
+    pub source: String,
+    /// Fingerprint of the unavailable authentication state.
+    pub state_fingerprint: String,
+    /// Task that first recorded this unavailable state.
+    pub task_id: DiscoveryTaskId,
+    pub first_emitted_at: DateTime<Utc>,
+    /// Whether an interactive harness should still present this notice.
+    pub delivery_pending: bool,
+}
+
+/// Outcome of evaluating authentication-needed notice emission for one source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AuthenticationNeededNoticeOutcome {
+    /// First notice for this unavailable source state; present to the User once.
+    ShouldNotify { notice: AuthenticationNeededNotice },
+    /// Prior notice still covers this unavailable source state.
+    Suppressed { notice: AuthenticationNeededNotice },
+    /// Scheduled runs never wait for authentication.
+    ScheduledSkip { source: String },
+    /// Source is available or does not require authentication assistance.
+    NotApplicable { source: String },
+}
+
+/// Result of reporting planned source availability on a leased task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportedDiscoverySourceAvailability {
+    /// Lease-scoped private availability snapshot after this report.
+    pub availability: DiscoveryTaskSourceAvailability,
+    /// On-demand authentication-needed notice outcomes evaluated from this report.
+    pub authentication_notices: Vec<AuthenticationNeededNoticeOutcome>,
 }
 
 /// Request to atomically finish a leased Personal Discovery Task into a batch.
@@ -2624,6 +2785,9 @@ pub struct CompleteDiscoveryResultBatchRequest {
     /// Optional worker-reported source availability for inspectable shortfalls.
     #[serde(default)]
     pub source_availability: Vec<ReportedSourceAvailability>,
+    /// Optional Browser Grant eligibility set applied at completion when not already reported.
+    #[serde(default)]
+    pub browser_grant_eligible_sources: Option<Vec<String>>,
 }
 
 /// Private finite shortlist returned from one Personal Discovery Task.

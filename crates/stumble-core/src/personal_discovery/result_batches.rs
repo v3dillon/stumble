@@ -7,6 +7,12 @@ use std::collections::{HashMap, HashSet};
 use url::Url;
 use uuid::Uuid;
 
+/// Availability facts and run mode supplied at batch completion.
+pub(crate) struct BatchAvailabilityInput<'a> {
+    pub(crate) reported: &'a [ReportedSourceAvailability],
+    pub(crate) scheduled: bool,
+}
+
 /// Build an ordered private batch from task-bound submissions under plan policy.
 pub(crate) fn build_discovery_result_batch(
     store: &InMemoryStore,
@@ -14,18 +20,14 @@ pub(crate) fn build_discovery_result_batch(
     task_id: DiscoveryTaskId,
     ordered_submissions: &[&CandidateSubmission],
     candidates: &HashMap<CandidateId, Candidate>,
-    reported: &[ReportedSourceAvailability],
+    availability: BatchAvailabilityInput<'_>,
     now: DateTime<Utc>,
 ) -> DiscoveryResultBatch {
-    let mut reasons: Vec<DiscoveryResultAvailabilityReason> = reported
-        .iter()
-        .map(
-            |report| DiscoveryResultAvailabilityReason::SourceUnavailable {
-                source: report.source.clone(),
-                reason: report.reason.clone(),
-            },
-        )
-        .collect();
+    let mut reasons: Vec<DiscoveryResultAvailabilityReason> =
+        super::source_availability::availability_reasons_for_batch(
+            availability.reported,
+            availability.scheduled,
+        );
 
     let recent_canonical = recently_reviewed_canonical_urls(store, plan.user_id, plan.tenant_id);
     let mut state = SelectionState::default();

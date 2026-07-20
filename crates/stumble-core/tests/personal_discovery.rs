@@ -55,6 +55,7 @@ fn generic_personal_discovery_requires_corroborated_or_explicit_taste() {
                 intent: None,
                 result_count: None,
                 idempotency_key: "cold-start".into(),
+                browser_grant_eligible_sources: None,
             },
             Utc.with_ymd_and_hms(2026, 7, 20, 12, 0, 0).unwrap(),
         )
@@ -93,6 +94,7 @@ fn request_creates_minimized_plan_and_first_class_personal_task() {
                 intent: None,
                 result_count: None,
                 idempotency_key: "request-1".into(),
+                browser_grant_eligible_sources: None,
             },
             now,
         )
@@ -140,6 +142,7 @@ fn request_creates_minimized_plan_and_first_class_personal_task() {
                 intent: None,
                 result_count: None,
                 idempotency_key: "request-1".into(),
+                browser_grant_eligible_sources: None,
             },
             now,
         )
@@ -176,6 +179,7 @@ fn temporary_topic_supports_cold_start_and_worker_reads_only_its_claimed_plan() 
                 intent: Some(PersonalDiscoveryIntent::Topic("type systems".into())),
                 result_count: Some(4),
                 idempotency_key: "topic-run".into(),
+                browser_grant_eligible_sources: None,
             },
             now,
         )
@@ -239,6 +243,7 @@ fn personal_plan_and_retry_identity_survive_restart() {
         intent: Some(PersonalDiscoveryIntent::Topic("ownership types".into())),
         result_count: Some(6),
         idempotency_key: "restart-safe".into(),
+        browser_grant_eligible_sources: None,
     };
     let created = tools
         .request_personal_discovery(&owner, request.clone(), now)
@@ -294,6 +299,7 @@ fn explicit_blocks_reject_conflicting_temporary_intent() {
                     intent: Some(intent),
                     result_count: None,
                     idempotency_key: key.into(),
+                    browser_grant_eligible_sources: None,
                 },
                 Utc::now(),
             ),
@@ -321,6 +327,7 @@ fn credential_bearing_temporary_urls_never_enter_a_discovery_plan() {
                 )),
                 result_count: None,
                 idempotency_key: "credential-bearing-url".into(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -357,6 +364,7 @@ fn temporary_url_query_and_fragment_secrets_are_not_persisted() {
                 )),
                 result_count: None,
                 idempotency_key: "url-secret-minimization".into(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -397,6 +405,7 @@ fn minimized_topic_selection_keeps_explicit_preferences_ahead_of_learned_signals
                 intent: None,
                 result_count: None,
                 idempotency_key: "bounded-priority".into(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -427,6 +436,7 @@ fn personal_workers_cannot_observe_or_claim_another_users_task() {
                 intent: Some(PersonalDiscoveryIntent::Topic("privacy".into())),
                 result_count: None,
                 idempotency_key: "first-user".into(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -495,6 +505,7 @@ fn personal_request_idempotency_is_scoped_to_the_requesting_harness() {
         intent: Some(PersonalDiscoveryIntent::Topic("idempotency".into())),
         result_count: None,
         idempotency_key: "ordinary-client-key".into(),
+        browser_grant_eligible_sources: None,
     };
     let first_created = tools
         .request_personal_discovery(&first, request.clone(), Utc::now())
@@ -874,6 +885,7 @@ fn local_public_content_references_produce_adjacent_network_leads() {
                 intent: None,
                 result_count: None,
                 idempotency_key: "local-public-content".into(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -910,6 +922,7 @@ fn verified_network_metadata_produces_adjacent_discovery_leads_with_provenance()
                 intent: None,
                 result_count: None,
                 idempotency_key: "network-leads".into(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -988,6 +1001,7 @@ fn invalid_stale_blocked_untrusted_or_withdrawn_metadata_cannot_influence_plans(
                 intent: None,
                 result_count: None,
                 idempotency_key: "blocked-network".into(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -1047,6 +1061,7 @@ fn invalid_stale_blocked_untrusted_or_withdrawn_metadata_cannot_influence_plans(
                 intent: None,
                 result_count: None,
                 idempotency_key: "index-removed".into(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -1101,6 +1116,7 @@ fn invalid_stale_blocked_untrusted_or_withdrawn_metadata_cannot_influence_plans(
                 intent: None,
                 result_count: None,
                 idempotency_key: "before-local-withdrawal".into(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -1152,6 +1168,7 @@ fn invalid_stale_blocked_untrusted_or_withdrawn_metadata_cannot_influence_plans(
                 intent: None,
                 result_count: None,
                 idempotency_key: "withdrawn-local-public".into(),
+                browser_grant_eligible_sources: None,
             },
             now,
         )
@@ -1218,6 +1235,7 @@ fn local_relevance_discards_remote_index_scores_and_autonomous_planning_is_local
                 intent: None,
                 result_count: None,
                 idempotency_key: "local-relevance".into(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -1279,6 +1297,7 @@ fn explicit_explore_query_remains_distinct_from_autonomous_personal_discovery() 
                 intent: None,
                 result_count: None,
                 idempotency_key: "explore-distinct".into(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -1319,6 +1338,7 @@ fn network_lead_selection_does_not_create_subscription_import_state_or_browser_a
                 intent: None,
                 result_count: None,
                 idempotency_key: "no-side-effects".into(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -1361,6 +1381,7 @@ fn network_leads_fill_only_adjacent_allocation_unless_user_evidence_corroborates
                 intent: None,
                 result_count: Some(10),
                 idempotency_key: "adjacent-only".into(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -1407,6 +1428,7 @@ fn restart_trust_and_equivalent_metadata_replacement_are_deterministic() {
                 intent: None,
                 result_count: None,
                 idempotency_key: "deterministic-network".into(),
+                browser_grant_eligible_sources: None,
             },
             now,
         )
@@ -1427,6 +1449,7 @@ fn restart_trust_and_equivalent_metadata_replacement_are_deterministic() {
                 intent: None,
                 result_count: None,
                 idempotency_key: "deterministic-network".into(),
+                browser_grant_eligible_sources: None,
             },
             now,
         )
@@ -1453,6 +1476,7 @@ fn restart_trust_and_equivalent_metadata_replacement_are_deterministic() {
                 intent: None,
                 result_count: None,
                 idempotency_key: "equivalent-a".into(),
+                browser_grant_eligible_sources: None,
             },
             now,
         )
@@ -1465,6 +1489,7 @@ fn restart_trust_and_equivalent_metadata_replacement_are_deterministic() {
                 intent: None,
                 result_count: None,
                 idempotency_key: "equivalent-b".into(),
+                browser_grant_eligible_sources: None,
             },
             now,
         )
@@ -1494,6 +1519,7 @@ fn restart_trust_and_equivalent_metadata_replacement_are_deterministic() {
                 intent: None,
                 result_count: None,
                 idempotency_key: "deterministic-trust-a".into(),
+                browser_grant_eligible_sources: None,
             },
             now,
         )
@@ -1506,6 +1532,7 @@ fn restart_trust_and_equivalent_metadata_replacement_are_deterministic() {
                 intent: None,
                 result_count: None,
                 idempotency_key: "deterministic-trust-b".into(),
+                browser_grant_eligible_sources: None,
             },
             now,
         )
@@ -1558,6 +1585,7 @@ fn restart_trust_and_equivalent_metadata_replacement_are_deterministic() {
                 intent: None,
                 result_count: None,
                 idempotency_key: "with-index".into(),
+                browser_grant_eligible_sources: None,
             },
             now,
         )
@@ -1582,6 +1610,7 @@ fn restart_trust_and_equivalent_metadata_replacement_are_deterministic() {
                 intent: None,
                 result_count: None,
                 idempotency_key: "without-index-a".into(),
+                browser_grant_eligible_sources: None,
             },
             now,
         )
@@ -1594,6 +1623,7 @@ fn restart_trust_and_equivalent_metadata_replacement_are_deterministic() {
                 intent: None,
                 result_count: None,
                 idempotency_key: "without-index-b".into(),
+                browser_grant_eligible_sources: None,
             },
             now,
         )
@@ -1628,6 +1658,7 @@ fn private_discovery_lead_types_remain_absent_from_federation_and_outbound_artif
             )),
             result_count: None,
             idempotency_key: "privacy-network".into(),
+            browser_grant_eligible_sources: None,
         },
         Utc::now(),
     )
@@ -1775,6 +1806,7 @@ fn claim_personal_run(
                 intent: Some(PersonalDiscoveryIntent::Topic("systems".into())),
                 result_count,
                 idempotency_key: key.into(),
+                browser_grant_eligible_sources: None,
             },
             now,
         )
@@ -1855,6 +1887,7 @@ fn only_lease_holder_may_submit_personal_results_or_complete_batch() {
         task_id: created.task.id,
         submission_ids: vec![submitted.submission.id],
         source_availability: Vec::new(),
+        browser_grant_eligible_sources: None,
     };
     assert!(matches!(
         tools.complete_discovery_result_batch(&other, complete.clone(), Utc::now()),
@@ -1993,6 +2026,7 @@ fn personal_results_retain_provenance_and_never_create_interest_seeds() {
                 task_id: created.task.id,
                 submission_ids: vec![submitted.submission.id],
                 source_availability: Vec::new(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -2094,8 +2128,10 @@ fn batch_completion_enforces_size_allocation_caps_blocks_dedup_and_recent_suppre
                 submission_ids: submission_ids.clone(),
                 source_availability: vec![ReportedSourceAvailability {
                     source: "auth.example".into(),
+                    state: SourceAvailabilityState::AuthenticationRequired,
                     reason: "authentication_required".into(),
                 }],
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -2130,7 +2166,7 @@ fn batch_completion_enforces_size_allocation_caps_blocks_dedup_and_recent_suppre
     )));
     assert!(batch.source_availability.iter().any(|reason| matches!(
         reason,
-        DiscoveryResultAvailabilityReason::SourceUnavailable { source, .. }
+        DiscoveryResultAvailabilityReason::AuthenticationAssistanceRequested { source, .. }
             if source == "auth.example"
     )));
 
@@ -2168,6 +2204,7 @@ fn batch_completion_enforces_size_allocation_caps_blocks_dedup_and_recent_suppre
                 task_id: second.task.id,
                 submission_ids: vec![recent.submission.id, fresh.submission.id],
                 source_availability: Vec::new(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -2211,6 +2248,7 @@ fn underfilled_batch_records_reasons_without_inventing_results() {
                 task_id: created.task.id,
                 submission_ids: vec![only.submission.id],
                 source_availability: Vec::new(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -2274,6 +2312,7 @@ fn completion_is_atomic_retry_safe_and_duplicate_submissions_do_not_inflate() {
             second.submission.id,
         ],
         source_availability: Vec::new(),
+        browser_grant_eligible_sources: None,
     };
     let batch = tools
         .complete_discovery_result_batch(&worker, request.clone(), Utc::now())
@@ -2325,6 +2364,7 @@ fn batch_states_and_notification_are_distinct_and_dismissal_creates_no_learning(
                 task_id: created.task.id,
                 submission_ids: vec![submitted.submission.id],
                 source_availability: Vec::new(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -2387,6 +2427,7 @@ fn batch_states_and_notification_are_distinct_and_dismissal_creates_no_learning(
                 task_id: other.task.id,
                 submission_ids: vec![item.submission.id],
                 source_availability: Vec::new(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -2461,6 +2502,7 @@ fn batches_and_candidate_provenance_persist_privately_across_restart() {
                 task_id: created.task.id,
                 submission_ids: vec![submitted.submission.id],
                 source_availability: Vec::new(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -2576,6 +2618,7 @@ fn complete_one_result_batch(
                 task_id: created.task.id,
                 submission_ids: vec![submitted.submission.id],
                 source_availability: Vec::new(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -2956,6 +2999,7 @@ fn feedback_changes_next_plan_while_blocks_override_and_rejection_suppresses_red
                 intent: None,
                 result_count: Some(4),
                 idempotency_key: "after-feedback".into(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -2985,6 +3029,7 @@ fn feedback_changes_next_plan_while_blocks_override_and_rejection_suppresses_red
                 intent: None,
                 result_count: Some(4),
                 idempotency_key: "after-block".into(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -3014,6 +3059,7 @@ fn feedback_changes_next_plan_while_blocks_override_and_rejection_suppresses_red
                 task_id: reject_run.task.id,
                 submission_ids: vec![rejected_submit.submission.id],
                 source_availability: Vec::new(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -3050,6 +3096,7 @@ fn feedback_changes_next_plan_while_blocks_override_and_rejection_suppresses_red
                 task_id: next.task.id,
                 submission_ids: vec![equivalent.submission.id],
                 source_availability: Vec::new(),
+                browser_grant_eligible_sources: None,
             },
             Utc::now(),
         )
@@ -3443,6 +3490,7 @@ fn schedule_defers_while_unreviewed_batch_and_on_demand_remains_available() {
                 task_id: task.id,
                 submission_ids: vec![submitted.submission.id],
                 source_availability: Vec::new(),
+                browser_grant_eligible_sources: None,
             },
             lease_now,
         )
@@ -3477,6 +3525,7 @@ fn schedule_defers_while_unreviewed_batch_and_on_demand_remains_available() {
                 intent: Some(PersonalDiscoveryIntent::Topic("systems".into())),
                 result_count: Some(3),
                 idempotency_key: "on-demand-during-backpressure".into(),
+                browser_grant_eligible_sources: None,
             },
             next_day,
         )
@@ -3577,6 +3626,7 @@ fn scheduled_completion_emits_one_results_ready_event_and_notification_is_one_sh
                     task_id: task.id,
                     submission_ids: vec![submitted.submission.id],
                     source_availability: Vec::new(),
+                    browser_grant_eligible_sources: None,
                 },
                 lease_now,
             )
@@ -3741,6 +3791,7 @@ fn schedules_events_tasks_and_batches_persist_privately_across_restart() {
                 task_id: task.id,
                 submission_ids: vec![submitted.submission.id],
                 source_availability: Vec::new(),
+                browser_grant_eligible_sources: None,
             },
             lease_now,
         )
@@ -3821,4 +3872,781 @@ fn worker_cannot_change_schedule_or_delivery_policy() {
         .personal_discovery_schedule(&worker, schedule.schedule.id, now)
         .unwrap();
     assert_eq!(status.schedule.id, schedule.schedule.id);
+}
+
+// --- Ticket 08: authenticated source availability ---
+
+#[test]
+fn worker_reports_source_availability_without_credentials_and_rejects_auth_material() {
+    let tools = AgentTools::new(seed_store());
+    let manager = personal_manager(&tools);
+    let worker = personal_worker(&tools);
+    let created = claim_personal_run(&tools, &manager, &worker, Some(4), "avail-report");
+    let now = Utc::now();
+
+    let reported = tools
+        .report_discovery_source_availability(
+            &worker,
+            ReportDiscoverySourceAvailabilityRequest {
+                task_id: created.task.id,
+                reports: vec![
+                    ReportedSourceAvailability {
+                        source: "open.example".into(),
+                        state: SourceAvailabilityState::Available,
+                        reason: "public feed reachable".into(),
+                    },
+                    ReportedSourceAvailability {
+                        source: "auth.example".into(),
+                        state: SourceAvailabilityState::SessionExpired,
+                        reason: "session expired".into(),
+                    },
+                ],
+                browser_grant_eligible_sources: Some(vec![
+                    "open.example".into(),
+                    "auth.example".into(),
+                ]),
+            },
+            now,
+        )
+        .unwrap();
+    assert_eq!(reported.availability.reports.len(), 2);
+    assert!(reported
+        .availability
+        .reports
+        .iter()
+        .any(|r| r.source == "auth.example" && r.authentication_required()));
+    // Snapshot contains facts only — no credential fields exist on the contract.
+    let serialized = serde_json::to_string(&reported.availability).unwrap();
+    for forbidden in [
+        "password",
+        "cookie",
+        "token",
+        "authorization",
+        "raw_browser",
+        "cdp_session",
+    ] {
+        assert!(
+            !serialized.contains(forbidden),
+            "availability snapshot leaked {forbidden}"
+        );
+    }
+
+    let denied = tools.report_discovery_source_availability(
+        &worker,
+        ReportDiscoverySourceAvailabilityRequest {
+            task_id: created.task.id,
+            reports: vec![ReportedSourceAvailability {
+                source: "auth.example".into(),
+                state: SourceAvailabilityState::AuthenticationRequired,
+                reason: "cookie: session=secret".into(),
+            }],
+            browser_grant_eligible_sources: None,
+        },
+        now,
+    );
+    assert!(matches!(
+        denied,
+        Err(AgentToolsError::Store(StoreError::Validation(message)))
+            if message.contains("authentication material")
+    ));
+
+    // Deny unknown credential-bearing fields at the wire boundary.
+    let smuggle: Result<ReportDiscoverySourceAvailabilityRequest, _> =
+        serde_json::from_value(serde_json::json!({
+            "task_id": created.task.id,
+            "reports": [{
+                "source": "x.com",
+                "state": "authentication_required",
+                "reason": "login",
+                "password": "hunter2",
+                "cookies": ["a=b"]
+            }]
+        }));
+    assert!(smuggle.is_err());
+}
+
+#[test]
+fn browser_grant_eligibility_restricts_planning_and_execution_not_broadened_by_taste_or_leads() {
+    let tools = AgentTools::new(seed_store());
+    let manager = personal_manager(&tools);
+    let worker = personal_worker(&tools);
+    let now = Utc::now();
+    // Temporary similar-to intent would otherwise inject taste-only.example as proven.
+    // Browser Grant eligibility must restrict it; Taste Profile / leads cannot broaden.
+    let created = tools
+        .request_personal_discovery(
+            &manager,
+            RequestPersonalDiscovery {
+                intent: Some(PersonalDiscoveryIntent::SimilarToUrl(
+                    "https://taste-only.example/article".into(),
+                )),
+                result_count: Some(6),
+                idempotency_key: "grant-restrict".into(),
+                browser_grant_eligible_sources: Some(vec!["open.example".into()]),
+            },
+            now,
+        )
+        .unwrap();
+    let selected: Vec<_> = created
+        .plan
+        .source_neighborhoods
+        .iter()
+        .map(|n| match &n.signal {
+            SourceAffinitySignal::Source(value)
+            | SourceAffinitySignal::Publisher(value)
+            | SourceAffinitySignal::AuthorOrAccount(value)
+            | SourceAffinitySignal::Community(value)
+            | SourceAffinitySignal::ReferrerContext(value) => value.clone(),
+            _ => String::new(),
+        })
+        .collect();
+    assert!(
+        !selected.iter().any(|s| s == "taste-only.example"),
+        "grant must exclude taste-only source, got {selected:?}"
+    );
+    assert!(
+        selected.iter().all(|s| s == "open.example"),
+        "only grant-eligible sources may remain, got {selected:?}"
+    );
+
+    tools
+        .claim_discovery_task(
+            &worker,
+            created.task.id,
+            now,
+            DiscoveryLeaseSeconds::new(300).unwrap(),
+        )
+        .unwrap();
+    // Execution: worker cannot mark a non-eligible source Available even if a lead suggested it.
+    let reported = tools
+        .report_discovery_source_availability(
+            &worker,
+            ReportDiscoverySourceAvailabilityRequest {
+                task_id: created.task.id,
+                reports: vec![ReportedSourceAvailability {
+                    source: "taste-only.example".into(),
+                    state: SourceAvailabilityState::Available,
+                    reason: "lead said so".into(),
+                }],
+                browser_grant_eligible_sources: Some(vec!["open.example".into()]),
+            },
+            now,
+        )
+        .unwrap();
+    assert!(reported.availability.reports.iter().any(|r| {
+        r.source == "taste-only.example"
+            && r.state == SourceAvailabilityState::BrowserGrantIneligible
+    }));
+}
+
+#[test]
+fn on_demand_requests_auth_assistance_while_continuing_accessible_sources() {
+    let tools = AgentTools::new(seed_store());
+    let manager = personal_manager(&tools);
+    let worker = personal_worker(&tools);
+    let created = claim_personal_run(&tools, &manager, &worker, Some(4), "on-demand-auth");
+    let now = Utc::now();
+
+    let reported = tools
+        .report_discovery_source_availability(
+            &worker,
+            ReportDiscoverySourceAvailabilityRequest {
+                task_id: created.task.id,
+                reports: vec![
+                    ReportedSourceAvailability {
+                        source: "open.example".into(),
+                        state: SourceAvailabilityState::Available,
+                        reason: String::new(),
+                    },
+                    ReportedSourceAvailability {
+                        source: "private.example".into(),
+                        state: SourceAvailabilityState::AuthenticationRequired,
+                        reason: "login required".into(),
+                    },
+                ],
+                browser_grant_eligible_sources: None,
+            },
+            now,
+        )
+        .unwrap();
+    assert!(reported.authentication_notices.iter().any(|outcome| {
+        matches!(
+            outcome,
+            AuthenticationNeededNoticeOutcome::ShouldNotify { notice }
+                if notice.source == "private.example" && notice.delivery_pending
+        )
+    }));
+    assert_eq!(
+        tools
+            .list_authentication_needed_notices(&manager)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Accessible planned work continues and completes.
+    let open = tools
+        .submit_candidate(
+            &worker,
+            personal_result_request(
+                created.task.id,
+                "https://open.example/1",
+                DiscoveryPlanSourceRole::Proven,
+                None,
+                "open-1",
+            ),
+        )
+        .unwrap();
+    let batch = tools
+        .complete_discovery_result_batch(
+            &worker,
+            CompleteDiscoveryResultBatchRequest {
+                task_id: created.task.id,
+                submission_ids: vec![open.submission.id],
+                source_availability: Vec::new(),
+                browser_grant_eligible_sources: None,
+            },
+            now,
+        )
+        .unwrap();
+    assert_eq!(batch.items.len(), 1);
+    assert!(batch.items[0].canonical_url.contains("open.example"));
+    assert!(batch.source_availability.iter().any(|reason| matches!(
+        reason,
+        DiscoveryResultAvailabilityReason::AuthenticationAssistanceRequested { source, .. }
+            if source == "private.example"
+    )));
+}
+
+#[test]
+fn scheduled_run_skips_authenticated_sources_reallocates_and_never_waits() {
+    let tools = AgentTools::new(seed_store());
+    let manager = personal_manager(&tools);
+    let worker = personal_worker(&tools);
+    set_interest(&tools, &manager, "systems");
+    let now = Utc.with_ymd_and_hms(2026, 7, 20, 11, 0, 0).unwrap();
+    let schedule = tools
+        .create_personal_discovery_schedule(&manager, daily_schedule_request("auth-skip"), now)
+        .unwrap();
+    let ready = tools.list_ready_discovery_tasks(&worker, now).unwrap();
+    let task = ready
+        .into_iter()
+        .find(|task| {
+            matches!(
+                task.origin,
+                DiscoveryTaskOrigin::PersonalScheduled { schedule_id }
+                    if schedule_id == schedule.schedule.id
+            )
+        })
+        .expect("scheduled task");
+    let lease_now = Utc::now();
+    tools
+        .claim_discovery_task(
+            &worker,
+            task.id,
+            lease_now,
+            DiscoveryLeaseSeconds::new(300).unwrap(),
+        )
+        .unwrap();
+
+    let reported = tools
+        .report_discovery_source_availability(
+            &worker,
+            ReportDiscoverySourceAvailabilityRequest {
+                task_id: task.id,
+                reports: vec![
+                    ReportedSourceAvailability {
+                        source: "auth.example".into(),
+                        state: SourceAvailabilityState::AuthenticationRequired,
+                        reason: "session missing".into(),
+                    },
+                    ReportedSourceAvailability {
+                        source: "open.example".into(),
+                        state: SourceAvailabilityState::Available,
+                        reason: String::new(),
+                    },
+                ],
+                browser_grant_eligible_sources: None,
+            },
+            lease_now,
+        )
+        .unwrap();
+    assert!(reported.authentication_notices.iter().all(|outcome| {
+        !matches!(
+            outcome,
+            AuthenticationNeededNoticeOutcome::ShouldNotify { .. }
+        )
+    }));
+    assert!(reported.authentication_notices.iter().any(|outcome| {
+        matches!(
+            outcome,
+            AuthenticationNeededNoticeOutcome::ScheduledSkip { source }
+                if source == "auth.example"
+        )
+    }));
+    assert!(tools
+        .list_authentication_needed_notices(&manager)
+        .unwrap()
+        .is_empty());
+
+    // Partial batch from accessible sources; reallocation within policy.
+    let mut submission_ids = Vec::new();
+    for (i, url) in [
+        "https://open.example/1",
+        "https://open.example/2",
+        "https://adjacent.example/1",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let role = if i < 2 {
+            DiscoveryPlanSourceRole::Proven
+        } else {
+            DiscoveryPlanSourceRole::Adjacent
+        };
+        let submitted = tools
+            .submit_candidate(
+                &worker,
+                personal_result_request(task.id, url, role, None, &format!("sched-{i}")),
+            )
+            .unwrap();
+        submission_ids.push(submitted.submission.id);
+    }
+    let batch = tools
+        .complete_discovery_result_batch(
+            &worker,
+            CompleteDiscoveryResultBatchRequest {
+                task_id: task.id,
+                submission_ids,
+                source_availability: Vec::new(),
+                browser_grant_eligible_sources: None,
+            },
+            lease_now,
+        )
+        .unwrap();
+    assert_eq!(batch.items.len(), 3);
+    assert!(batch.source_availability.iter().any(|reason| matches!(
+        reason,
+        DiscoveryResultAvailabilityReason::AuthenticationSkippedScheduled { source, .. }
+            if source == "auth.example"
+    )));
+    assert!(batch.source_availability.iter().any(|reason| matches!(
+        reason,
+        DiscoveryResultAvailabilityReason::Underfilled { .. }
+            | DiscoveryResultAvailabilityReason::InsufficientProven { .. }
+            | DiscoveryResultAvailabilityReason::Reallocated { .. }
+    )));
+    // Task completed without waiting for authentication.
+    let status = tools
+        .discovery_task_status(&worker, task.id, lease_now)
+        .unwrap();
+    assert_eq!(status.state, DiscoveryTaskState::Completed);
+}
+
+#[test]
+fn authentication_needed_notice_is_one_shot_until_availability_changes() {
+    let tools = AgentTools::new(seed_store());
+    let manager = personal_manager(&tools);
+    let worker = personal_worker(&tools);
+    let first = claim_personal_run(&tools, &manager, &worker, Some(4), "notice-1");
+    let now = Utc::now();
+    let report = ReportDiscoverySourceAvailabilityRequest {
+        task_id: first.task.id,
+        reports: vec![ReportedSourceAvailability {
+            source: "x.example".into(),
+            state: SourceAvailabilityState::SessionExpired,
+            reason: "expired".into(),
+        }],
+        browser_grant_eligible_sources: None,
+    };
+    let first_outcome = tools
+        .report_discovery_source_availability(&worker, report.clone(), now)
+        .unwrap();
+    assert!(matches!(
+        &first_outcome.authentication_notices[0],
+        AuthenticationNeededNoticeOutcome::ShouldNotify { .. }
+    ));
+
+    // Same unavailable state on a later on-demand run is suppressed.
+    let second = {
+        let created = tools
+            .request_personal_discovery(
+                &manager,
+                RequestPersonalDiscovery {
+                    intent: Some(PersonalDiscoveryIntent::Topic("systems".into())),
+                    result_count: Some(4),
+                    idempotency_key: "notice-2".into(),
+                    browser_grant_eligible_sources: None,
+                },
+                now,
+            )
+            .unwrap();
+        tools
+            .claim_discovery_task(
+                &worker,
+                created.task.id,
+                now,
+                DiscoveryLeaseSeconds::new(300).unwrap(),
+            )
+            .unwrap();
+        created
+    };
+    let suppressed = tools
+        .report_discovery_source_availability(
+            &worker,
+            ReportDiscoverySourceAvailabilityRequest {
+                task_id: second.task.id,
+                reports: vec![ReportedSourceAvailability {
+                    source: "x.example".into(),
+                    state: SourceAvailabilityState::SessionExpired,
+                    reason: "expired".into(),
+                }],
+                browser_grant_eligible_sources: None,
+            },
+            now,
+        )
+        .unwrap();
+    assert!(matches!(
+        &suppressed.authentication_notices[0],
+        AuthenticationNeededNoticeOutcome::Suppressed { .. }
+    ));
+    assert_eq!(
+        tools
+            .list_authentication_needed_notices(&manager)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Restored session clears suppression; later expiry is eligible again.
+    tools
+        .report_discovery_source_availability(
+            &worker,
+            ReportDiscoverySourceAvailabilityRequest {
+                task_id: second.task.id,
+                reports: vec![ReportedSourceAvailability {
+                    source: "x.example".into(),
+                    state: SourceAvailabilityState::Available,
+                    reason: "session restored".into(),
+                }],
+                browser_grant_eligible_sources: None,
+            },
+            now,
+        )
+        .unwrap();
+    assert!(tools
+        .list_authentication_needed_notices(&manager)
+        .unwrap()
+        .is_empty());
+
+    let third = {
+        let created = tools
+            .request_personal_discovery(
+                &manager,
+                RequestPersonalDiscovery {
+                    intent: Some(PersonalDiscoveryIntent::Topic("systems".into())),
+                    result_count: Some(4),
+                    idempotency_key: "notice-3".into(),
+                    browser_grant_eligible_sources: None,
+                },
+                now,
+            )
+            .unwrap();
+        tools
+            .claim_discovery_task(
+                &worker,
+                created.task.id,
+                now,
+                DiscoveryLeaseSeconds::new(300).unwrap(),
+            )
+            .unwrap();
+        created
+    };
+    let again = tools
+        .report_discovery_source_availability(
+            &worker,
+            ReportDiscoverySourceAvailabilityRequest {
+                task_id: third.task.id,
+                reports: vec![ReportedSourceAvailability {
+                    source: "x.example".into(),
+                    state: SourceAvailabilityState::SessionExpired,
+                    reason: "expired again".into(),
+                }],
+                browser_grant_eligible_sources: None,
+            },
+            now,
+        )
+        .unwrap();
+    assert!(matches!(
+        &again.authentication_notices[0],
+        AuthenticationNeededNoticeOutcome::ShouldNotify { .. }
+    ));
+}
+
+#[test]
+fn unavailable_source_cannot_discard_valid_results_from_other_sources() {
+    let tools = AgentTools::new(seed_store());
+    let manager = personal_manager(&tools);
+    let worker = personal_worker(&tools);
+    let created = claim_personal_run(&tools, &manager, &worker, Some(6), "partial-batch");
+    let now = Utc::now();
+
+    let a = tools
+        .submit_candidate(
+            &worker,
+            personal_result_request(
+                created.task.id,
+                "https://a.example/1",
+                DiscoveryPlanSourceRole::Proven,
+                None,
+                "a1",
+            ),
+        )
+        .unwrap();
+    let b = tools
+        .submit_candidate(
+            &worker,
+            personal_result_request(
+                created.task.id,
+                "https://b.example/1",
+                DiscoveryPlanSourceRole::Adjacent,
+                None,
+                "b1",
+            ),
+        )
+        .unwrap();
+    let batch = tools
+        .complete_discovery_result_batch(
+            &worker,
+            CompleteDiscoveryResultBatchRequest {
+                task_id: created.task.id,
+                submission_ids: vec![a.submission.id, b.submission.id],
+                source_availability: vec![
+                    ReportedSourceAvailability {
+                        source: "down.example".into(),
+                        state: SourceAvailabilityState::Inaccessible,
+                        reason: "timeout".into(),
+                    },
+                    ReportedSourceAvailability {
+                        source: "auth.example".into(),
+                        state: SourceAvailabilityState::AuthenticationRequired,
+                        reason: "login".into(),
+                    },
+                ],
+                browser_grant_eligible_sources: None,
+            },
+            now,
+        )
+        .unwrap();
+    assert_eq!(batch.items.len(), 2);
+    assert!(batch
+        .items
+        .iter()
+        .any(|item| item.canonical_url.contains("a.example")));
+    assert!(batch
+        .items
+        .iter()
+        .any(|item| item.canonical_url.contains("b.example")));
+    assert!(batch.source_availability.iter().any(|reason| matches!(
+        reason,
+        DiscoveryResultAvailabilityReason::SourceUnavailable { source, .. }
+            if source == "down.example"
+    )));
+}
+
+#[test]
+fn source_availability_is_retry_safe_lease_scoped_persisted_and_private() {
+    let root = std::env::temp_dir().join(format!("pd-avail-{}", uuid::Uuid::now_v7()));
+    let tools = AgentTools::initialize_home_node(&root, seed_store).unwrap();
+    let owner = tools.local_owner_auth_context().unwrap();
+    let manager = {
+        let issued = tools
+            .register_agent_harness(
+                &owner,
+                RegisterAgentHarnessRequest {
+                    label: "avail manager".into(),
+                    kind: AgentHarnessKind::Interactive,
+                    capabilities: vec![HarnessCapability::PersonalDiscoveryManagement],
+                    pod_ids: None,
+                },
+            )
+            .unwrap();
+        tools
+            .authenticate_token(issued.token.expose())
+            .unwrap()
+            .unwrap()
+    };
+    let worker = {
+        let issued = tools
+            .register_agent_harness(
+                &owner,
+                RegisterAgentHarnessRequest {
+                    label: "avail worker".into(),
+                    kind: AgentHarnessKind::Unattended,
+                    capabilities: vec![HarnessCapability::PersonalDiscoveryExecution],
+                    pod_ids: None,
+                },
+            )
+            .unwrap();
+        tools
+            .authenticate_token(issued.token.expose())
+            .unwrap()
+            .unwrap()
+    };
+    let created = claim_personal_run(&tools, &manager, &worker, Some(4), "avail-persist");
+    let now = Utc::now();
+    let request = ReportDiscoverySourceAvailabilityRequest {
+        task_id: created.task.id,
+        reports: vec![ReportedSourceAvailability {
+            source: "private-auth.example".into(),
+            state: SourceAvailabilityState::AuthenticationRequired,
+            reason: "needs login".into(),
+        }],
+        browser_grant_eligible_sources: Some(vec!["private-auth.example".into()]),
+    };
+    let first = tools
+        .report_discovery_source_availability(&worker, request.clone(), now)
+        .unwrap();
+    let retry = tools
+        .report_discovery_source_availability(&worker, request, now)
+        .unwrap();
+    assert_eq!(
+        first.availability.reports.len(),
+        retry.availability.reports.len()
+    );
+    // Same unavailable fingerprint remains one-shot (suppressed on retry).
+    assert!(matches!(
+        &retry.authentication_notices[0],
+        AuthenticationNeededNoticeOutcome::Suppressed { .. }
+    ));
+
+    // Other worker without lease cannot report.
+    let other = {
+        let issued = tools
+            .register_agent_harness(
+                &owner,
+                RegisterAgentHarnessRequest {
+                    label: "other worker".into(),
+                    kind: AgentHarnessKind::Unattended,
+                    capabilities: vec![HarnessCapability::PersonalDiscoveryExecution],
+                    pod_ids: None,
+                },
+            )
+            .unwrap();
+        tools
+            .authenticate_token(issued.token.expose())
+            .unwrap()
+            .unwrap()
+    };
+    assert!(matches!(
+        tools.report_discovery_source_availability(
+            &other,
+            ReportDiscoverySourceAvailabilityRequest {
+                task_id: created.task.id,
+                reports: vec![ReportedSourceAvailability {
+                    source: "private-auth.example".into(),
+                    state: SourceAvailabilityState::Available,
+                    reason: String::new(),
+                }],
+                browser_grant_eligible_sources: None,
+            },
+            now,
+        ),
+        Err(AgentToolsError::TaskLeaseRequired | AgentToolsError::Forbidden { .. })
+    ));
+
+    let inspected = tools
+        .discovery_task_source_availability(&manager, created.task.id)
+        .unwrap();
+    assert_eq!(inspected.task_id, created.task.id);
+    drop(tools);
+
+    let reopened = AgentTools::open_initialized_home_node(&root).unwrap();
+    let owner = reopened.local_owner_auth_context().unwrap();
+    let manager = {
+        let issued = reopened
+            .register_agent_harness(
+                &owner,
+                RegisterAgentHarnessRequest {
+                    label: "avail manager reopen".into(),
+                    kind: AgentHarnessKind::Interactive,
+                    capabilities: vec![HarnessCapability::PersonalDiscoveryManagement],
+                    pod_ids: None,
+                },
+            )
+            .unwrap();
+        reopened
+            .authenticate_token(issued.token.expose())
+            .unwrap()
+            .unwrap()
+    };
+    let persisted = reopened
+        .discovery_task_source_availability(&manager, created.task.id)
+        .unwrap();
+    assert!(persisted
+        .reports
+        .iter()
+        .any(|r| r.source == "private-auth.example"));
+    assert_eq!(
+        reopened
+            .list_authentication_needed_notices(&manager)
+            .unwrap()
+            .len(),
+        1
+    );
+    let federation = reopened.default_auth_context().unwrap();
+    let outbound = serde_json::to_string(&serde_json::json!({
+        "pods": reopened.list_public_pods(&federation).unwrap(),
+        "node": reopened.node_info(&federation).unwrap(),
+    }))
+    .unwrap();
+    assert!(!outbound.contains("private-auth.example"));
+    assert!(!outbound.contains("authentication_required"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn remote_metadata_and_worker_content_cannot_authorize_account_mutations() {
+    // Account mutation authority is absent from all availability / plan contracts.
+    // Remote Pods, Index Nodes, public metadata, and worker content cannot introduce it.
+    let report_schema = serde_json::to_value(ReportDiscoverySourceAvailabilityRequest {
+        task_id: uuid::Uuid::nil().into(),
+        reports: vec![ReportedSourceAvailability {
+            source: "x.example".into(),
+            state: SourceAvailabilityState::AuthenticationRequired,
+            reason: "login".into(),
+        }],
+        browser_grant_eligible_sources: Some(vec!["x.example".into()]),
+    })
+    .unwrap();
+    let text = report_schema.to_string();
+    for forbidden in [
+        "account_mutation",
+        "password",
+        "cookie",
+        "credentials",
+        "authorize_login",
+        "browser_control",
+    ] {
+        assert!(
+            !text.contains(forbidden),
+            "availability contract must not authorize {forbidden}"
+        );
+    }
+    // Unknown authorization fields are rejected.
+    let forged: Result<ReportDiscoverySourceAvailabilityRequest, _> =
+        serde_json::from_value(serde_json::json!({
+            "task_id": uuid::Uuid::nil(),
+            "reports": [],
+            "account_mutation_authorized": true,
+            "browser_grant_eligible_sources": ["evil.example"]
+        }));
+    assert!(forged.is_err());
+    let forged_plan: Result<RequestPersonalDiscovery, _> =
+        serde_json::from_value(serde_json::json!({
+            "idempotency_key": "x",
+            "account_mutation_authorized": true,
+            "browser_grant_eligible_sources": ["from-lead.example"]
+        }));
+    assert!(forged_plan.is_err());
 }

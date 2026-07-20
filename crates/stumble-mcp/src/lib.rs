@@ -322,6 +322,23 @@ impl McpToolRouter {
                     chrono::Utc::now(),
                 )?))
             }
+            ReportDiscoverySourceAvailability => {
+                let request = serde_json::from_value(call.arguments)?;
+                Ok(json!(self.tools.report_discovery_source_availability(
+                    &self.ctx,
+                    request,
+                    chrono::Utc::now(),
+                )?))
+            }
+            GetDiscoveryTaskSourceAvailability => {
+                let task_id = arg_string(&call.arguments, "task_id")?.parse()?;
+                Ok(json!(self
+                    .tools
+                    .discovery_task_source_availability(&self.ctx, task_id)?))
+            }
+            ListAuthenticationNeededNotices => Ok(json!(self
+                .tools
+                .list_authentication_needed_notices(&self.ctx)?)),
             ListDiscoveryResultBatches => Ok(json!(self
                 .tools
                 .list_discovery_result_batches(&self.ctx)?)),
