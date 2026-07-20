@@ -102,7 +102,17 @@ fn request_creates_minimized_plan_and_first_class_personal_task() {
     assert_eq!(created.plan.allocation.proven, 7);
     assert_eq!(created.plan.allocation.adjacent, 3);
     assert_eq!(created.plan.constraints.max_per_domain, 3);
-    assert_eq!(created.plan.constraints.max_per_source_neighborhood, 2);
+    assert_eq!(created.plan.constraints.max_per_author_or_account, 2);
+    assert_eq!(created.plan.constraints.max_per_publisher, 2);
+    assert_eq!(created.plan.constraints.max_per_community, 2);
+    let serialized_constraints = serde_json::to_value(&created.plan.constraints).unwrap();
+    assert_eq!(serialized_constraints["max_per_domain"], 3);
+    assert_eq!(serialized_constraints["max_per_author_or_account"], 2);
+    assert_eq!(serialized_constraints["max_per_publisher"], 2);
+    assert_eq!(serialized_constraints["max_per_community"], 2);
+    assert!(serialized_constraints
+        .get("max_per_source_neighborhood")
+        .is_none());
     assert!(created.plan.constraints.canonical_deduplication);
     assert_eq!(
         created.plan.constraints.blocked_topics,

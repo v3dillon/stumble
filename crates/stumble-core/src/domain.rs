@@ -1893,7 +1893,9 @@ pub struct DiscoveryPlanAllocation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveryPlanConstraints {
     pub max_per_domain: u16,
-    pub max_per_source_neighborhood: u16,
+    pub max_per_author_or_account: u16,
+    pub max_per_publisher: u16,
+    pub max_per_community: u16,
     pub canonical_deduplication: bool,
     pub suppress_recently_reviewed: bool,
     pub blocked_topics: Vec<String>,

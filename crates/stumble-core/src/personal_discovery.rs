@@ -244,7 +244,9 @@ pub(crate) fn build_plan(
         },
         constraints: DiscoveryPlanConstraints {
             max_per_domain: 3,
-            max_per_source_neighborhood: 2,
+            max_per_author_or_account: 2,
+            max_per_publisher: 2,
+            max_per_community: 2,
             canonical_deduplication: true,
             suppress_recently_reviewed: true,
             blocked_topics: preferences
