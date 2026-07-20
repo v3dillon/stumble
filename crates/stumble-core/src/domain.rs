@@ -1425,6 +1425,10 @@ pub enum HarnessCapability {
     Feedback,
     /// Manage due discovery work and Source Rules.
     DiscoveryTasks,
+    /// Request and inspect private Personal Discovery plans with a User present.
+    PersonalDiscoveryManagement,
+    /// Execute task-scoped Personal Discovery without reading the Taste Profile.
+    PersonalDiscoveryExecution,
     /// Submit discovered Candidates and their assets.
     CandidateSubmission,
     /// Create Pods and change accepted Pod content.
@@ -1445,6 +1449,8 @@ impl std::fmt::Display for HarnessCapability {
             Self::FeedRead => "feed_read",
             Self::Feedback => "feedback",
             Self::DiscoveryTasks => "discovery_tasks",
+            Self::PersonalDiscoveryManagement => "personal_discovery_management",
+            Self::PersonalDiscoveryExecution => "personal_discovery_execution",
             Self::CandidateSubmission => "candidate_submission",
             Self::PodCuration => "pod_curation",
             Self::PackageManagement => "package_management",
@@ -1463,6 +1469,8 @@ impl std::str::FromStr for HarnessCapability {
             "feed_read" => Ok(Self::FeedRead),
             "feedback" => Ok(Self::Feedback),
             "discovery_tasks" => Ok(Self::DiscoveryTasks),
+            "personal_discovery_management" => Ok(Self::PersonalDiscoveryManagement),
+            "personal_discovery_execution" => Ok(Self::PersonalDiscoveryExecution),
             "candidate_submission" => Ok(Self::CandidateSubmission),
             "pod_curation" => Ok(Self::PodCuration),
             "package_management" => Ok(Self::PackageManagement),
@@ -1775,6 +1783,7 @@ pub enum HarnessWriteOperation {
     ResetLearnedTaste,
     RetractInterestSeed,
     CreateDiscoveryTask,
+    RequestPersonalDiscovery,
     ClaimDiscoveryTask,
     RenewDiscoveryTaskLease,
     CompleteDiscoveryTask,
@@ -1813,6 +1822,105 @@ pub enum DiscoveryTaskOrigin {
         /// Harness that supplied the intent.
         requested_by: AgentHarnessId,
     },
+    /// On-demand User-scoped work governed only by its pinned Discovery Plan.
+    PersonalRequest {
+        /// Retry-safe key unique to the requesting interactive Harness.
+        idempotency_key: String,
+        /// Interactive Harness that requested the plan.
+        requested_by: Option<AgentHarnessId>,
+    },
+}
+
+/// Evidence basis that makes generic Personal Discovery ready.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum DiscoveryPlanBasis {
+    ExplicitTopic(String),
+    CorroboratedTopic(String),
+    CorroboratedSource(SourceAffinitySignal),
+}
+
+/// Private readiness summary without raw evidence history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonalDiscoveryReadiness {
+    pub ready: bool,
+    pub basis: Vec<DiscoveryPlanBasis>,
+}
+
+/// Temporary intent that applies only to one Personal Discovery run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum PersonalDiscoveryIntent {
+    Topic(String),
+    SimilarToUrl(String),
+}
+
+/// Request for an immutable, retry-safe Personal Discovery Plan and task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestPersonalDiscovery {
+    #[serde(default)]
+    pub intent: Option<PersonalDiscoveryIntent>,
+    #[serde(default)]
+    pub result_count: Option<u16>,
+    pub idempotency_key: String,
+}
+
+/// One selected topic with an inspectable, aggregate rationale.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryPlanTopic {
+    pub value: String,
+    pub rationale: String,
+    pub temporary: bool,
+}
+
+/// One selected source neighborhood with aggregate evidence only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryPlanSourceNeighborhood {
+    pub signal: SourceAffinitySignal,
+    pub rationale: String,
+    pub temporary: bool,
+}
+
+/// Finite proven-neighborhood and adjacent-exploration quotas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryPlanAllocation {
+    pub proven: u16,
+    pub adjacent: u16,
+}
+
+/// Enforceable selection constraints supplied to the executing worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryPlanConstraints {
+    pub max_per_domain: u16,
+    pub max_per_source_neighborhood: u16,
+    pub canonical_deduplication: bool,
+    pub suppress_recently_reviewed: bool,
+    pub blocked_topics: Vec<String>,
+    pub blocked_sources: Vec<String>,
+    pub blocked_source_affinities: Vec<SourceAffinitySignal>,
+}
+
+/// Immutable minimized worker contract for one Personal Discovery run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryPlan {
+    pub id: DiscoveryPlanId,
+    pub user_id: UserId,
+    pub tenant_id: Option<TenantId>,
+    pub result_count: u16,
+    pub topics: Vec<DiscoveryPlanTopic>,
+    pub source_neighborhoods: Vec<DiscoveryPlanSourceNeighborhood>,
+    pub allocation: DiscoveryPlanAllocation,
+    pub constraints: DiscoveryPlanConstraints,
+    pub intent: Option<PersonalDiscoveryIntent>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Atomic result of requesting Personal Discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestedPersonalDiscovery {
+    pub plan: DiscoveryPlan,
+    pub task: DiscoveryTask,
 }
 
 /// Exclusive, expiring ownership of a Discovery Task.

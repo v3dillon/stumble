@@ -80,6 +80,7 @@ pub struct InMemoryStore {
     pub pending_proposals: HashMap<PendingProposalId, PendingProposal>,
     pub harness_write_audit: Vec<HarnessWriteAudit>,
     pub discovery_tasks: HashMap<DiscoveryTaskId, DiscoveryTask>,
+    pub discovery_plans: HashMap<DiscoveryPlanId, DiscoveryPlan>,
     pub candidates: HashMap<CandidateId, Candidate>,
     pub candidate_submissions: HashMap<CandidateSubmissionId, CandidateSubmission>,
     pub(crate) interest_seeds: HashMap<(UserId, CandidateId), InterestSeed>,
@@ -135,6 +136,8 @@ struct PersistedStore {
     harness_write_audit: Vec<HarnessWriteAudit>,
     #[serde(default)]
     discovery_tasks: Vec<DiscoveryTask>,
+    #[serde(default)]
+    discovery_plans: Vec<DiscoveryPlan>,
     #[serde(default)]
     candidates: Vec<Candidate>,
     #[serde(default)]
@@ -345,6 +348,7 @@ impl From<&InMemoryStore> for PersistedStore {
             pending_proposals: store.pending_proposals.values().cloned().collect(),
             harness_write_audit: store.harness_write_audit.clone(),
             discovery_tasks: store.discovery_tasks.values().cloned().collect(),
+            discovery_plans: store.discovery_plans.values().cloned().collect(),
             candidates: store.candidates.values().cloned().collect(),
             candidate_submissions: store.candidate_submissions.values().cloned().collect(),
             interest_seeds: store.interest_seeds.values().cloned().collect(),
@@ -489,6 +493,11 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .discovery_tasks
                 .into_iter()
                 .map(|task| (task.id, task))
+                .collect(),
+            discovery_plans: snapshot
+                .discovery_plans
+                .into_iter()
+                .map(|plan| (plan.id, plan))
                 .collect(),
             candidates: snapshot
                 .candidates
@@ -714,6 +723,7 @@ const STORE_COLLECTIONS: &[&str] = &[
     "pending_proposals",
     "harness_write_audit",
     "discovery_tasks",
+    "discovery_plans",
     "candidates",
     "candidate_submissions",
     "interest_seeds",

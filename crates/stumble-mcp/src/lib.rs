@@ -299,6 +299,21 @@ impl McpToolRouter {
                     reason
                 )?))
             }
+            PersonalDiscoveryReadiness => {
+                Ok(json!(self.tools.personal_discovery_readiness(&self.ctx)?))
+            }
+            RequestPersonalDiscovery => {
+                let request = serde_json::from_value(call.arguments)?;
+                Ok(json!(self.tools.request_personal_discovery(
+                    &self.ctx,
+                    request,
+                    chrono::Utc::now(),
+                )?))
+            }
+            GetDiscoveryPlan => {
+                let plan_id = arg_string(&call.arguments, "discovery_plan_id")?.parse()?;
+                Ok(json!(self.tools.discovery_plan(&self.ctx, plan_id)?))
+            }
             GetPodPackage => {
                 let pod_slug = arg_string(&call.arguments, "pod_slug")?;
                 Ok(json!(self.tools.get_skill_pack(&self.ctx, &pod_slug)?))

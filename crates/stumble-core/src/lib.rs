@@ -2,6 +2,7 @@ pub mod agent_tools;
 pub mod domain;
 mod feed_mix;
 mod interest_seeds;
+mod personal_discovery;
 pub mod ranking;
 pub mod seeds;
 pub mod signing;

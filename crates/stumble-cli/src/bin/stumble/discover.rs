@@ -4,15 +4,16 @@ use super::{
     resolve_pod, CliResult,
 };
 use crate::parser::{
-    CandidateStatus, CandidateWorkflow, DiscoverWorkflow, ReviewDecision, TaskStateFilter,
-    TaskWorkflow,
+    CandidateStatus, CandidateWorkflow, DiscoverWorkflow, PersonalDiscoveryWorkflow,
+    ReviewDecision, TaskStateFilter, TaskWorkflow,
 };
 use serde_json::json;
 use stumble_cli::{read_json_input, ErrorBody, ExitStatusCategory};
 use stumble_core::{
     AgentTools, AuthContext, CandidateConfidence, CandidateId, CandidateReviewState,
-    CandidateSubmissionRequest, CurationRationale, DiscoveryTask, DiscoveryTaskId,
-    DiscoveryTaskState, PlacementReviewDecision, RouteCandidatePlacementRequest, StoreError,
+    CandidateSubmissionRequest, CurationRationale, DiscoveryPlanId, DiscoveryTask, DiscoveryTaskId,
+    DiscoveryTaskState, PlacementReviewDecision, RequestPersonalDiscovery,
+    RouteCandidatePlacementRequest, StoreError,
 };
 
 pub(super) fn execute(
@@ -21,8 +22,47 @@ pub(super) fn execute(
     actor: &AuthContext,
 ) -> CliResult {
     match command {
+        DiscoverWorkflow::Personal { command } => execute_personal(command, tools, actor),
         DiscoverWorkflow::Task { command } => execute_task(command, tools, actor),
         DiscoverWorkflow::Candidate { command } => execute_candidate(command, tools, actor),
+    }
+}
+
+fn execute_personal(
+    command: PersonalDiscoveryWorkflow,
+    tools: &AgentTools,
+    actor: &AuthContext,
+) -> CliResult {
+    match command {
+        PersonalDiscoveryWorkflow::Readiness => serde_json::to_value(
+            tools
+                .personal_discovery_readiness(actor)
+                .map_err(agent_tools_error)?,
+        )
+        .map_err(internal_error),
+        PersonalDiscoveryWorkflow::Request(args) => {
+            let request: RequestPersonalDiscovery = serde_json::from_value(
+                read_json_input(&args.input)
+                    .map_err(|error| (error, ExitStatusCategory::ValidationOrConflict))?,
+            )
+            .map_err(|error| {
+                (
+                    ErrorBody::new("invalid_input", error.to_string()),
+                    ExitStatusCategory::ValidationOrConflict,
+                )
+            })?;
+            serde_json::to_value(
+                tools
+                    .request_personal_discovery(actor, request, chrono::Utc::now())
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error)
+        }
+        PersonalDiscoveryWorkflow::Plan(args) => {
+            let id = parse_id::<DiscoveryPlanId>(&args.id)?;
+            serde_json::to_value(tools.discovery_plan(actor, id).map_err(agent_tools_error)?)
+                .map_err(internal_error)
+        }
     }
 }
 

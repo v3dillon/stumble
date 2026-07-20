@@ -9,7 +9,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use stumble_core::{AgentTools, AgentToolsError, AuthContext};
+use stumble_core::{AgentTools, AgentToolsError, AuthContext, HarnessCapability};
 use tracing::error;
 use url::Url;
 
@@ -416,6 +416,18 @@ fn tool_is_available(
         }
         ToolAvailability::UnscopedInteractiveFeedback => {
             tools.require_unscoped_interactive_feedback(context).is_ok()
+        }
+        ToolAvailability::DiscoveryExecution => {
+            tools
+                .require_harness_capability(context, HarnessCapability::DiscoveryTasks)
+                .is_ok()
+                || tools.require_personal_discovery_execution(context).is_ok()
+        }
+        ToolAvailability::PersonalPlanAccess => tools
+            .require_personal_discovery_plan_access(context)
+            .is_ok(),
+        ToolAvailability::PersonalDiscoveryManagement => {
+            tools.require_personal_discovery_management(context).is_ok()
         }
     }
 }

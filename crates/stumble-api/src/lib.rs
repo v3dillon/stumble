@@ -216,6 +216,12 @@ pub fn router_with_options(
             "/discovery-tasks/immediate",
             post(create_immediate_discovery_task),
         )
+        .route(
+            "/personal-discovery/readiness",
+            get(personal_discovery_readiness),
+        )
+        .route("/personal-discovery", post(request_personal_discovery))
+        .route("/discovery-plans/:id", get(discovery_plan))
         .route("/discovery-tasks/ready", get(list_ready_discovery_tasks))
         .route("/discovery-tasks/:id", get(discovery_task_status))
         .route("/discovery-tasks/:id/claim", post(claim_discovery_task))
@@ -364,6 +370,21 @@ fn route_docs() -> Vec<ApiRouteDoc> {
             method: "GET",
             path: "/discovery-tasks/ready",
             description: "list claimable Discovery Tasks",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/personal-discovery/readiness",
+            description: "inspect whether private User evidence can support Personal Discovery",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/personal-discovery",
+            description: "request an immutable private Discovery Plan and User-scoped task",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/discovery-plans/:id",
+            description: "read an authorized minimized Discovery Plan",
         },
         ApiRouteDoc {
             method: "POST",
@@ -617,6 +638,36 @@ async fn create_immediate_discovery_task(
         request,
         chrono::Utc::now(),
     )?))
+}
+
+async fn personal_discovery_readiness(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<PersonalDiscoveryReadiness>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.personal_discovery_readiness(&ctx)?))
+}
+
+async fn request_personal_discovery(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<RequestPersonalDiscovery>,
+) -> Result<Json<RequestedPersonalDiscovery>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.request_personal_discovery(
+        &ctx,
+        request,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn discovery_plan(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<DiscoveryPlanId>,
+) -> Result<Json<DiscoveryPlan>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.discovery_plan(&ctx, id)?))
 }
 
 async fn discovery_task_status(

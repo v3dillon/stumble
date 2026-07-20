@@ -458,6 +458,14 @@ fn agent_tools_error(error: AgentToolsError) -> (ErrorBody, ExitStatusCategory) 
             ErrorBody::new("idempotency_conflict", error.to_string()),
             ExitStatusCategory::ValidationOrConflict,
         ),
+        AgentToolsError::PersonalDiscoveryIdempotencyConflict => (
+            ErrorBody::new("idempotency_conflict", error.to_string()),
+            ExitStatusCategory::ValidationOrConflict,
+        ),
+        AgentToolsError::PersonalDiscoveryNotReady => (
+            ErrorBody::new("personal_discovery_not_ready", error.to_string()),
+            ExitStatusCategory::ValidationOrConflict,
+        ),
         AgentToolsError::CandidateHarnessRequired
         | AgentToolsError::CandidateTaskRequired
         | AgentToolsError::CandidateTaskLeaseRequired

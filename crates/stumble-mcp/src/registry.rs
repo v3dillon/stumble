@@ -28,6 +28,9 @@ pub(crate) enum ToolAvailability {
     CapabilityOnly(HarnessCapability),
     InteractiveFeedback,
     UnscopedInteractiveFeedback,
+    DiscoveryExecution,
+    PersonalPlanAccess,
+    PersonalDiscoveryManagement,
 }
 
 impl ToolAvailability {
@@ -38,6 +41,9 @@ impl ToolAvailability {
             Self::InteractiveFeedback | Self::UnscopedInteractiveFeedback => {
                 Some(HarnessCapability::Feedback)
             }
+            Self::DiscoveryExecution
+            | Self::PersonalPlanAccess
+            | Self::PersonalDiscoveryManagement => None,
         }
     }
 }
@@ -77,6 +83,9 @@ pub(crate) enum McpTool {
     RenewDiscoveryTask,
     CompleteDiscoveryTask,
     FailDiscoveryTask,
+    PersonalDiscoveryReadiness,
+    RequestPersonalDiscovery,
+    GetDiscoveryPlan,
     GetPodPackage,
     ExportPodPackage,
     ImportPodPackage,
@@ -101,7 +110,8 @@ pub(crate) fn definitions() -> &'static [ToolDefinition] {
     use HarnessCapability as Capability;
     use McpTool as Tool;
     use ToolAvailability::{
-        CapabilityOnly, InteractiveFeedback, Public, UnscopedInteractiveFeedback,
+        CapabilityOnly, DiscoveryExecution, InteractiveFeedback, PersonalDiscoveryManagement,
+        PersonalPlanAccess, Public, UnscopedInteractiveFeedback,
     };
     use ToolHandlerKind::{Async, Blocking};
 
@@ -131,14 +141,17 @@ pub(crate) fn definitions() -> &'static [ToolDefinition] {
         d(Tool::SubmitCandidate, "submit_candidate", CapabilityOnly(Capability::CandidateSubmission), candidate_schema(), Blocking, published(11, "Save Discovered Link", "Submit one externally discovered link with source metadata and provenance to an explicit User or Pod Placements target. This creates a private Candidate, not an Accepted Placement.", false, false)),
         d(Tool::InspectCandidate, "inspect_candidate", CapabilityOnly(Capability::CandidateSubmission), uuid_schema("candidate_id"), Blocking, published(12, "Inspect Candidate", "Inspect a private Candidate and its independent provenance records.", true, false)),
         d(Tool::MaterializeDiscoveryTasks, "materialize_discovery_tasks", CapabilityOnly(Capability::DiscoveryTasks), empty_schema(), Blocking, hidden("Materialize Discovery Tasks", "Materialize due Discovery Tasks from Source Rules.", false, false)),
-        d(Tool::ListDiscoveryTasks, "list_discovery_tasks", CapabilityOnly(Capability::DiscoveryTasks), empty_schema(), Blocking, hidden("List Discovery Tasks", "List Discovery Tasks visible to this Harness.", true, false)),
-        d(Tool::ListReadyDiscoveryTasks, "list_ready_discovery_tasks", CapabilityOnly(Capability::DiscoveryTasks), empty_schema(), Blocking, published(13, "List Ready Discovery Tasks", "List due discovery work that this Agent Harness is authorized to claim.", true, false)),
+        d(Tool::ListDiscoveryTasks, "list_discovery_tasks", DiscoveryExecution, empty_schema(), Blocking, hidden("List Discovery Tasks", "List Discovery Tasks visible to this Harness.", true, false)),
+        d(Tool::ListReadyDiscoveryTasks, "list_ready_discovery_tasks", DiscoveryExecution, empty_schema(), Blocking, published(13, "List Ready Discovery Tasks", "List due discovery work that this Agent Harness is authorized to claim.", true, false)),
         d(Tool::CreateImmediateDiscoveryTask, "create_immediate_discovery_task", CapabilityOnly(Capability::DiscoveryTasks), immediate_task_schema(), Blocking, published(14, "Request Discovery", "Create retry-safe discovery work for a Pod from the user's current instructions.", false, false)),
-        d(Tool::DiscoveryTaskStatus, "discovery_task_status", CapabilityOnly(Capability::DiscoveryTasks), uuid_schema("task_id"), Blocking, hidden("Discovery Task Status", "Inspect one Discovery Task.", true, false)),
-        d(Tool::ClaimDiscoveryTask, "claim_discovery_task", CapabilityOnly(Capability::DiscoveryTasks), task_lease_schema(), Blocking, published(15, "Claim Discovery Task", "Claim a ready Discovery Task with an exclusive, expiring lease.", false, false)),
-        d(Tool::RenewDiscoveryTask, "renew_discovery_task", CapabilityOnly(Capability::DiscoveryTasks), task_lease_schema(), Blocking, hidden("Renew Discovery Task", "Renew an owned Discovery Task lease.", false, false)),
-        d(Tool::CompleteDiscoveryTask, "complete_discovery_task", CapabilityOnly(Capability::DiscoveryTasks), uuid_schema("task_id"), Blocking, published(16, "Complete Discovery Task", "Mark a claimed Discovery Task complete after its Candidates have been submitted.", false, false)),
-        d(Tool::FailDiscoveryTask, "fail_discovery_task", CapabilityOnly(Capability::DiscoveryTasks), object_schema(json!({"task_id": uuid(), "reason": {"type": "string"}}), &["task_id", "reason"]), Blocking, published(17, "Fail Discovery Task", "Record a failed Discovery Task attempt with an inspectable reason.", false, true)),
+        d(Tool::DiscoveryTaskStatus, "discovery_task_status", DiscoveryExecution, uuid_schema("task_id"), Blocking, hidden("Discovery Task Status", "Inspect one Discovery Task.", true, false)),
+        d(Tool::ClaimDiscoveryTask, "claim_discovery_task", DiscoveryExecution, task_lease_schema(), Blocking, published(15, "Claim Discovery Task", "Claim a ready Discovery Task with an exclusive, expiring lease.", false, false)),
+        d(Tool::RenewDiscoveryTask, "renew_discovery_task", DiscoveryExecution, task_lease_schema(), Blocking, hidden("Renew Discovery Task", "Renew an owned Discovery Task lease.", false, false)),
+        d(Tool::CompleteDiscoveryTask, "complete_discovery_task", DiscoveryExecution, uuid_schema("task_id"), Blocking, published(16, "Complete Discovery Task", "Mark a claimed Discovery Task complete after its Candidates have been submitted.", false, false)),
+        d(Tool::FailDiscoveryTask, "fail_discovery_task", DiscoveryExecution, object_schema(json!({"task_id": uuid(), "reason": {"type": "string"}}), &["task_id", "reason"]), Blocking, published(17, "Fail Discovery Task", "Record a failed Discovery Task attempt with an inspectable reason.", false, true)),
+        d(Tool::PersonalDiscoveryReadiness, "personal_discovery_readiness", PersonalDiscoveryManagement, empty_schema(), Blocking, published(23, "Check Personal Discovery Readiness", "Inspect whether private aggregate User evidence can support a generic Personal Discovery run.", true, false)),
+        d(Tool::RequestPersonalDiscovery, "request_personal_discovery", PersonalDiscoveryManagement, personal_discovery_schema(), Blocking, published(24, "Request Personal Discovery", "Create a retry-safe minimized Discovery Plan and User-scoped task without selecting a Pod or source.", false, false)),
+        d(Tool::GetDiscoveryPlan, "get_discovery_plan", PersonalPlanAccess, uuid_schema("discovery_plan_id"), Blocking, published(25, "Read Discovery Plan", "Read an authorized minimized task-specific Discovery Plan.", true, false)),
         d(Tool::GetPodPackage, "get_pod_package", Public, string_schema("pod_slug"), Blocking, published(1, "Read Pod Package", "Read the versioned context, curation instructions, and Source Rules for one Pod.", true, false)),
         d(Tool::ExportPodPackage, "export_pod_package", CapabilityOnly(Capability::PackageManagement), string_schema("pod_slug"), Blocking, hidden("Export Pod Package", "Export a portable Pod Package.", true, false)),
         d(Tool::ImportPodPackage, "import_pod_package", CapabilityOnly(Capability::PackageManagement), object_schema(json!({"pod_slug": {"type": "string"}, "files": {"type": "object"}}), &["pod_slug", "files"]), Blocking, hidden("Import Pod Package", "Import Pod Package files.", false, false)),
@@ -277,6 +290,23 @@ fn immediate_task_schema() -> Value {
     object_schema(
         json!({"pod_id": uuid(), "instructions": {"type": "string"}, "idempotency_key": {"type": "string"}}),
         &["pod_id", "instructions", "idempotency_key"],
+    )
+}
+
+fn personal_discovery_schema() -> Value {
+    object_schema(
+        json!({
+            "intent": {
+                "oneOf": [
+                    {"type": "null"},
+                    {"type": "object", "properties": {"kind": {"const": "topic"}, "value": {"type": "string"}}, "required": ["kind", "value"], "additionalProperties": false},
+                    {"type": "object", "properties": {"kind": {"const": "similar_to_url"}, "value": {"type": "string", "format": "uri"}}, "required": ["kind", "value"], "additionalProperties": false}
+                ]
+            },
+            "result_count": {"type": ["integer", "null"], "minimum": 1, "maximum": 100},
+            "idempotency_key": {"type": "string"}
+        }),
+        &["idempotency_key"],
     )
 }
 

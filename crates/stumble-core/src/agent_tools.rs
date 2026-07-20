@@ -7,6 +7,7 @@ use crate::interest_seeds::{
     candidate_submission_taste_signals, interest_seed_evidence, record_interest_seed,
     reset_interest_seed_evidence, source_affinity_is_blocked, taste_profile_projections,
 };
+use crate::personal_discovery::{build_plan, readiness, retry, validate_request};
 use crate::ranking::{rank_discovery, RankingInput};
 use crate::signing::{
     hash_api_token, new_plaintext_api_token, sign_pod_announcement, sign_pod_endorsement,
@@ -68,6 +69,10 @@ pub enum AgentToolsError {
     CandidatePackageVersionMismatch,
     #[error("candidate submission idempotency key was reused with different input")]
     CandidateIdempotencyConflict,
+    #[error("Personal Discovery needs an explicit interest, corroborated User evidence, or temporary intent")]
+    PersonalDiscoveryNotReady,
+    #[error("Personal Discovery idempotency key was reused with different input")]
+    PersonalDiscoveryIdempotencyConflict,
     #[error("Home Node is not initialized")]
     NodeNotInitialized,
     #[error("Home Node is already initialized")]
@@ -1729,6 +1734,55 @@ impl AgentTools {
         authorize_taste_profile(&store, ctx)
     }
 
+    /// Verifies the complete interactive, unscoped Personal Discovery management policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Harness kind, scope, capability, or identity is invalid.
+    pub fn require_personal_discovery_management(
+        &self,
+        ctx: &AuthContext,
+    ) -> Result<(), AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_management(&store, ctx)
+    }
+
+    /// Verifies the complete unattended, unscoped Personal Discovery execution policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Harness kind, scope, capability, or identity is invalid.
+    pub fn require_personal_discovery_execution(
+        &self,
+        ctx: &AuthContext,
+    ) -> Result<(), AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_execution(&store, ctx)
+    }
+
+    /// Verifies whether this context can participate in authorized plan reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the complete management or execution policy applies.
+    pub fn require_personal_discovery_plan_access(
+        &self,
+        ctx: &AuthContext,
+    ) -> Result<(), AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_management(&store, ctx)
+            .or_else(|_| authorize_personal_discovery_execution(&store, ctx))
+    }
+
     /// Creates an expiring proposal without applying its sensitive change.
     ///
     /// # Errors
@@ -2484,6 +2538,122 @@ impl AgentTools {
     /// # Errors
     ///
     /// Returns an error when authorization, package parsing, locking, or persistence fails.
+    pub fn personal_discovery_readiness(
+        &self,
+        ctx: &AuthContext,
+    ) -> Result<PersonalDiscoveryReadiness, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_management(&store, ctx)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Personal Discovery requires an authenticated User".into())
+        })?;
+        Ok(readiness(&store, user_id, ctx.tenant_id))
+    }
+
+    /// Creates an immutable private plan and first-class User-scoped task atomically.
+    pub fn request_personal_discovery(
+        &self,
+        ctx: &AuthContext,
+        request: RequestPersonalDiscovery,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<RequestedPersonalDiscovery, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_management(&store, ctx)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Personal Discovery requires an authenticated User".into())
+        })?;
+        let result_count = validate_request(&request)?;
+        if let Some(existing) = retry(
+            &store,
+            user_id,
+            ctx.tenant_id,
+            &request.idempotency_key,
+            ctx.harness_id,
+        ) {
+            if existing.plan.intent != request.intent || existing.plan.result_count != result_count
+            {
+                return Err(AgentToolsError::PersonalDiscoveryIdempotencyConflict);
+            }
+            return Ok(existing);
+        }
+        if request.intent.is_none() && !readiness(&store, user_id, ctx.tenant_id).ready {
+            return Err(AgentToolsError::PersonalDiscoveryNotReady);
+        }
+        let plan = build_plan(
+            &store,
+            user_id,
+            ctx.tenant_id,
+            request.intent.clone(),
+            result_count,
+            now,
+        )?;
+        let task = DiscoveryTask {
+            id: Uuid::now_v7().into(),
+            target: DiscoveryTaskTarget::Personal {
+                discovery_plan_id: plan.id,
+            },
+            origin: DiscoveryTaskOrigin::PersonalRequest {
+                idempotency_key: request.idempotency_key,
+                requested_by: ctx.harness_id,
+            },
+            due_at: now,
+            state: DiscoveryTaskState::Pending,
+            attempts: Vec::new(),
+            created_at: now,
+        };
+        let mut staged = store.clone();
+        staged.discovery_plans.insert(plan.id, plan.clone());
+        staged.discovery_tasks.insert(task.id, task.clone());
+        record_harness_write(
+            &mut staged,
+            ctx,
+            HarnessWriteOperation::RequestPersonalDiscovery,
+            None,
+        );
+        self.persist_locked(&mut staged)?;
+        *store = staged;
+        Ok(RequestedPersonalDiscovery { plan, task })
+    }
+
+    /// Reads a plan for its interactive owner or the worker holding its task lease.
+    pub fn discovery_plan(
+        &self,
+        ctx: &AuthContext,
+        plan_id: DiscoveryPlanId,
+    ) -> Result<DiscoveryPlan, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let plan = store
+            .discovery_plans
+            .get(&plan_id)
+            .ok_or_else(|| StoreError::NotFound("Discovery Plan".into()))?;
+        if authorize_personal_discovery_management(&store, ctx).is_ok()
+            && ctx.user_id == Some(plan.user_id)
+            && ctx.tenant_id == plan.tenant_id
+        {
+            return Ok(plan.clone());
+        }
+        authorize_personal_discovery_execution(&store, ctx)?;
+        let harness_id = ctx.harness_id.ok_or(AgentToolsError::TaskLeaseRequired)?;
+        let assigned = store.discovery_tasks.values().any(|task| {
+            task.target.discovery_plan_id() == Some(plan_id)
+                && matches!(&task.state, DiscoveryTaskState::Leased(lease)
+                    if lease.harness_id == harness_id && lease.expires_at > Utc::now())
+        });
+        if !assigned {
+            return Err(AgentToolsError::TaskLeaseRequired);
+        }
+        Ok(plan.clone())
+    }
+
     pub fn materialize_due_discovery_tasks(
         &self,
         ctx: &AuthContext,
@@ -2635,22 +2805,32 @@ impl AgentTools {
         ctx: &AuthContext,
         now: chrono::DateTime<Utc>,
     ) -> Result<Vec<DiscoveryTask>, AgentToolsError> {
-        self.materialize_due_discovery_tasks(ctx, now)?;
+        let can_materialize = {
+            let store = self
+                .store
+                .read()
+                .map_err(|_| AgentToolsError::LockPoisoned)?;
+            authorize_harness(&store, ctx, HarnessCapability::DiscoveryTasks, None).is_ok()
+        };
+        if can_materialize {
+            self.materialize_due_discovery_tasks(ctx, now)?;
+        }
         let store = self
             .store
             .read()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
-        authorize_harness(&store, ctx, HarnessCapability::DiscoveryTasks, None)?;
-        let scoped =
-            harness_for_context(&store, ctx)?.and_then(|harness| harness.grant.pod_ids.as_ref());
+        let can_execute_personal = authorize_personal_discovery_execution(&store, ctx).is_ok();
+        let can_execute_pod =
+            authorize_harness(&store, ctx, HarnessCapability::DiscoveryTasks, None).is_ok();
+        if !can_execute_personal && !can_execute_pod {
+            return Err(AgentToolsError::Forbidden {
+                reason: "harness grant lacks discovery task execution authority".into(),
+            });
+        }
         Ok(store
             .discovery_tasks
             .values()
-            .filter(|task| {
-                task.target
-                    .pod()
-                    .is_some_and(|(pod_id, _)| scoped.is_none_or(|pods| pods.contains(&pod_id)))
-            })
+            .filter(|task| authorize_discovery_task(&store, ctx, task).is_ok())
             .cloned()
             .map(|task| task_with_expired_lease_recorded(task, now))
             .collect())
@@ -2693,7 +2873,7 @@ impl AgentTools {
             .discovery_tasks
             .get(&task_id)
             .ok_or_else(|| StoreError::NotFound("Discovery Task".into()))?;
-        authorize_pod_discovery_task(&store, ctx, task)?;
+        authorize_discovery_task(&store, ctx, task)?;
         Ok(task_with_expired_lease_recorded(task.clone(), now))
     }
 
@@ -2746,7 +2926,7 @@ impl AgentTools {
             &mut store,
             ctx,
             HarnessWriteOperation::ClaimDiscoveryTask,
-            Some(pod_id),
+            pod_id,
         );
         self.persist_locked(&mut store)?;
         Ok(result)
@@ -2793,7 +2973,7 @@ impl AgentTools {
             &mut store,
             ctx,
             HarnessWriteOperation::RenewDiscoveryTaskLease,
-            Some(pod_id),
+            pod_id,
         );
         self.persist_locked(&mut store)?;
         Ok(result)
@@ -2883,7 +3063,7 @@ impl AgentTools {
         } else {
             HarnessWriteOperation::FailDiscoveryTask
         };
-        record_harness_write(&mut store, ctx, operation, Some(pod_id));
+        record_harness_write(&mut store, ctx, operation, pod_id);
         self.persist_locked(&mut store)?;
         Ok(result)
     }
@@ -8762,30 +8942,87 @@ fn authorized_discovery_task_mutation(
     store: &InMemoryStore,
     ctx: &AuthContext,
     task_id: DiscoveryTaskId,
-) -> Result<(PodId, AgentHarnessId), AgentToolsError> {
+) -> Result<(Option<PodId>, AgentHarnessId), AgentToolsError> {
     let task = store
         .discovery_tasks
         .get(&task_id)
         .ok_or_else(|| StoreError::NotFound("Discovery Task".into()))?;
-    let pod_id = authorize_pod_discovery_task(store, ctx, task)?;
+    let pod_id = authorize_discovery_task(store, ctx, task)?;
     let harness_id = ctx.harness_id.ok_or_else(|| AgentToolsError::Forbidden {
         reason: "task mutation requires an Agent Harness".into(),
     })?;
     Ok((pod_id, harness_id))
 }
 
-fn authorize_pod_discovery_task(
+fn authorize_discovery_task(
     store: &InMemoryStore,
     ctx: &AuthContext,
     task: &DiscoveryTask,
-) -> Result<PodId, AgentToolsError> {
-    let Some((pod_id, _)) = task.target.pod() else {
-        return Err(AgentToolsError::Forbidden {
-            reason: "Personal Discovery execution is not available yet".into(),
-        });
-    };
-    authorize_harness(store, ctx, HarnessCapability::DiscoveryTasks, Some(pod_id))?;
-    Ok(pod_id)
+) -> Result<Option<PodId>, AgentToolsError> {
+    match task.target {
+        DiscoveryTaskTarget::Pod { pod_id, .. } => {
+            authorize_harness(store, ctx, HarnessCapability::DiscoveryTasks, Some(pod_id))?;
+            Ok(Some(pod_id))
+        }
+        DiscoveryTaskTarget::Personal { .. } => {
+            authorize_personal_discovery_execution(store, ctx)?;
+            let plan_id = task
+                .target
+                .discovery_plan_id()
+                .expect("Personal target carries a Discovery Plan ID");
+            let plan = store
+                .discovery_plans
+                .get(&plan_id)
+                .ok_or_else(|| StoreError::NotFound("Discovery Plan".into()))?;
+            if ctx.user_id != Some(plan.user_id) || ctx.tenant_id != plan.tenant_id {
+                return Err(AgentToolsError::Forbidden {
+                    reason: "Personal Discovery task belongs to another User".into(),
+                });
+            }
+            Ok(None)
+        }
+    }
+}
+
+fn authorize_personal_discovery_management(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+) -> Result<(), AgentToolsError> {
+    authorize_harness(
+        store,
+        ctx,
+        HarnessCapability::PersonalDiscoveryManagement,
+        None,
+    )?;
+    if let Some(harness) = harness_for_context(store, ctx)? {
+        if harness.kind != AgentHarnessKind::Interactive || harness.grant.pod_ids.is_some() {
+            return Err(AgentToolsError::Forbidden {
+                reason: "Personal Discovery management requires an unscoped interactive grant"
+                    .into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn authorize_personal_discovery_execution(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+) -> Result<(), AgentToolsError> {
+    authorize_harness(
+        store,
+        ctx,
+        HarnessCapability::PersonalDiscoveryExecution,
+        None,
+    )?;
+    if let Some(harness) = harness_for_context(store, ctx)? {
+        if harness.kind != AgentHarnessKind::Unattended || harness.grant.pod_ids.is_some() {
+            return Err(AgentToolsError::Forbidden {
+                reason: "Personal Discovery execution requires an unscoped unattended grant".into(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn authorize_harness_for_new_pod(

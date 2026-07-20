@@ -149,6 +149,10 @@ pub(super) enum PackageWorkflow {
 
 #[derive(Subcommand)]
 pub(super) enum DiscoverWorkflow {
+    Personal {
+        #[command(subcommand)]
+        command: PersonalDiscoveryWorkflow,
+    },
     Task {
         #[command(subcommand)]
         command: TaskWorkflow,
@@ -157,6 +161,13 @@ pub(super) enum DiscoverWorkflow {
         #[command(subcommand)]
         command: CandidateWorkflow,
     },
+}
+
+#[derive(Subcommand)]
+pub(super) enum PersonalDiscoveryWorkflow {
+    Readiness,
+    Request(InputArgs),
+    Plan(IdArgs),
 }
 
 #[derive(Subcommand)]
