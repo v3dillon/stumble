@@ -97,7 +97,7 @@ pub(crate) fn prepare_request(
             let canonical = canonicalize_web_url(url).map_err(|error| {
                 StoreError::Validation(format!("invalid temporary reference: {error}"))
             })?;
-            let parsed = Url::parse(&canonical).map_err(|error| {
+            let mut parsed = Url::parse(&canonical).map_err(|error| {
                 StoreError::Validation(format!("invalid temporary reference: {error}"))
             })?;
             if !parsed.username().is_empty() || parsed.password().is_some() {
@@ -109,8 +109,10 @@ pub(crate) fn prepare_request(
             let domain = parsed.domain().map(str::to_lowercase).ok_or_else(|| {
                 StoreError::Validation("temporary reference has no domain".into())
             })?;
+            parsed.set_query(None);
+            parsed.set_fragment(None);
             Some(PreparedPersonalDiscoveryIntent::SimilarToUrl {
-                value: url.clone(),
+                value: parsed.to_string(),
                 domain,
             })
         }

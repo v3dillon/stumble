@@ -338,6 +338,42 @@ fn credential_bearing_temporary_urls_never_enter_a_discovery_plan() {
 }
 
 #[test]
+fn temporary_url_query_and_fragment_secrets_are_not_persisted() {
+    let tools = AgentTools::new(seed_store());
+    let manager = harness(
+        &tools,
+        "url minimization manager",
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::PersonalDiscoveryManagement],
+    );
+
+    let created = tools
+        .request_personal_discovery(
+            &manager,
+            RequestPersonalDiscovery {
+                intent: Some(PersonalDiscoveryIntent::SimilarToUrl(
+                    "https://example.com/article?access_token=query-secret#token=fragment-secret"
+                        .into(),
+                )),
+                result_count: None,
+                idempotency_key: "url-secret-minimization".into(),
+            },
+            Utc::now(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        created.plan.intent,
+        Some(PersonalDiscoveryIntent::SimilarToUrl(
+            "https://example.com/article".into()
+        ))
+    );
+    let serialized = serde_json::to_string(&created.plan).unwrap();
+    assert!(!serialized.contains("query-secret"));
+    assert!(!serialized.contains("fragment-secret"));
+}
+
+#[test]
 fn minimized_topic_selection_keeps_explicit_preferences_ahead_of_learned_signals() {
     let tools = AgentTools::new(seed_store());
     let manager = harness(
