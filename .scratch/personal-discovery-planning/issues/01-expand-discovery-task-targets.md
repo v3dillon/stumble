@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: complete
 Blocked by: None
 
 # Expand Discovery Tasks to typed targets

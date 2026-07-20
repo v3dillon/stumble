@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: complete
 Blocked by: None
 
 # Learn Interest Seeds from User submissions
