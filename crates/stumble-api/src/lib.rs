@@ -47,12 +47,44 @@ pub struct ApiRouteDoc {
 #[derive(Debug)]
 pub struct ApiError {
     status: StatusCode,
+    /// Machine-readable failure class for Agent Harnesses and operators.
+    code: &'static str,
     message: String,
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(json!({"error": self.message}))).into_response()
+        (
+            self.status,
+            Json(json!({
+                "error": self.message,
+                "code": self.code,
+            })),
+        )
+            .into_response()
+    }
+}
+
+fn agent_tools_error_code(error: &AgentToolsError) -> &'static str {
+    match error {
+        AgentToolsError::Forbidden { .. } => "forbidden",
+        AgentToolsError::Store(StoreError::InvalidSignature) | AgentToolsError::Signing(_) => {
+            "invalid_signature"
+        }
+        AgentToolsError::Store(StoreError::AnnouncementExpired) => "announcement_expired",
+        AgentToolsError::Store(StoreError::AnnouncementWithdrawn) => "announcement_withdrawn",
+        AgentToolsError::Store(StoreError::AnnouncementStale) => "announcement_stale",
+        AgentToolsError::Store(StoreError::WithdrawalStale) => "withdrawal_stale",
+        AgentToolsError::Store(StoreError::NotFound(_)) => "not_found",
+        AgentToolsError::Store(StoreError::UntrustedPeer) => "untrusted_peer",
+        AgentToolsError::Store(StoreError::Validation(_)) | AgentToolsError::BadUrl(_) => {
+            "validation_error"
+        }
+        AgentToolsError::Store(StoreError::Duplicate(_)) => "duplicate",
+        AgentToolsError::Store(StoreError::TenantBoundary) => "tenant_boundary",
+        AgentToolsError::LockPoisoned | AgentToolsError::Persistence(_) => "internal_error",
+        AgentToolsError::IncompatibleProtocol { .. } => "incompatible_protocol",
+        _ => "request_error",
     }
 }
 
@@ -60,11 +92,17 @@ impl From<AgentToolsError> for ApiError {
     fn from(value: AgentToolsError) -> Self {
         let status = if matches!(value, AgentToolsError::Forbidden { .. }) {
             StatusCode::FORBIDDEN
+        } else if matches!(
+            value,
+            AgentToolsError::LockPoisoned | AgentToolsError::Persistence(_)
+        ) {
+            StatusCode::INTERNAL_SERVER_ERROR
         } else {
             StatusCode::BAD_REQUEST
         };
         Self {
             status,
+            code: agent_tools_error_code(&value),
             message: value.to_string(),
         }
     }
@@ -76,14 +114,17 @@ impl From<stumble_sync::PeerSyncError> for ApiError {
             stumble_sync::PeerSyncError::Core(source) => source.into(),
             source @ stumble_sync::PeerSyncError::Request { .. } => Self {
                 status: StatusCode::BAD_GATEWAY,
+                code: "upstream_error",
                 message: source.to_string(),
             },
             source @ stumble_sync::PeerSyncError::ImportTask(_) => Self {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "internal_error",
                 message: source.to_string(),
             },
             source => Self {
                 status: StatusCode::BAD_REQUEST,
+                code: "request_error",
                 message: source.to_string(),
             },
         }
@@ -188,6 +229,27 @@ pub fn router_with_options(
         .route("/links/:id/rate", post(retired_feedback_contract))
         .route("/me/preferences", patch(update_preferences))
         .route("/discovery/pods", get(pod_discovery_feed))
+        .route(
+            "/discovery/announcements",
+            post(index_pod_announcement).get(search_pod_announcements),
+        )
+        .route(
+            "/discovery/announcements/produce",
+            post(produce_pod_announcement),
+        )
+        .route(
+            "/discovery/announcements/receive",
+            post(receive_pod_announcement),
+        )
+        .route("/discovery/withdrawals", post(index_pod_withdrawal))
+        .route(
+            "/discovery/withdrawals/produce",
+            post(produce_pod_withdrawal),
+        )
+        .route(
+            "/discovery/withdrawals/receive",
+            post(receive_pod_withdrawal),
+        )
         .route("/home/discover-public-pods", get(home_discover_public_pods))
         .route("/auth/dev-token", post(dev_token))
         .route("/me", get(me))
@@ -468,6 +530,41 @@ fn route_docs() -> Vec<ApiRouteDoc> {
             method: "GET",
             path: "/discovery/pods",
             description: "combined public pod discovery feed split into local public pods and global hub-indexed pods",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/discovery/announcements",
+            description: "verify and index a signed public Pod Announcement with its Announcement Lease",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/discovery/announcements",
+            description: "search currently eligible verified Pod Announcements",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/discovery/announcements/produce",
+            description: "produce an Origin-signed Pod Announcement with a renewable 30-day lease",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/discovery/announcements/receive",
+            description: "receive a peer-delivered Origin-signed Pod Announcement",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/discovery/withdrawals",
+            description: "verify and index an Origin-signed Pod Withdrawal",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/discovery/withdrawals/produce",
+            description: "produce an Origin-signed Pod Withdrawal, optionally making the Pod private",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/discovery/withdrawals/receive",
+            description: "receive a peer-delivered Origin-signed Pod Withdrawal",
         },
         ApiRouteDoc {
             method: "POST",
@@ -1259,6 +1356,7 @@ async fn list_tenants(State(state): State<ApiState>) -> Result<Json<Vec<Tenant>>
     let store = state.tools.store();
     let store = store.read().map_err(|_| ApiError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "internal_error",
         message: "lock poisoned".to_string(),
     })?;
     Ok(Json(store.tenants.values().cloned().collect()))
@@ -1428,6 +1526,120 @@ async fn federation_sync_pod(
     ))
 }
 
+#[derive(Debug, Deserialize)]
+struct ProduceAnnouncementRequest {
+    pod_slug: String,
+    public_pod_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReceiveAnnouncementRequest {
+    peer_id: Uuid,
+    announcement: PodAnnouncement,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProduceWithdrawalRequest {
+    pod_slug: String,
+    public_pod_url: Option<String>,
+    #[serde(default = "default_true")]
+    make_private: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+struct ReceiveWithdrawalRequest {
+    peer_id: Uuid,
+    withdrawal: PodWithdrawal,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnnouncementSearchQuery {
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn produce_pod_announcement(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<ProduceAnnouncementRequest>,
+) -> Result<Json<PodAnnouncement>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.pod_announcement(
+        &ctx,
+        &request.pod_slug,
+        &request.public_pod_url,
+    )?))
+}
+
+async fn index_pod_announcement(
+    State(state): State<ApiState>,
+    Json(announcement): Json<PodAnnouncement>,
+) -> Result<Json<KnownPodAnnouncement>, ApiError> {
+    Ok(Json(state.tools.index_pod_announcement(announcement)?))
+}
+
+async fn receive_pod_announcement(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<ReceiveAnnouncementRequest>,
+) -> Result<Json<KnownPodAnnouncement>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.receive_pod_announcement(
+        &ctx,
+        request.peer_id,
+        request.announcement,
+    )?))
+}
+
+async fn search_pod_announcements(
+    State(state): State<ApiState>,
+    Query(query): Query<AnnouncementSearchQuery>,
+) -> Result<Json<PodAnnouncementSearchResponse>, ApiError> {
+    Ok(Json(state.tools.search_pod_announcements(
+        &query.q.unwrap_or_default(),
+        query.limit.unwrap_or(10),
+    )?))
+}
+
+async fn produce_pod_withdrawal(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<ProduceWithdrawalRequest>,
+) -> Result<Json<PodWithdrawal>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.withdraw_public_pod(
+        &ctx,
+        &request.pod_slug,
+        request.public_pod_url.as_deref(),
+        request.make_private,
+        chrono::Utc::now(),
+    )?))
+}
+
+async fn index_pod_withdrawal(
+    State(state): State<ApiState>,
+    Json(withdrawal): Json<PodWithdrawal>,
+) -> Result<Json<KnownPodWithdrawal>, ApiError> {
+    Ok(Json(state.tools.index_pod_withdrawal(withdrawal)?))
+}
+
+async fn receive_pod_withdrawal(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<ReceiveWithdrawalRequest>,
+) -> Result<Json<KnownPodWithdrawal>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.receive_pod_withdrawal(
+        &ctx,
+        request.peer_id,
+        request.withdrawal,
+    )?))
+}
+
 async fn hub_register_node(
     State(state): State<ApiState>,
     Json(request): Json<HubRegisterNodeRequest>,
@@ -1452,6 +1664,7 @@ async fn hub_refresh(
         .map(Json)
         .map_err(|error| ApiError {
             status: StatusCode::BAD_GATEWAY,
+            code: "upstream_error",
             message: error.to_string(),
         })
 }
@@ -1486,6 +1699,7 @@ fn auth_or_default(state: &ApiState, headers: &HeaderMap) -> Result<AuthContext,
             }
             return Err(ApiError {
                 status: StatusCode::UNAUTHORIZED,
+                code: "unauthorized",
                 message: "invalid token".to_string(),
             });
         }
@@ -1493,12 +1707,14 @@ fn auth_or_default(state: &ApiState, headers: &HeaderMap) -> Result<AuthContext,
     if !state.owner_access_allowed {
         return Err(ApiError {
             status: StatusCode::UNAUTHORIZED,
+            code: "unauthorized",
             message: "bearer token required".to_string(),
         });
     }
     let store = tools.store();
     let store = store.read().map_err(|_| ApiError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "internal_error",
         message: "lock poisoned".to_string(),
     })?;
     let node = store.default_node().map_err(AgentToolsError::Store)?;
@@ -1518,11 +1734,13 @@ fn auth_required(tools: &AgentTools, headers: &HeaderMap) -> Result<AuthContext,
     else {
         return Err(ApiError {
             status: StatusCode::UNAUTHORIZED,
+            code: "unauthorized",
             message: "bearer token required".to_string(),
         });
     };
     tools.authenticate_token(token)?.ok_or_else(|| ApiError {
         status: StatusCode::UNAUTHORIZED,
+        code: "unauthorized",
         message: "invalid token".to_string(),
     })
 }
@@ -1533,6 +1751,7 @@ fn ensure_dev_tokens_allowed(state: &ApiState) -> Result<(), ApiError> {
     }
     Err(ApiError {
         status: StatusCode::FORBIDDEN,
+        code: "forbidden",
         message: "dev token minting is disabled for this bind address; use a loopback bind or explicitly allow public dev tokens".to_string(),
     })
 }

@@ -406,7 +406,9 @@ fn announcement_is_usable(
     if policy.blocks_announcement(&known.announcement) {
         return false;
     }
-    known.announcement.verify().unwrap_or(false)
+    let now = chrono::Utc::now();
+    crate::pod_announcement::announcement_is_discovery_eligible(store, &known.announcement, now)
+        && known.announcement.verify().unwrap_or(false)
         && store
             .known_pod_announcements
             .get(&(

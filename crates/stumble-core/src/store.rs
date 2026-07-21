@@ -20,6 +20,14 @@ pub enum StoreError {
     UntrustedPeer,
     #[error("invalid event signature")]
     InvalidSignature,
+    #[error("pod announcement lease expired")]
+    AnnouncementExpired,
+    #[error("pod has been withdrawn from discovery")]
+    AnnouncementWithdrawn,
+    #[error("pod announcement is stale")]
+    AnnouncementStale,
+    #[error("pod withdrawal is stale")]
+    WithdrawalStale,
     #[error("validation failed: {0}")]
     Validation(String),
 }
@@ -106,6 +114,7 @@ pub struct InMemoryStore {
     pub node_identities: HashMap<NodeIdentityId, NodeIdentity>,
     pub trusted_peers: HashMap<PeerId, TrustedPeer>,
     pub known_pod_announcements: HashMap<(NodeIdentityId, String), KnownPodAnnouncement>,
+    pub known_pod_withdrawals: HashMap<(NodeIdentityId, String), KnownPodWithdrawal>,
     pub trust_policies: HashMap<(UserId, Option<TenantId>), TrustPolicy>,
     pub pod_endorsements: HashMap<Uuid, PodEndorsement>,
     pub pod_explore_sample_sets: HashMap<Uuid, PodExploreSamples>,
@@ -183,6 +192,8 @@ struct PersistedStore {
     trusted_peers: Vec<TrustedPeer>,
     #[serde(default)]
     known_pod_announcements: Vec<KnownPodAnnouncement>,
+    #[serde(default)]
+    known_pod_withdrawals: Vec<KnownPodWithdrawal>,
     #[serde(default)]
     trust_policies: Vec<TrustPolicy>,
     #[serde(default)]
@@ -427,6 +438,7 @@ impl From<&InMemoryStore> for PersistedStore {
             node_identities: store.node_identities.values().cloned().collect(),
             trusted_peers: store.trusted_peers.values().cloned().collect(),
             known_pod_announcements: store.known_pod_announcements.values().cloned().collect(),
+            known_pod_withdrawals: store.known_pod_withdrawals.values().cloned().collect(),
             trust_policies: store.trust_policies.values().cloned().collect(),
             pod_endorsements: store.pod_endorsements.values().cloned().collect(),
             pod_explore_sample_sets: store.pod_explore_sample_sets.values().cloned().collect(),
@@ -634,6 +646,19 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                     )
                 })
                 .collect(),
+            known_pod_withdrawals: snapshot
+                .known_pod_withdrawals
+                .into_iter()
+                .map(|known| {
+                    (
+                        (
+                            known.withdrawal.origin_node_id,
+                            known.withdrawal.pod_slug.clone(),
+                        ),
+                        known,
+                    )
+                })
+                .collect(),
             trust_policies: snapshot
                 .trust_policies
                 .into_iter()
@@ -808,6 +833,7 @@ const STORE_COLLECTIONS: &[&str] = &[
     "node_identities",
     "trusted_peers",
     "known_pod_announcements",
+    "known_pod_withdrawals",
     "trust_policies",
     "pod_endorsements",
     "pod_explore_sample_sets",
@@ -1188,6 +1214,19 @@ fn record_key(
                     .cloned()
                     .unwrap_or(serde_json::Value::Null),
                 announcement
+                    .get("pod_slug")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            ])?);
+        }
+        "known_pod_withdrawals" => {
+            let withdrawal = value.get("withdrawal").unwrap_or(&serde_json::Value::Null);
+            return Ok(serde_json::to_string(&[
+                withdrawal
+                    .get("origin_node_id")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                withdrawal
                     .get("pod_slug")
                     .cloned()
                     .unwrap_or(serde_json::Value::Null),

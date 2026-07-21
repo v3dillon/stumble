@@ -1918,6 +1918,10 @@ pub enum HarnessWriteOperation {
     AddTrustedPeer,
     /// Retain a verified announcement delivered by a trusted peer.
     ReceivePodAnnouncement,
+    /// Retain a verified Pod Withdrawal delivered by a trusted peer.
+    ReceivePodWithdrawal,
+    /// Publish a signed Pod Withdrawal for a formerly public Pod.
+    WithdrawPublicPod,
     /// Publish a signed optional recommendation from a public Pod.
     EndorsePublicPod,
     ImportPodEvents,
@@ -4737,10 +4741,20 @@ pub struct PodManifest {
     pub public_source_summary: Vec<String>,
 }
 
+/// Renewable Announcement Lease duration in whole days.
+pub const ANNOUNCEMENT_LEASE_DURATION_DAYS: i64 = 30;
+
+/// Returns the renewable validity period carried by every signed Pod Announcement.
+#[must_use]
+pub fn announcement_lease_duration() -> chrono::Duration {
+    chrono::Duration::days(ANNOUNCEMENT_LEASE_DURATION_DAYS)
+}
+
 /// Compact signed advertisement for one public Pod on the Stumble Substrate.
 ///
 /// Announcements identify where authoritative artifacts can be fetched without
-/// carrying the Pod Package, Pod Events, or Content Items themselves.
+/// carrying the Pod Package, Pod Events, or Content Items themselves. Each
+/// announcement carries a renewable 30-day Announcement Lease in `expires_at`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -4765,8 +4779,60 @@ pub struct PodAnnouncement {
     pub latest_event_hash: Option<String>,
     /// Time at which the Origin Node signed this advertisement.
     pub announced_at: DateTime<Utc>,
+    /// Exclusive end of the renewable Announcement Lease (`announced_at` + 30 days).
+    /// The lease is active while `expires_at > now`.
+    pub expires_at: DateTime<Utc>,
     /// Ed25519 signature over every preceding field.
     pub signature: String,
+}
+
+impl PodAnnouncement {
+    /// Returns whether this announcement's Announcement Lease is still active at `now`.
+    ///
+    /// The lease end is exclusive: active only while `expires_at > now`.
+    #[must_use]
+    pub fn lease_is_active(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at > now
+    }
+}
+
+/// Origin-signed statement that a formerly public Pod leaves new discovery.
+///
+/// A withdrawal ends announcement relaying and Explore eligibility for the Pod
+/// without deleting Subscriptions or previously synchronized content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct PodWithdrawal {
+    /// Stable identity of this signed withdrawal.
+    pub id: Uuid,
+    /// Authoritative Origin Node.
+    pub origin_node_id: NodeIdentityId,
+    /// Origin identity and verification key.
+    pub signer: NodeInfo,
+    /// Public Pod identity withdrawn from discovery.
+    pub pod_slug: String,
+    /// Optional canonical direct address covered by the withdrawal.
+    pub public_pod_url: Option<String>,
+    /// Optional exact announcement identity this withdrawal supersedes.
+    pub covers_announcement_id: Option<Uuid>,
+    /// Time at which the Origin Node signed the withdrawal.
+    pub withdrawn_at: DateTime<Utc>,
+    /// Ed25519 signature over every preceding field.
+    pub signature: String,
+}
+
+/// Locally retained verified Pod Withdrawal and delivery provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct KnownPodWithdrawal {
+    /// Origin-authored signed withdrawal, unchanged by relays.
+    pub withdrawal: PodWithdrawal,
+    /// Trusted peer that delivered it, absent when indexed directly.
+    pub received_from_peer_id: Option<PeerId>,
+    /// Time at which this node verified and retained it.
+    pub received_at: DateTime<Utc>,
 }
 
 /// Locally retained verified announcement and its immediate delivery provenance.

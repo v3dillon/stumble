@@ -1,4 +1,6 @@
-use crate::domain::{EventLog, NodeIdentity, PodAnnouncement, PodEndorsement, PodExploreSamples};
+use crate::domain::{
+    EventLog, NodeIdentity, PodAnnouncement, PodEndorsement, PodExploreSamples, PodWithdrawal,
+};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -146,6 +148,20 @@ fn canonical_announcement_bytes(announcement: &PodAnnouncement) -> Result<Vec<u8
         "package_version": announcement.package_version,
         "latest_event_hash": announcement.latest_event_hash,
         "announced_at": announcement.announced_at,
+        "expires_at": announcement.expires_at,
+    });
+    Ok(serde_json::to_vec(&canonical)?)
+}
+
+fn canonical_withdrawal_bytes(withdrawal: &PodWithdrawal) -> Result<Vec<u8>, SigningError> {
+    let canonical = serde_json::json!({
+        "id": withdrawal.id,
+        "origin_node_id": withdrawal.origin_node_id,
+        "signer": withdrawal.signer,
+        "pod_slug": withdrawal.pod_slug,
+        "public_pod_url": withdrawal.public_pod_url,
+        "covers_announcement_id": withdrawal.covers_announcement_id,
+        "withdrawn_at": withdrawal.withdrawn_at,
     });
     Ok(serde_json::to_vec(&canonical)?)
 }
@@ -195,6 +211,41 @@ impl PodAnnouncement {
     /// Verifies that this announcement was signed by its declared Origin Node.
     ///
     /// Signature validity establishes origin only; it does not establish quality.
+    /// The signed payload includes the renewable Announcement Lease expiry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the advertised key, signature, or JSON is malformed.
+    pub fn verify(&self) -> Result<bool, SigningError> {
+        if self.origin_node_id != self.signer.node_id {
+            return Ok(false);
+        }
+        if self.expires_at != self.announced_at + crate::domain::announcement_lease_duration() {
+            return Ok(false);
+        }
+        verify_payload(
+            &self.signer.public_key,
+            &self.signature,
+            &canonical_announcement_bytes(self)?,
+        )
+    }
+}
+
+/// Signs a Pod Withdrawal with its authoritative Origin Node key.
+///
+/// # Errors
+///
+/// Returns an error when the local signing key or canonical JSON is invalid.
+pub fn sign_pod_withdrawal(
+    node: &NodeIdentity,
+    mut withdrawal: PodWithdrawal,
+) -> Result<PodWithdrawal, SigningError> {
+    withdrawal.signature = sign_payload(node, &canonical_withdrawal_bytes(&withdrawal)?)?;
+    Ok(withdrawal)
+}
+
+impl PodWithdrawal {
+    /// Verifies that this withdrawal was signed by its declared Origin Node.
     ///
     /// # Errors
     ///
@@ -206,7 +257,7 @@ impl PodAnnouncement {
         verify_payload(
             &self.signer.public_key,
             &self.signature,
-            &canonical_announcement_bytes(self)?,
+            &canonical_withdrawal_bytes(self)?,
         )
     }
 }

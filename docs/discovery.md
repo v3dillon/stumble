@@ -1,12 +1,30 @@
 # Stumble Substrate discovery
 
-Public Origin Nodes advertise Pods with compact `PodAnnouncement` values signed by the node's Ed25519 identity. An announcement contains public Pod identity, subject, canonical direct Pod URL, Package version, and latest Pod Event pointer. It does not contain Pod Events, Package contents, Candidates, Content Items, Subscriptions, or other private Home Node state. Full accepted content still synchronizes only after a direct Subscription.
+Public Origin Nodes advertise Pods with compact `PodAnnouncement` values signed by the node's Ed25519 identity. An announcement contains public Pod identity, subject, canonical direct Pod URL, Package version, latest Pod Event pointer, and a renewable **Announcement Lease**: `expires_at` is exactly `announced_at + 30 days` and is covered by the Origin signature. It does not contain Pod Events, Package contents, Candidates, Content Items, Subscriptions, or other private Home Node state. Full accepted content still synchronizes only after a direct Subscription.
 
-A Home Node may receive an unchanged signed announcement from an explicitly trusted peer, and `relay_pod_announcements` serves retained Origin signatures unchanged to another trusted peer. The immediate peer is recorded only as delivery provenance; verification still resolves to the Origin Node in the announcement. Disabling a peer through an independently approved Pending Proposal retains its audit state while immediately rejecting further discovery exchange. Optional Index Nodes use the same verification contract to aggregate and search announcements. A Home Node accepts search results only from an Index configured in its Trust Policy, discards the Index's score, and recomputes relevance locally. Removing an Index immediately excludes results received only from it, so another Index can replace it. Direct Pod URLs continue to work without any Index Node.
+Origins produce announcements through `pod_announcement` (also `pod_announcement_at` for deterministic clocks). Each call reflects current public metadata, Package version, and latest event pointer with a fresh id, issuance time, and lease, and retains the announcement on the Origin so later public-state changes can refresh it. Renewing a lease is the same entry point with a later issuance time. When public Pod metadata, Package version, or the latest federated event pointer changes on a public Origin Pod that already has a retained announcement, the Origin automatically re-issues and retains a refreshed announcement. Consumers retain announcements with deterministic preference: an active lease beats an expired one; among equal lease validity, later `announced_at` (then package version) wins. Invalid signatures, expired leases, and stale renewals are rejected without mutating local discovery state.
+
+An Origin-signed **Pod Withdrawal** immediately ends new discovery and relaying for that Pod identity (`origin_node_id` + `pod_slug`). Withdrawals are produced by `withdraw_public_pod` or automatically when a public Pod is made private via `request_set_pod_visibility`. Expired leases and withdrawals exclude the Pod from `relay_pod_announcements`, Index search, and `explore_public_pods`, but never delete existing Subscriptions or previously synchronized content. A later Origin-signed announcement issued after a withdrawal may re-admit the Pod.
+
+A Home Node may receive an unchanged signed announcement from an explicitly trusted peer, and `relay_pod_announcements` serves only currently eligible Origin signatures unchanged to another trusted peer. The immediate peer is recorded only as delivery provenance; verification still resolves to the Origin Node in the announcement. Disabling a peer through an independently approved Pending Proposal retains its audit state while immediately rejecting further discovery exchange. Optional Index Nodes use the same verification and lease contract to aggregate and search announcements. A Home Node accepts search results only from an Index configured in its Trust Policy, discards the Index's score, and recomputes relevance locally. Removing an Index immediately excludes results received only from it, so another Index can replace it. Direct Pod URLs continue to work without any Index Node.
+
+Public HTTP contracts (typed machine-readable `code` on failures):
+
+| Method | Path | Behavior |
+|--------|------|----------|
+| `POST` | `/discovery/announcements/produce` | Origin produces a signed announcement with a 30-day lease |
+| `POST` | `/discovery/announcements` | Verify and index an announcement |
+| `POST` | `/discovery/announcements/receive` | Receive a peer-delivered announcement |
+| `GET`  | `/discovery/announcements` | Search currently eligible announcements |
+| `POST` | `/discovery/withdrawals/produce` | Origin produces a withdrawal (optionally makes the Pod private) |
+| `POST` | `/discovery/withdrawals` | Verify and index a withdrawal |
+| `POST` | `/discovery/withdrawals/receive` | Receive a peer-delivered withdrawal |
+
+Failure codes include `invalid_signature`, `announcement_expired`, `announcement_withdrawn`, `announcement_stale`, `withdrawal_stale`, and `validation_error`.
 
 Changes to trusted peers, configured Index Nodes, and local Pod, node, source, or topic blocks pass through Pending Proposal approval. `explore_public_pods` applies that User-owned Trust Policy and does not create a Subscription. For an unsubscribed remote Pod, the Origin may separately produce a bounded signed `PodExploreSamples` artifact; the Home Node accepts it only for the exact current announcement and filters its Content References locally. Signed Pod Endorsements likewise bind the exact known current announcements of both public Pods before adding bounded, inspectable local ranking evidence. Neither signatures nor endorsements establish a global quality or reputation score.
 
-The focused temporary-SQLite acceptance coverage is in `crates/stumble-core/tests/discovery_substrate.rs`. Direct outbound addressing remains covered in `crates/stumble-cli/tests/direct_subscription.rs`.
+Announcement lease and withdrawal state persist in the authoritative SQLite store (`known_pod_announcements`, `known_pod_withdrawals`). The focused temporary-SQLite acceptance coverage is in `crates/stumble-core/tests/discovery_substrate.rs` and `crates/stumble-api/tests/discovery_announcements.rs`. Direct outbound addressing remains covered in `crates/stumble-cli/tests/direct_subscription.rs`.
 
 ## Personal Discovery
 

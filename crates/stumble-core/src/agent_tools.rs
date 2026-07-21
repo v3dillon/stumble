@@ -17,10 +17,15 @@ use crate::personal_discovery::{
     task_is_scheduled, upsert_task_source_availability, validate_name, validate_result_count,
     BatchAvailabilityInput, DiscoveryResultLearningInput, TaskAvailabilityIdentity,
 };
+use crate::pod_announcement::{
+    announcement_is_discovery_eligible, issue_and_retain_origin_pod_announcement,
+    issue_origin_pod_withdrawal, refresh_public_pod_announcement_if_needed,
+    retain_verified_pod_announcement, retain_verified_pod_withdrawal, validate_public_pod_url,
+};
 use crate::ranking::{rank_discovery, RankingInput};
 use crate::signing::{
-    hash_api_token, new_plaintext_api_token, sign_pod_announcement, sign_pod_endorsement,
-    sign_pod_explore_samples, sign_public_event, verify_event, SigningError,
+    hash_api_token, new_plaintext_api_token, sign_pod_endorsement, sign_pod_explore_samples,
+    sign_public_event, verify_event, SigningError,
 };
 use crate::skill_pack::{
     default_skill_pack, export_skill_pack, fork_skill_pack, import_skill_pack, patch_skill_pack,
@@ -4262,6 +4267,7 @@ impl AgentTools {
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         authorize_pod_role_owner(&store, ctx, pod_id)?;
+        let was_public = current == Visibility::Public;
         let pod = store
             .pods
             .get_mut(&pod_id)
@@ -4270,6 +4276,16 @@ impl AgentTools {
         let result = pod.clone();
         if let Some(rules) = store.pod_rules.get_mut(&pod_id) {
             rules.federate_sources = result.visibility == Visibility::Public;
+        }
+        if was_public && result.visibility != Visibility::Public {
+            let node = store.node_for_tenant(ctx.tenant_id)?;
+            issue_origin_pod_withdrawal(&mut store, &node, &result.slug, None, now)?;
+            record_harness_write(
+                &mut store,
+                ctx,
+                HarnessWriteOperation::WithdrawPublicPod,
+                Some(pod_id),
+            );
         }
         record_harness_write(
             &mut store,
@@ -6306,6 +6322,7 @@ impl AgentTools {
         store.insert_pod_package_version(package.clone())?;
         store.pod_skill_packs.insert(pod.id, package.clone());
         store.event_log.push(event);
+        refresh_public_pod_announcement_if_needed(&mut store, pod.id, now)?;
         record_harness_write(
             &mut store,
             ctx,
@@ -6391,6 +6408,7 @@ impl AgentTools {
         store.insert_pod_package_version(pack.clone())?;
         store.pod_skill_packs.insert(pod.id, pack.clone());
         store.event_log.push(event);
+        refresh_public_pod_announcement_if_needed(&mut store, pod.id, now)?;
         record_harness_write(
             &mut store,
             ctx,
@@ -6471,6 +6489,7 @@ impl AgentTools {
             store.latest_event_hash(&pod.slug),
         )?;
         store.event_log.push(event);
+        refresh_public_pod_announcement_if_needed(&mut store, pod.id, now)?;
         record_harness_write(
             &mut store,
             ctx,
@@ -7231,6 +7250,11 @@ impl AgentTools {
 
     /// Produces a compact signed advertisement for a public Origin Pod.
     ///
+    /// The signed payload includes a renewable 30-day Announcement Lease
+    /// (`expires_at = announced_at + 30 days`) reflecting current public metadata.
+    /// The Origin retains the announcement so later public-state changes can
+    /// refresh the lease against the same direct address.
+    ///
     /// # Errors
     ///
     /// Returns an error when the Pod is not public or authoritative at this
@@ -7241,9 +7265,27 @@ impl AgentTools {
         pod_slug: &str,
         public_pod_url: &str,
     ) -> Result<PodAnnouncement, AgentToolsError> {
-        let store = self
+        self.pod_announcement_at(ctx, pod_slug, public_pod_url, Utc::now())
+    }
+
+    /// Produces a Pod Announcement at an explicit issuance time (testable clocks).
+    ///
+    /// Also used to renew an active lease: each call issues a fresh signature
+    /// with a new `announced_at` / `expires_at` reflecting current public state.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::pod_announcement`].
+    pub fn pod_announcement_at(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+        public_pod_url: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PodAnnouncement, AgentToolsError> {
+        let mut store = self
             .store
-            .read()
+            .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
         authorize_harness_pod_scope(&store, ctx, pod.id)?;
@@ -7260,34 +7302,74 @@ impl AgentTools {
             )
             .into());
         }
-        let public_pod_url = validate_public_pod_url(public_pod_url, &pod.slug)?;
-        let package = store
-            .pod_skill_packs
-            .get(&pod.id)
-            .ok_or_else(|| StoreError::NotFound("Pod Package".into()))?;
-        sign_pod_announcement(
+        let announcement =
+            issue_and_retain_origin_pod_announcement(&mut store, &node, &pod, public_pod_url, now)?;
+        self.persist_locked(&mut store)?;
+        Ok(announcement)
+    }
+
+    /// Produces an Origin-signed Pod Withdrawal for a public Pod.
+    ///
+    /// When `make_private` is true, the local Pod is also restricted to private
+    /// visibility. Existing Subscriptions and synchronized content are preserved.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Pod is not public or authoritative, ownership is
+    /// denied, signing fails, or state is unavailable.
+    pub fn withdraw_public_pod(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+        public_pod_url: Option<&str>,
+        make_private: bool,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PodWithdrawal, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?.clone();
+        authorize_pod_role_owner(&store, ctx, pod.id)?;
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        if pod
+            .origin_node_id
+            .is_some_and(|origin_node_id| origin_node_id != node.id)
+        {
+            return Err(StoreError::Validation(
+                "only an Origin Node can withdraw its public Pod".into(),
+            )
+            .into());
+        }
+        if pod.visibility != Visibility::Public && !make_private {
+            return Err(StoreError::NotFound(format!("public Pod {pod_slug}")).into());
+        }
+        let withdrawal = issue_origin_pod_withdrawal(
+            &mut store,
             &node,
-            PodAnnouncement {
-                id: Uuid::now_v7(),
-                origin_node_id: node.id,
-                signer: NodeInfo {
-                    node_id: node.id,
-                    display_name: node.display_name.clone(),
-                    public_key: node.public_key.clone(),
-                    supported_protocol_version: CURRENT_PROTOCOL_VERSION.into(),
-                },
-                pod_slug: pod.slug.clone(),
-                pod_name: pod.name.clone(),
-                subject: pod.description.clone(),
-                public_pod_url,
-                package_version: PackageVersion::new(package.version)
-                    .map_err(|error| StoreError::Validation(error.to_string()))?,
-                latest_event_hash: store.latest_federated_event_hash(&pod.slug),
-                announced_at: Utc::now(),
-                signature: String::new(),
-            },
-        )
-        .map_err(Into::into)
+            &pod.slug,
+            public_pod_url.map(str::to_owned),
+            now,
+        )?;
+        if make_private && pod.visibility != Visibility::Private {
+            let pod_id = pod.id;
+            let mut_pod = store
+                .pods
+                .get_mut(&pod_id)
+                .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+            mut_pod.visibility = Visibility::Private;
+            if let Some(rules) = store.pod_rules.get_mut(&pod_id) {
+                rules.federate_sources = false;
+            }
+        }
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::WithdrawPublicPod,
+            Some(pod.id),
+        );
+        self.persist_locked(&mut store)?;
+        Ok(withdrawal)
     }
 
     /// Produces bounded Origin-signed Content Reference samples for Explore.
@@ -7449,8 +7531,12 @@ impl AgentTools {
         if peer.tenant_id != ctx.tenant_id || !peer.enabled {
             return Err(StoreError::UntrustedPeer.into());
         }
+        let now = Utc::now();
         let mut announcements = Vec::with_capacity(store.known_pod_announcements.len());
         for known in store.known_pod_announcements.values() {
+            if !announcement_is_discovery_eligible(&store, &known.announcement, now) {
+                continue;
+            }
             if !known.announcement.verify()? {
                 return Err(StoreError::InvalidSignature.into());
             }
@@ -7479,6 +7565,21 @@ impl AgentTools {
         peer_id: PeerId,
         announcement: PodAnnouncement,
     ) -> Result<KnownPodAnnouncement, AgentToolsError> {
+        self.receive_pod_announcement_at(ctx, peer_id, announcement, Utc::now())
+    }
+
+    /// Verifies and retains a peer-delivered announcement at an explicit clock time.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::receive_pod_announcement`].
+    pub fn receive_pod_announcement_at(
+        &self,
+        ctx: &AuthContext,
+        peer_id: PeerId,
+        announcement: PodAnnouncement,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<KnownPodAnnouncement, AgentToolsError> {
         let mut store = self
             .store
             .write()
@@ -7492,7 +7593,7 @@ impl AgentTools {
             return Err(StoreError::UntrustedPeer.into());
         }
         let known =
-            retain_verified_pod_announcement(&mut store, announcement, Some(peer_id), None)?;
+            retain_verified_pod_announcement(&mut store, announcement, Some(peer_id), None, now)?;
         record_harness_write(
             &mut store,
             ctx,
@@ -7508,16 +7609,111 @@ impl AgentTools {
     /// # Errors
     ///
     /// Returns an error when the signature or direct address is invalid, the
-    /// announcement is stale, or persistence fails.
+    /// announcement is stale or expired, the Pod is withdrawn, or persistence fails.
     pub fn index_pod_announcement(
         &self,
         announcement: PodAnnouncement,
+    ) -> Result<KnownPodAnnouncement, AgentToolsError> {
+        self.index_pod_announcement_at(announcement, Utc::now())
+    }
+
+    /// Indexes a verified announcement at an explicit clock time.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::index_pod_announcement`].
+    pub fn index_pod_announcement_at(
+        &self,
+        announcement: PodAnnouncement,
+        now: chrono::DateTime<Utc>,
     ) -> Result<KnownPodAnnouncement, AgentToolsError> {
         let mut store = self
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
-        let known = retain_verified_pod_announcement(&mut store, announcement, None, None)?;
+        let known = retain_verified_pod_announcement(&mut store, announcement, None, None, now)?;
+        self.persist_locked(&mut store)?;
+        Ok(known)
+    }
+
+    /// Verifies and retains an Origin-signed Pod Withdrawal from a trusted peer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an untrusted peer, invalid signature, stale withdrawal,
+    /// denied administration, or persistence failure.
+    pub fn receive_pod_withdrawal(
+        &self,
+        ctx: &AuthContext,
+        peer_id: PeerId,
+        withdrawal: PodWithdrawal,
+    ) -> Result<KnownPodWithdrawal, AgentToolsError> {
+        self.receive_pod_withdrawal_at(ctx, peer_id, withdrawal, Utc::now())
+    }
+
+    /// Retains a peer-delivered Pod Withdrawal at an explicit clock time.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::receive_pod_withdrawal`].
+    pub fn receive_pod_withdrawal_at(
+        &self,
+        ctx: &AuthContext,
+        peer_id: PeerId,
+        withdrawal: PodWithdrawal,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<KnownPodWithdrawal, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        let peer = store
+            .trusted_peers
+            .get(&peer_id)
+            .ok_or(StoreError::UntrustedPeer)?;
+        if peer.tenant_id != ctx.tenant_id || !peer.enabled {
+            return Err(StoreError::UntrustedPeer.into());
+        }
+        let known = retain_verified_pod_withdrawal(&mut store, withdrawal, Some(peer_id), now)?;
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::ReceivePodWithdrawal,
+            None,
+        );
+        self.persist_locked(&mut store)?;
+        Ok(known)
+    }
+
+    /// Aggregates a verified Pod Withdrawal on an optional Index Node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the signature is invalid, the withdrawal is stale,
+    /// or persistence fails.
+    pub fn index_pod_withdrawal(
+        &self,
+        withdrawal: PodWithdrawal,
+    ) -> Result<KnownPodWithdrawal, AgentToolsError> {
+        self.index_pod_withdrawal_at(withdrawal, Utc::now())
+    }
+
+    /// Indexes a verified Pod Withdrawal at an explicit clock time.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::index_pod_withdrawal`].
+    pub fn index_pod_withdrawal_at(
+        &self,
+        withdrawal: PodWithdrawal,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<KnownPodWithdrawal, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let known = retain_verified_pod_withdrawal(&mut store, withdrawal, None, now)?;
         self.persist_locked(&mut store)?;
         Ok(known)
     }
@@ -7541,10 +7737,14 @@ impl AgentTools {
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let query = query.trim().to_lowercase();
         let query_tokens = route_tokens(&query);
+        let now = Utc::now();
         let mut results = store
             .known_pod_announcements
             .values()
             .filter_map(|known| {
+                if !announcement_is_discovery_eligible(&store, &known.announcement, now) {
+                    return None;
+                }
                 let searchable = format!(
                     "{} {} {}",
                     known.announcement.pod_slug,
@@ -7620,15 +7820,19 @@ impl AgentTools {
         }
         let result_count = response.results.len();
         let before_import = store.known_pod_announcements.clone();
+        let before_withdrawals = store.known_pod_withdrawals.clone();
+        let now = Utc::now();
         for result in response.results {
             if let Err(error) = retain_verified_pod_announcement(
                 &mut store,
                 result.announcement,
                 None,
                 Some(index_base_url.clone()),
+                now,
             ) {
                 store.known_pod_announcements = before_import;
-                return Err(error);
+                store.known_pod_withdrawals = before_withdrawals;
+                return Err(error.into());
             }
         }
         self.persist_locked(&mut store)?;
@@ -7852,11 +8056,15 @@ impl AgentTools {
         let local_node_id = store.node_for_tenant(ctx.tenant_id)?.id;
         let query = request.query.trim().to_lowercase();
         let query_tokens = route_tokens(&query);
+        let now = Utc::now();
         let mut results = store
             .known_pod_announcements
             .values()
             .filter_map(|known| {
                 let announcement = &known.announcement;
+                if !announcement_is_discovery_eligible(&store, announcement, now) {
+                    return None;
+                }
                 if known
                     .received_from_index_url
                     .as_ref()
@@ -8496,50 +8704,7 @@ fn discard_replayed_events(
 /// Returns an error unless the address uses HTTPS (or loopback HTTP) and has
 /// the canonical `/federation/pods/<slug>` shape.
 pub fn canonical_public_pod_url(value: &str) -> Result<String, AgentToolsError> {
-    let mut url = Url::parse(value).map_err(|error| AgentToolsError::BadUrl(error.to_string()))?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| StoreError::Validation("public Pod URL must include a host".to_string()))?;
-    let is_loopback_http = url.scheme() == "http"
-        && (host.eq_ignore_ascii_case("localhost")
-            || host
-                .parse::<IpAddr>()
-                .is_ok_and(|address| address.is_loopback()));
-    if url.scheme() != "https" && !is_loopback_http {
-        return Err(StoreError::Validation(
-            "public Pod URL must use HTTPS except on loopback".to_string(),
-        )
-        .into());
-    }
-    let path = url.path().trim_end_matches('/').to_string();
-    let segments = path.split('/').collect::<Vec<_>>();
-    if segments.len() != 4
-        || !segments[0].is_empty()
-        || segments[1] != "federation"
-        || segments[2] != "pods"
-        || segments[3].is_empty()
-    {
-        return Err(StoreError::Validation(
-            "public Pod URL must use /federation/pods/<slug>".to_string(),
-        )
-        .into());
-    }
-    url.set_path(&path);
-    url.set_query(None);
-    url.set_fragment(None);
-    Ok(url.to_string().trim_end_matches('/').to_string())
-}
-
-fn validate_public_pod_url(value: &str, pod_slug: &str) -> Result<String, AgentToolsError> {
-    let canonical = canonical_public_pod_url(value)?;
-    let url = Url::parse(&canonical).map_err(|error| AgentToolsError::BadUrl(error.to_string()))?;
-    if url.path().trim_end_matches('/') != format!("/federation/pods/{pod_slug}") {
-        return Err(StoreError::Validation(
-            "public Pod URL does not match the signed Pod slug".to_string(),
-        )
-        .into());
-    }
-    Ok(canonical)
+    crate::pod_announcement::canonical_public_pod_url(value).map_err(Into::into)
 }
 
 fn validate_federation_snapshot(
@@ -10646,6 +10811,7 @@ fn enrich_accepted_content_item(
         .expect("accepted Content Item remains present")
         .media_references
         .clone();
+    let now = Utc::now();
     for pod in pods {
         let payload = ContentItemMetadataUpdatedPayload {
             metadata_update: ContentItemMetadataUpdate {
@@ -10663,6 +10829,7 @@ fn enrich_accepted_content_item(
             store.latest_event_hash(&pod.slug),
         )?;
         store.event_log.push(event);
+        refresh_public_pod_announcement_if_needed(store, pod.id, now)?;
     }
     Ok(())
 }
@@ -10717,6 +10884,7 @@ fn accept_placement(
         store.latest_event_hash(&pod.slug),
     )?;
     store.event_log.push(event);
+    refresh_public_pod_announcement_if_needed(store, placement.pod_id, placement.updated_at)?;
     Ok(())
 }
 
@@ -10947,38 +11115,6 @@ fn feed_content_reference(item: &Submission) -> FeedContentReference {
         source: item.domain.clone(),
         tags: item.tags.clone(),
     }
-}
-
-fn retain_verified_pod_announcement(
-    store: &mut InMemoryStore,
-    announcement: PodAnnouncement,
-    received_from_peer_id: Option<PeerId>,
-    received_from_index_url: Option<String>,
-) -> Result<KnownPodAnnouncement, AgentToolsError> {
-    if !announcement.verify()? {
-        return Err(StoreError::InvalidSignature.into());
-    }
-    validate_public_pod_url(&announcement.public_pod_url, &announcement.pod_slug)?;
-    let key = (announcement.origin_node_id, announcement.pod_slug.clone());
-    if store
-        .known_pod_announcements
-        .get(&key)
-        .is_some_and(|known| {
-            known.announcement.package_version > announcement.package_version
-                || (known.announcement.package_version == announcement.package_version
-                    && known.announcement.announced_at > announcement.announced_at)
-        })
-    {
-        return Err(StoreError::Validation("Pod Announcement is stale".into()).into());
-    }
-    let known = KnownPodAnnouncement {
-        announcement,
-        received_from_peer_id,
-        received_from_index_url,
-        received_at: Utc::now(),
-    };
-    store.known_pod_announcements.insert(key, known.clone());
-    Ok(known)
 }
 
 fn explore_content_samples(
@@ -12152,6 +12288,7 @@ fn apply_sensitive_change(
             store.insert_pod_package_version(package.clone())?;
             store.pod_skill_packs.insert(*pod_id, package);
             store.event_log.push(event);
+            refresh_public_pod_announcement_if_needed(store, *pod_id, now)?;
         }
         SensitiveChange::RemovePublicSubmissionFromPod {
             pod_id,
@@ -12244,6 +12381,7 @@ fn apply_sensitive_change(
                 )?
             };
             store.event_log.push(event);
+            refresh_public_pod_announcement_if_needed(store, *pod_id, withdrawn_at)?;
         }
         SensitiveChange::EnableAutonomousCuration {
             pod_id,
