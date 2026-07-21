@@ -132,6 +132,10 @@ _Avoid_: Throwback, duplicate
 An origin-authored withdrawal of a Pod Placement that stops future delivery through that placement without deleting independent local placements or saves.
 _Avoid_: Item deletion, purge
 
+**Pod Withdrawal**:
+An Origin-signed statement that immediately removes a formerly public Pod from new discovery and announcement relaying without deleting previously synchronized content or Subscriptions.
+_Avoid_: Placement Tombstone, content purge
+
 **Pod Event**:
 A signed, append-only statement from an Origin Node describing a public or authorized change to a Pod.
 _Avoid_: Sync record, database update
@@ -148,6 +152,22 @@ _Avoid_: Central directory, blockchain, global database
 A compact signed advertisement of a public Pod's identity, subject, Origin Node, package version, and latest event pointer that may be relayed without synchronizing its content.
 _Avoid_: Pod replica, feed export
 
+**Announcement Stream**:
+A topic-neutral, cursor-paginated sequence of new or changed public Pod Announcements that a Home Node may synchronize for local discovery without disclosing its User's Taste Profile or inferred interests.
+_Avoid_: Personalized index, recommendations feed
+
+**Announcement Lease**:
+The renewable validity period carried by a signed Pod Announcement. An expired lease makes the Pod ineligible for new discovery and relaying without removing previously synchronized content or Subscriptions.
+_Avoid_: Permanent listing, subscription expiry
+
+**Discovery Peer**:
+A Stumble node selected for bounded exchange of signed public Pod Announcements without being trusted with Pod Events, private state, Subscriptions, or administrative authority. A Home Node may form and evict Discovery Peer relationships automatically under its Trust Policy.
+_Avoid_: Trusted Peer, friend, federation authority
+
+**Discovery Peer Advertisement**:
+A signed, renewable statement that an opted-in Stumble node serves public Announcement Streams at a reachable endpoint with a declared protocol version. Bootstrap Nodes and Discovery Peers exchange bounded unranked samples of these advertisements to support automatic peering.
+_Avoid_: Peer ranking, trust grant, permanent node listing
+
 **Index Node**:
 An optional replaceable Stumble node role that aggregates public Pod Announcements to accelerate discovery without becoming authoritative for those Pods.
 _Avoid_: Central hub, registry
@@ -156,6 +176,10 @@ _Avoid_: Central hub, registry
 An optional Stumble node role that caches and serves signed Pod Events for an Origin Node without gaining authority to alter them.
 _Avoid_: Origin proxy, central host
 
+**Bootstrap Node**:
+A preconfigured, removable Stumble node used as an initial contact for discovering public Pod Announcements before a Home Node knows other peers or direct Pod URLs. It provides reachability without becoming authoritative for Pods or local discovery ranking.
+_Avoid_: Central server, mandatory registry, root node
+
 **Trust Policy**:
 A Home Node's local rules for accepting peers, querying Index Nodes, admitting Exploration Items, and blocking Pods, nodes, sources, or topics.
 _Avoid_: Global reputation, moderation score
@@ -163,6 +187,10 @@ _Avoid_: Global reputation, moderation score
 **Pod Endorsement**:
 A signed recommendation of one public Pod by another that may inform local discovery without granting authority or establishing a universal rank.
 _Avoid_: Verification badge, global reputation
+
+**Pod Similarity**:
+An inspectable local estimate that two Pods cover related subject matter, derived from verified public metadata, source neighborhoods, Explore samples, Pod Endorsements, and optional local agent evidence without transferring trust between them.
+_Avoid_: Global similarity score, recommendation rank
 
 **Attention Value**:
 Stumble's estimate that a Content Item is worth a User's limited attention based on relevance, quality, novelty, diversity, timeliness, and explicit feedback.
