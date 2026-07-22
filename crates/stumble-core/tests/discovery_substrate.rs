@@ -1788,7 +1788,7 @@ fn explore_similarity_is_local_without_remote_interest_queries() {
         "explore ranking must not issue background interest-derived remote queries"
     );
     assert!(feedback_affects_future_exposure(FeedbackKind::Interesting));
-    assert!(!feedback_affects_future_exposure(FeedbackKind::Dismissed));
+    assert!(feedback_affects_future_exposure(FeedbackKind::Dismissed));
 }
 
 #[test]

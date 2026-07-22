@@ -12490,7 +12490,9 @@ fn feed_attention_value(
 fn taste_evidence_for_feedback(
     kind: FeedbackKind,
 ) -> Option<(LearnedTasteEvidenceKind, TasteEvidenceDirection)> {
-    // Dismiss/ignore never create durable preference (see feedback_affects_future_exposure).
+    // Explicit feed feedback adjusts durable taste. Blocks update preferences
+    // directly rather than learned weights. Personal Discovery batch dismiss is
+    // a separate path that never calls this helper.
     match kind {
         FeedbackKind::Saved => Some((
             LearnedTasteEvidenceKind::Save,
@@ -12500,11 +12502,11 @@ fn taste_evidence_for_feedback(
             LearnedTasteEvidenceKind::MoreLikeThis,
             TasteEvidenceDirection::Supporting,
         )),
-        FeedbackKind::NotForMe => Some((
+        FeedbackKind::NotForMe | FeedbackKind::Dismissed => Some((
             LearnedTasteEvidenceKind::LessLikeThis,
             TasteEvidenceDirection::Opposing,
         )),
-        FeedbackKind::Dismissed | FeedbackKind::BlockSource | FeedbackKind::BlockTopic => None,
+        FeedbackKind::BlockSource | FeedbackKind::BlockTopic => None,
     }
 }
 

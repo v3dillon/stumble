@@ -255,8 +255,10 @@ pub fn rank_similar_pods_with_agent_evidence(
 
 /// Whether explicit feedback should adjust future local exposure for a Pod/source.
 ///
-/// Ignore and passive delivery never create durable preference by themselves;
-/// only explicit positive/negative feedback kinds do.
+/// Passive delivery (no feedback recorded) never creates durable preference.
+/// Explicit feed feedback kinds—including dismiss as a soft negative—do.
+/// Personal Discovery batch dismiss/ignore remains a separate path that does not
+/// call this helper.
 #[must_use]
 pub fn feedback_affects_future_exposure(kind: crate::domain::FeedbackKind) -> bool {
     matches!(
@@ -264,6 +266,7 @@ pub fn feedback_affects_future_exposure(kind: crate::domain::FeedbackKind) -> bo
         crate::domain::FeedbackKind::Saved
             | crate::domain::FeedbackKind::Interesting
             | crate::domain::FeedbackKind::NotForMe
+            | crate::domain::FeedbackKind::Dismissed
             | crate::domain::FeedbackKind::BlockSource
             | crate::domain::FeedbackKind::BlockTopic
     )
@@ -501,8 +504,8 @@ mod tests {
     }
 
     #[test]
-    fn ignore_and_passive_do_not_count_as_durable_preference() {
-        assert!(!feedback_affects_future_exposure(
+    fn explicit_feed_feedback_kinds_adjust_future_exposure() {
+        assert!(feedback_affects_future_exposure(
             crate::domain::FeedbackKind::Dismissed
         ));
         assert!(feedback_affects_future_exposure(
