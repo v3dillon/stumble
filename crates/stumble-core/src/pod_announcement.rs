@@ -6,7 +6,7 @@
 
 use crate::domain::{
     announcement_lease_duration, KnownPodAnnouncement, KnownPodWithdrawal, NodeIdentity, NodeInfo,
-    PackageVersion, Pod, PodAnnouncement, PodId, PodWithdrawal, Visibility,
+    PackageVersion, PeerId, Pod, PodAnnouncement, PodId, PodWithdrawal, TrustPolicy, Visibility,
     CURRENT_PROTOCOL_VERSION,
 };
 use crate::signing::{sign_pod_announcement, sign_pod_withdrawal};
@@ -15,6 +15,100 @@ use chrono::{DateTime, Utc};
 use std::net::IpAddr;
 use url::Url;
 use uuid::Uuid;
+
+/// Immediate delivery provenance for a verified announcement retention.
+///
+/// Local/origin retains omit remote sources. Remote delivery records at most one
+/// peer, one Index URL, and one Bootstrap URL per call; Bootstrap URLs accumulate
+/// across retains of the same signed announcement identity.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DeliveryProvenance {
+    /// Trusted peer that delivered the announcement, when peer-sourced.
+    pub peer_id: Option<PeerId>,
+    /// Configured Index Node base URL that returned the announcement.
+    pub index_url: Option<String>,
+    /// Bootstrap base URL that delivered the announcement.
+    pub bootstrap_url: Option<String>,
+}
+
+impl DeliveryProvenance {
+    /// Origin-local or direct retain with no remote delivery source.
+    pub const LOCAL: Self = Self {
+        peer_id: None,
+        index_url: None,
+        bootstrap_url: None,
+    };
+
+    /// Peer-delivered announcement provenance.
+    #[must_use]
+    pub const fn peer(peer_id: PeerId) -> Self {
+        Self {
+            peer_id: Some(peer_id),
+            index_url: None,
+            bootstrap_url: None,
+        }
+    }
+
+    /// Index Node search result provenance.
+    #[must_use]
+    pub fn index(url: impl Into<String>) -> Self {
+        Self {
+            peer_id: None,
+            index_url: Some(url.into()),
+            bootstrap_url: None,
+        }
+    }
+
+    /// Bootstrap Announcement Stream provenance.
+    #[must_use]
+    pub fn bootstrap(url: impl Into<String>) -> Self {
+        Self {
+            peer_id: None,
+            index_url: None,
+            bootstrap_url: Some(url.into()),
+        }
+    }
+}
+
+/// Whether any enabled Bootstrap endpoint still provides provenance for `base_url`.
+#[must_use]
+pub fn retains_bootstrap_url(store: &InMemoryStore, base_url: &str) -> bool {
+    store
+        .bootstrap_endpoints
+        .values()
+        .any(|endpoint| endpoint.enabled && endpoint.base_url == base_url)
+}
+
+/// Whether a retained announcement still has active delivery provenance.
+///
+/// Local/origin retains (no remote sources) remain eligible. Remote sources are
+/// active when a peer delivered them, a configured Index still matches, or at
+/// least one enabled Bootstrap still matches a recorded delivery URL.
+#[must_use]
+pub fn announcement_delivery_is_active(
+    store: &InMemoryStore,
+    known: &KnownPodAnnouncement,
+    policy: Option<&TrustPolicy>,
+) -> bool {
+    let has_peer = known.received_from_peer_id.is_some();
+    let has_index = known.received_from_index_url.is_some();
+    let has_bootstrap = !known.received_from_bootstrap_urls.is_empty();
+    if !has_peer && !has_index && !has_bootstrap {
+        return true;
+    }
+    if has_peer {
+        return true;
+    }
+    if let Some(url) = &known.received_from_index_url {
+        if policy.is_some_and(|policy| policy.retains_index_url(url)) {
+            return true;
+        }
+    }
+    known
+        .received_from_bootstrap_urls
+        .iter()
+        .any(|url| retains_bootstrap_url(store, url))
+}
 
 /// Compares two verified announcements for the same Pod.
 ///
@@ -174,7 +268,7 @@ pub fn issue_and_retain_origin_pod_announcement(
     now: DateTime<Utc>,
 ) -> Result<PodAnnouncement, StoreError> {
     let announcement = build_signed_pod_announcement(store, node, pod, public_pod_url, now)?;
-    retain_verified_pod_announcement(store, announcement.clone(), None, None, now)?;
+    retain_verified_pod_announcement(store, announcement.clone(), DeliveryProvenance::LOCAL, now)?;
     Ok(announcement)
 }
 
@@ -289,6 +383,12 @@ pub fn refresh_public_pod_announcement_if_needed(
 
 /// Verifies and retains an Origin-signed announcement under lease preference rules.
 ///
+/// Delivery provenance merges when the retained signed announcement is the same
+/// identity: Bootstrap URLs accumulate, peer id and Index URL prefer newly
+/// supplied values while preserving prior sources when the new delivery omits
+/// them. A strictly preferred newer announcement starts provenance from this
+/// delivery only.
+///
 /// # Errors
 ///
 /// Returns typed store errors for invalid signatures, expired leases, withdrawn
@@ -296,8 +396,7 @@ pub fn refresh_public_pod_announcement_if_needed(
 pub fn retain_verified_pod_announcement(
     store: &mut InMemoryStore,
     announcement: PodAnnouncement,
-    received_from_peer_id: Option<Uuid>,
-    received_from_index_url: Option<String>,
+    provenance: DeliveryProvenance,
     now: DateTime<Utc>,
 ) -> Result<KnownPodAnnouncement, StoreError> {
     validate_public_pod_url(&announcement.public_pod_url, &announcement.pod_slug)?;
@@ -332,10 +431,40 @@ pub fn retain_verified_pod_announcement(
         }
     }
 
+    let (peer_id, index_url, mut bootstrap_urls) =
+        if let Some(existing) = store.known_pod_announcements.get(&key) {
+            if existing.announcement.id == announcement.id {
+                (
+                    provenance.peer_id.or(existing.received_from_peer_id),
+                    provenance
+                        .index_url
+                        .clone()
+                        .or_else(|| existing.received_from_index_url.clone()),
+                    existing.received_from_bootstrap_urls.clone(),
+                )
+            } else {
+                (
+                    provenance.peer_id,
+                    provenance.index_url.clone(),
+                    std::collections::BTreeSet::new(),
+                )
+            }
+        } else {
+            (
+                provenance.peer_id,
+                provenance.index_url.clone(),
+                std::collections::BTreeSet::new(),
+            )
+        };
+    if let Some(url) = provenance.bootstrap_url {
+        bootstrap_urls.insert(url);
+    }
+
     let known = KnownPodAnnouncement {
         announcement,
-        received_from_peer_id,
-        received_from_index_url,
+        received_from_peer_id: peer_id,
+        received_from_index_url: index_url,
+        received_from_bootstrap_urls: bootstrap_urls,
         received_at: now,
     };
     store.known_pod_announcements.insert(key, known.clone());
@@ -354,7 +483,7 @@ pub fn retain_verified_pod_announcement(
 pub fn retain_verified_pod_withdrawal(
     store: &mut InMemoryStore,
     withdrawal: PodWithdrawal,
-    received_from_peer_id: Option<Uuid>,
+    received_from_peer_id: Option<PeerId>,
     now: DateTime<Utc>,
 ) -> Result<KnownPodWithdrawal, StoreError> {
     if !withdrawal
@@ -413,6 +542,7 @@ mod tests {
     };
     use crate::signing::{create_node_identity, sign_pod_announcement};
     use chrono::TimeZone;
+    use uuid::Uuid;
 
     fn sample_announcement(
         node: &crate::domain::NodeIdentity,
@@ -452,13 +582,19 @@ mod tests {
         let mut store = InMemoryStore::default();
         let node = create_node_identity("origin", None);
         let first = sample_announcement(&node, t0, 1);
-        retain_verified_pod_announcement(&mut store, first.clone(), None, None, now).unwrap();
+        retain_verified_pod_announcement(&mut store, first.clone(), DeliveryProvenance::LOCAL, now)
+            .unwrap();
         let renewal = sample_announcement(&node, t1, 1);
-        let retained =
-            retain_verified_pod_announcement(&mut store, renewal.clone(), None, None, now).unwrap();
+        let retained = retain_verified_pod_announcement(
+            &mut store,
+            renewal.clone(),
+            DeliveryProvenance::LOCAL,
+            now,
+        )
+        .unwrap();
         assert_eq!(retained.announcement.id, renewal.id);
         assert!(matches!(
-            retain_verified_pod_announcement(&mut store, first, None, None, now),
+            retain_verified_pod_announcement(&mut store, first, DeliveryProvenance::LOCAL, now),
             Err(StoreError::AnnouncementStale)
         ));
     }
@@ -471,7 +607,12 @@ mod tests {
         let node = create_node_identity("origin", None);
         let announcement = sample_announcement(&node, announced, 1);
         assert!(matches!(
-            retain_verified_pod_announcement(&mut store, announcement, None, None, now),
+            retain_verified_pod_announcement(
+                &mut store,
+                announcement,
+                DeliveryProvenance::LOCAL,
+                now
+            ),
             Err(StoreError::AnnouncementExpired)
         ));
     }
@@ -500,7 +641,12 @@ mod tests {
         announcement.public_pod_url = "https://origin.example/wrong/path".into();
         announcement = sign_pod_announcement(&node, announcement).unwrap();
         assert!(matches!(
-            retain_verified_pod_announcement(&mut store, announcement, None, None, now),
+            retain_verified_pod_announcement(
+                &mut store,
+                announcement,
+                DeliveryProvenance::LOCAL,
+                now
+            ),
             Err(StoreError::Validation(_))
         ));
     }

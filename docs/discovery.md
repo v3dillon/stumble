@@ -39,6 +39,26 @@ Well-known node metadata advertises `bootstrap_announcements`, `bootstrap_announ
 
 Admission, stream entries, rejection audits, leases, and rate-limit bookkeeping persist transactionally in the authoritative SQLite store (`known_pod_announcements`, `known_pod_withdrawals`, `announcement_stream_entries`, `bootstrap_rejection_audits`, `bootstrap_runtime`). Focused temporary-SQLite coverage is in `crates/stumble-core/tests/bootstrap_admission_stream.rs` and `crates/stumble-api/tests/bootstrap_admission_stream.rs`.
 
+## Home Node outbound Bootstrap configuration and sync
+
+A newly initialized Home Node receives the sponsored Bootstrap base URL (`DEFAULT_SPONSORED_BOOTSTRAP_URL`, currently `https://bootstrap.stumble.network`) as an **ordinary removable** list entry (`enabled: true`, `is_sponsored_default: true`). The URL is configuration, not a protocol constant or authority for Pods, trust, or ranking.
+
+Bootstrap configuration is an ordered User-controlled list stored in SQLite (`bootstrap_endpoints`, `bootstrap_sync_states`). Operators may add, disable, enable, remove, and inspect multiple endpoints. Each endpoint persists its own Announcement Stream cursor, last success time, last attempt, and typed failure. Removing an endpoint drops its sync row; announcements remain as audit state. Eligibility requires at least one remaining active delivery source (enabled Bootstrap URL in provenance, configured Index URL, peer delivery, or local/origin retain with no remote sources). Sole-source announcements from a removed or disabled Bootstrap leave Explore eligibility while independently learned copies stay usable.
+
+Outbound sync walks enabled endpoints in order, `GET {base}/bootstrap/announcements/stream?cursor=&limit=`, verifies each entry locally via `retain_verified_*`, records `received_from_bootstrap_urls` provenance, and advances the per-endpoint cursor on success. Transport or protocol failure records a typed `BootstrapSyncFailure` and falls through to the next endpoint without discarding previously verified announcements. Outbound requests carry **only** cursor pagination fields—never Taste Profile, Subscriptions, feedback, Source Affinity, or interest-derived queries.
+
+Direct Pod URL validation and Subscription continue with every Bootstrap disabled or unavailable. Operator surfaces:
+
+| Surface | Behavior |
+|---------|----------|
+| `stumble sync bootstrap list\|status\|add\|disable\|enable\|remove` | CLI inspect/mutate config and report cursor + typed failure |
+| `GET/POST /home/bootstrap/endpoints` | List or add endpoints |
+| `PATCH/DELETE /home/bootstrap/endpoints/:id` | Enable/disable or remove |
+| `GET /home/bootstrap/status` | Endpoints with cursor, last success, typed failure |
+| `POST /home/bootstrap/sync` | Outbound multi-endpoint stream synchronization |
+
+Focused temporary-SQLite coverage is in `crates/stumble-core/tests/bootstrap_home_node_sync.rs` and unit tests under `bootstrap::client`.
+
 Changes to trusted peers, configured Index Nodes, and local Pod, node, source, or topic blocks pass through Pending Proposal approval. `explore_public_pods` applies that User-owned Trust Policy and does not create a Subscription. For an unsubscribed remote Pod, the Origin may separately produce a bounded signed `PodExploreSamples` artifact; the Home Node accepts it only for the exact current announcement and filters its Content References locally. Signed Pod Endorsements likewise bind the exact known current announcements of both public Pods before adding bounded, inspectable local ranking evidence. Neither signatures nor endorsements establish a global quality or reputation score.
 
 Announcement lease and withdrawal state persist in the authoritative SQLite store (`known_pod_announcements`, `known_pod_withdrawals`). The focused temporary-SQLite acceptance coverage is in `crates/stumble-core/tests/discovery_substrate.rs` and `crates/stumble-api/tests/discovery_announcements.rs`. Direct outbound addressing remains covered in `crates/stumble-cli/tests/direct_subscription.rs`.

@@ -263,6 +263,42 @@ pub(super) enum SyncWorkflow {
         #[command(subcommand)]
         command: SyncPodWorkflow,
     },
+    /// Inspect and synchronize User-controlled Bootstrap endpoints.
+    Bootstrap {
+        #[command(subcommand)]
+        command: BootstrapWorkflow,
+    },
+}
+
+#[derive(Subcommand)]
+pub(super) enum BootstrapWorkflow {
+    /// List configured Bootstrap endpoints in order.
+    List,
+    /// Report endpoints with cursor, last success, and typed failure.
+    Status,
+    /// Synchronize Announcement Streams from enabled Bootstrap endpoints.
+    Run,
+    /// Add a replaceable Bootstrap endpoint.
+    Add(BootstrapAddArgs),
+    /// Disable a Bootstrap endpoint without deleting audit state.
+    Disable(BootstrapIdArgs),
+    /// Re-enable a Bootstrap endpoint.
+    Enable(BootstrapIdArgs),
+    /// Remove a Bootstrap endpoint from configuration.
+    Remove(BootstrapIdArgs),
+}
+
+#[derive(Args)]
+pub(super) struct BootstrapAddArgs {
+    #[arg(long)]
+    pub(super) label: String,
+    #[arg(long)]
+    pub(super) base_url: String,
+}
+
+#[derive(Args)]
+pub(super) struct BootstrapIdArgs {
+    pub(super) id: String,
 }
 
 #[derive(Subcommand)]

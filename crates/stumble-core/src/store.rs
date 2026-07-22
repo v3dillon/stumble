@@ -121,6 +121,10 @@ pub struct InMemoryStore {
     pub bootstrap_rejection_audits: Vec<BootstrapRejectionAudit>,
     /// Bootstrap rate-limit and stream sequence bookkeeping.
     pub bootstrap_runtime: Option<BootstrapRuntimeState>,
+    /// Ordered User-controlled Bootstrap endpoints for outbound stream sync.
+    pub bootstrap_endpoints: HashMap<BootstrapEndpointId, BootstrapEndpointConfig>,
+    /// Per-endpoint Announcement Stream cursor and last-attempt state.
+    pub bootstrap_sync_states: HashMap<BootstrapEndpointId, BootstrapSyncState>,
     pub trust_policies: HashMap<(UserId, Option<TenantId>), TrustPolicy>,
     pub pod_endorsements: HashMap<Uuid, PodEndorsement>,
     pub pod_explore_sample_sets: HashMap<Uuid, PodExploreSamples>,
@@ -207,6 +211,10 @@ struct PersistedStore {
     /// Zero or one Bootstrap runtime bookkeeping record.
     #[serde(default)]
     bootstrap_runtime: Vec<BootstrapRuntimeState>,
+    #[serde(default)]
+    bootstrap_endpoints: Vec<BootstrapEndpointConfig>,
+    #[serde(default)]
+    bootstrap_sync_states: Vec<BootstrapSyncState>,
     #[serde(default)]
     trust_policies: Vec<TrustPolicy>,
     #[serde(default)]
@@ -459,6 +467,8 @@ impl From<&InMemoryStore> for PersistedStore {
                 .collect(),
             bootstrap_rejection_audits: store.bootstrap_rejection_audits.clone(),
             bootstrap_runtime: store.bootstrap_runtime.clone().into_iter().collect(),
+            bootstrap_endpoints: store.bootstrap_endpoints.values().cloned().collect(),
+            bootstrap_sync_states: store.bootstrap_sync_states.values().cloned().collect(),
             trust_policies: store.trust_policies.values().cloned().collect(),
             pod_endorsements: store.pod_endorsements.values().cloned().collect(),
             pod_explore_sample_sets: store.pod_explore_sample_sets.values().cloned().collect(),
@@ -686,6 +696,16 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .collect(),
             bootstrap_rejection_audits: snapshot.bootstrap_rejection_audits,
             bootstrap_runtime: snapshot.bootstrap_runtime.into_iter().next(),
+            bootstrap_endpoints: snapshot
+                .bootstrap_endpoints
+                .into_iter()
+                .map(|endpoint| (endpoint.id, endpoint))
+                .collect(),
+            bootstrap_sync_states: snapshot
+                .bootstrap_sync_states
+                .into_iter()
+                .map(|state| (state.endpoint_id, state))
+                .collect(),
             trust_policies: snapshot
                 .trust_policies
                 .into_iter()
@@ -864,6 +884,8 @@ const STORE_COLLECTIONS: &[&str] = &[
     "announcement_stream_entries",
     "bootstrap_rejection_audits",
     "bootstrap_runtime",
+    "bootstrap_endpoints",
+    "bootstrap_sync_states",
     "trust_policies",
     "pod_endorsements",
     "pod_explore_sample_sets",
@@ -1266,6 +1288,8 @@ fn record_key(
         "bootstrap_rejection_audits" => &["id"],
         // Singleton bookkeeping record; fixed key so upserts replace in place.
         "bootstrap_runtime" => return Ok("bootstrap".to_string()),
+        "bootstrap_endpoints" => &["id"],
+        "bootstrap_sync_states" => &["endpoint_id"],
         "pod_rules" | "pod_skill_packs" => &["pod_id"],
         "pod_curation_policies" => &["pod_id"],
         "pod_placements" => &["candidate_id", "pod_id"],

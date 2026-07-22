@@ -1,6 +1,9 @@
 use crate::bootstrap::{
-    admit_bootstrap_announcement, admit_bootstrap_withdrawal, project_bootstrap_withdrawal,
-    read_announcement_stream, OriginProbe, UnreachableOriginProbe,
+    add_bootstrap_endpoint, admit_bootstrap_announcement, admit_bootstrap_withdrawal,
+    apply_bootstrap_stream_pages, bootstrap_endpoint_statuses, ensure_default_bootstrap_endpoint,
+    fetch_bootstrap_stream_pages, list_bootstrap_endpoints, plan_bootstrap_sync,
+    project_bootstrap_withdrawal, read_announcement_stream, remove_bootstrap_endpoint,
+    set_bootstrap_endpoint_enabled, AnnouncementStreamClient, OriginProbe, UnreachableOriginProbe,
 };
 use crate::domain::*;
 use crate::feed_mix::{
@@ -22,9 +25,10 @@ use crate::personal_discovery::{
     BatchAvailabilityInput, DiscoveryResultLearningInput, TaskAvailabilityIdentity,
 };
 use crate::pod_announcement::{
-    announcement_is_discovery_eligible, issue_and_retain_origin_pod_announcement,
-    issue_origin_pod_withdrawal, refresh_public_pod_announcement_if_needed,
-    retain_verified_pod_announcement, retain_verified_pod_withdrawal, validate_public_pod_url,
+    announcement_delivery_is_active, announcement_is_discovery_eligible,
+    issue_and_retain_origin_pod_announcement, issue_origin_pod_withdrawal,
+    refresh_public_pod_announcement_if_needed, retain_verified_pod_announcement,
+    retain_verified_pod_withdrawal, validate_public_pod_url, DeliveryProvenance,
 };
 use crate::ranking::{rank_discovery, RankingInput};
 use crate::signing::{
@@ -7416,6 +7420,193 @@ impl AgentTools {
         Ok(page)
     }
 
+    /// Lists configured Bootstrap endpoints in order (User-controlled, removable).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when administration is denied or the store lock is poisoned.
+    pub fn list_bootstrap_endpoints(
+        &self,
+        ctx: &AuthContext,
+    ) -> Result<Vec<BootstrapEndpointConfig>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        Ok(list_bootstrap_endpoints(&store))
+    }
+
+    /// Reports configured Bootstrap endpoints with cursor and last-attempt state.
+    ///
+    /// Surfaces never include Taste Profile, Subscriptions, feedback, or other
+    /// private discovery evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when administration is denied or the store lock is poisoned.
+    pub fn bootstrap_status(
+        &self,
+        ctx: &AuthContext,
+    ) -> Result<Vec<BootstrapEndpointStatus>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        Ok(bootstrap_endpoint_statuses(&store))
+    }
+
+    /// Adds a Bootstrap endpoint to the ordered User-controlled list.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, duplicate, authorization, or persistence errors.
+    pub fn add_bootstrap_endpoint(
+        &self,
+        ctx: &AuthContext,
+        label: &str,
+        base_url: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<BootstrapEndpointConfig, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        let endpoint = add_bootstrap_endpoint(&mut store, label, base_url, now)?;
+        self.persist_locked(&mut store)?;
+        Ok(endpoint)
+    }
+
+    /// Enables or disables a configured Bootstrap endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found, authorization, or persistence errors.
+    pub fn set_bootstrap_endpoint_enabled(
+        &self,
+        ctx: &AuthContext,
+        endpoint_id: BootstrapEndpointId,
+        enabled: bool,
+    ) -> Result<BootstrapEndpointConfig, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        let endpoint = set_bootstrap_endpoint_enabled(&mut store, endpoint_id, enabled)?;
+        self.persist_locked(&mut store)?;
+        Ok(endpoint)
+    }
+
+    /// Removes a Bootstrap endpoint from configuration.
+    ///
+    /// Announcements known only through this endpoint leave current eligibility
+    /// while remaining in the local audit store.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found, authorization, or persistence errors.
+    pub fn remove_bootstrap_endpoint(
+        &self,
+        ctx: &AuthContext,
+        endpoint_id: BootstrapEndpointId,
+    ) -> Result<BootstrapEndpointConfig, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        let endpoint = remove_bootstrap_endpoint(&mut store, endpoint_id)?;
+        self.persist_locked(&mut store)?;
+        Ok(endpoint)
+    }
+
+    /// Ensures the sponsored default Bootstrap endpoint is present for new nodes.
+    ///
+    /// Idempotent: does nothing when any Bootstrap endpoint is already configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization or persistence errors.
+    pub fn ensure_default_bootstrap_endpoint(
+        &self,
+        ctx: &AuthContext,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Vec<BootstrapEndpointConfig>, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        ensure_default_bootstrap_endpoint(&mut store, now);
+        self.persist_locked(&mut store)?;
+        Ok(list_bootstrap_endpoints(&store))
+    }
+
+    /// Synchronizes Announcement Streams from each enabled Bootstrap in order.
+    ///
+    /// On transport or protocol failure the pass falls through to the next
+    /// configured endpoint without discarding previously verified announcements.
+    /// Outbound requests carry only cursor pagination fields.
+    ///
+    /// Network I/O runs **outside** the store write lock: endpoints and cursors
+    /// are snapshotted under a read lock, pages are fetched without holding the
+    /// store, and each endpoint is applied + persisted under a short write lock
+    /// so partial progress survives.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization or persistence errors. Per-endpoint typed failures
+    /// are reported inside the [`BootstrapSyncReport`], not as hard errors.
+    pub fn sync_bootstrap_endpoints(
+        &self,
+        ctx: &AuthContext,
+        client: &dyn AnnouncementStreamClient,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<BootstrapSyncReport, AgentToolsError> {
+        let plans = {
+            let store = self
+                .store
+                .read()
+                .map_err(|_| AgentToolsError::LockPoisoned)?;
+            authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+            plan_bootstrap_sync(&store)
+        };
+
+        let mut outcomes = Vec::with_capacity(plans.len());
+        let mut retained_announcements = 0usize;
+        let mut retained_withdrawals = 0usize;
+
+        for plan in plans {
+            // Fetch without holding the store lock (no network I/O under write).
+            let fetched =
+                fetch_bootstrap_stream_pages(client, &plan.endpoint.base_url, plan.cursor);
+            let outcome = {
+                let mut store = self
+                    .store
+                    .write()
+                    .map_err(|_| AgentToolsError::LockPoisoned)?;
+                let outcome =
+                    apply_bootstrap_stream_pages(&mut store, &plan.endpoint, fetched, now);
+                self.persist_locked(&mut store)?;
+                outcome
+            };
+            retained_announcements =
+                retained_announcements.saturating_add(outcome.retained_announcements);
+            retained_withdrawals =
+                retained_withdrawals.saturating_add(outcome.retained_withdrawals);
+            outcomes.push(outcome);
+        }
+
+        Ok(BootstrapSyncReport {
+            outcomes,
+            retained_announcements,
+            retained_withdrawals,
+        })
+    }
+
     pub fn pod_manifest(
         &self,
         ctx: &AuthContext,
@@ -7789,8 +7980,12 @@ impl AgentTools {
         if peer.tenant_id != ctx.tenant_id || !peer.enabled {
             return Err(StoreError::UntrustedPeer.into());
         }
-        let known =
-            retain_verified_pod_announcement(&mut store, announcement, Some(peer_id), None, now)?;
+        let known = retain_verified_pod_announcement(
+            &mut store,
+            announcement,
+            DeliveryProvenance::peer(peer_id),
+            now,
+        )?;
         record_harness_write(
             &mut store,
             ctx,
@@ -7828,7 +8023,12 @@ impl AgentTools {
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
-        let known = retain_verified_pod_announcement(&mut store, announcement, None, None, now)?;
+        let known = retain_verified_pod_announcement(
+            &mut store,
+            announcement,
+            DeliveryProvenance::LOCAL,
+            now,
+        )?;
         self.persist_locked(&mut store)?;
         Ok(known)
     }
@@ -8027,8 +8227,7 @@ impl AgentTools {
             if let Err(error) = retain_verified_pod_announcement(
                 &mut store,
                 result.announcement,
-                None,
-                Some(index_base_url.clone()),
+                DeliveryProvenance::index(index_base_url.clone()),
                 now,
             ) {
                 store.known_pod_announcements = before_import;
@@ -8266,11 +8465,7 @@ impl AgentTools {
                 if !announcement_is_discovery_eligible(&store, announcement, now) {
                     return None;
                 }
-                if known
-                    .received_from_index_url
-                    .as_ref()
-                    .is_some_and(|source| !policy.retains_index_url(source))
-                {
+                if !announcement_delivery_is_active(&store, known, Some(&policy)) {
                     return None;
                 }
                 if policy.blocks_announcement(announcement) {

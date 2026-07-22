@@ -396,11 +396,7 @@ fn announcement_is_usable(
     policy: &TrustPolicy,
     known: &KnownPodAnnouncement,
 ) -> bool {
-    if known
-        .received_from_index_url
-        .as_ref()
-        .is_some_and(|source| !policy.retains_index_url(source))
-    {
+    if !crate::pod_announcement::announcement_delivery_is_active(store, known, Some(policy)) {
         return false;
     }
     if policy.blocks_announcement(&known.announcement) {

@@ -4847,8 +4847,197 @@ pub struct KnownPodAnnouncement {
     /// Configured Index Node that returned it, absent for peer/direct indexing.
     #[serde(default)]
     pub received_from_index_url: Option<String>,
+    /// Bootstrap base URLs that delivered this announcement (multi-source).
+    ///
+    /// Removing a configured Bootstrap excludes announcements whose *only*
+    /// remaining delivery source was that endpoint from current eligibility
+    /// while preserving this audit row.
+    #[serde(default)]
+    pub received_from_bootstrap_urls: BTreeSet<String>,
     /// Time at which this node verified and retained it.
     pub received_at: DateTime<Utc>,
+}
+
+/// Stable identity of one configured Bootstrap endpoint on a Home Node.
+pub type BootstrapEndpointId = Uuid;
+
+/// Sponsored Bootstrap base URL inserted into new Home Node config as an ordinary
+/// removable default. Not a protocol constant and not an authority for Pods.
+pub const DEFAULT_SPONSORED_BOOTSTRAP_URL: &str = "https://bootstrap.stumble.network";
+
+/// User-controlled Bootstrap endpoint configuration entry.
+///
+/// Ordered list entries are ordinary config: addable, disableable, and removable.
+/// The sponsored default is one such entry, never a network-wide singleton.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct BootstrapEndpointConfig {
+    /// Stable local identity of this endpoint entry.
+    pub id: BootstrapEndpointId,
+    /// Human-readable local label.
+    pub label: String,
+    /// HTTPS base address used for outbound Announcement Stream fetches.
+    pub base_url: String,
+    /// When false, the endpoint is skipped during sync and no longer provides
+    /// eligibility provenance for sole-source announcements.
+    pub enabled: bool,
+    /// Ascending sync order among configured endpoints.
+    pub order: u32,
+    /// Whether this entry was seeded as the sponsored distribution default.
+    pub is_sponsored_default: bool,
+    /// Time at which this entry was added to local config.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Per-Bootstrap synchronization cursor and last-attempt bookkeeping.
+///
+/// Survives SQLite restart so refresh resumes without replaying history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct BootstrapSyncState {
+    /// Configured endpoint this progress belongs to.
+    pub endpoint_id: BootstrapEndpointId,
+    /// Opaque stream cursor last successfully consumed, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Time of the last fully successful page consumption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_success_at: Option<DateTime<Utc>>,
+    /// Time of the most recent sync attempt (success or failure).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    /// Typed failure from the most recent unsuccessful attempt, cleared on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<BootstrapSyncFailure>,
+}
+
+/// Typed outbound Bootstrap synchronization failure for operators.
+///
+/// Contains no Taste Profile, Subscription, feedback, or other private evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct BootstrapSyncFailure {
+    /// Stable machine-readable failure class.
+    pub kind: BootstrapSyncFailureKind,
+    /// Human-readable detail safe for operators (no private evidence).
+    pub message: String,
+}
+
+impl BootstrapSyncFailure {
+    /// Builds a typed operator-facing sync failure.
+    #[must_use]
+    pub fn new(kind: BootstrapSyncFailureKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+/// Stable classes of outbound Bootstrap sync failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BootstrapSyncFailureKind {
+    /// Transport-level failure (DNS, connection, timeout, HTTP transport).
+    Transport,
+    /// Remote protocol response was unusable (status, shape, or version).
+    Protocol,
+    /// Stream page or cursor was malformed.
+    Malformed,
+    /// A delivered announcement failed local signature verification.
+    InvalidSignature,
+    /// A delivered announcement failed local validation (URL, lease, identity).
+    Validation,
+}
+
+impl BootstrapSyncFailureKind {
+    /// Wire code returned on operator surfaces.
+    #[must_use]
+    pub const fn as_code(self) -> &'static str {
+        match self {
+            Self::Transport => "transport",
+            Self::Protocol => "protocol",
+            Self::Malformed => "malformed",
+            Self::InvalidSignature => "invalid_signature",
+            Self::Validation => "validation",
+        }
+    }
+}
+
+impl std::fmt::Display for BootstrapSyncFailureKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_code())
+    }
+}
+
+/// Operator view of one Bootstrap endpoint plus its sync progress.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct BootstrapEndpointStatus {
+    /// Configured endpoint.
+    pub endpoint: BootstrapEndpointConfig,
+    /// Persisted cursor and last-attempt state for this endpoint.
+    pub sync: BootstrapSyncState,
+}
+
+/// Summary of one outbound Bootstrap synchronization pass.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct BootstrapSyncReport {
+    /// Per-endpoint outcomes in configuration order.
+    pub outcomes: Vec<BootstrapSyncEndpointOutcome>,
+    /// Total announcements newly retained or refreshed this pass.
+    pub retained_announcements: usize,
+    /// Total withdrawals retained this pass.
+    pub retained_withdrawals: usize,
+}
+
+/// Outcome of attempting sync against one Bootstrap endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct BootstrapSyncEndpointOutcome {
+    /// Endpoint identity.
+    pub endpoint_id: BootstrapEndpointId,
+    /// Endpoint base URL (public network address only).
+    pub base_url: String,
+    /// Whether this endpoint completed successfully.
+    pub ok: bool,
+    /// Pages successfully consumed from this endpoint.
+    pub pages_fetched: usize,
+    /// Announcements retained from this endpoint during the pass.
+    pub retained_announcements: usize,
+    /// Withdrawals retained from this endpoint during the pass.
+    pub retained_withdrawals: usize,
+    /// Cursor after this attempt, when advanced or already present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Typed failure when `ok` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<BootstrapSyncFailure>,
+}
+
+/// Outbound Announcement Stream fetch request.
+///
+/// Intentionally carries only cursor pagination fields. Home Nodes must never
+/// attach Taste Profile, Subscriptions, feedback, Source Affinity, or
+/// interest-derived queries to Bootstrap synchronization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct BootstrapStreamRequest {
+    /// Opaque resume cursor; absent starts at the beginning of the stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Optional page size bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 /// One query match returned by a replaceable Index Node.
@@ -5010,6 +5199,28 @@ pub struct AnnouncementStreamEntry {
     pub payload: AnnouncementStreamPayload,
 }
 
+impl AnnouncementStreamEntry {
+    /// Builds one stream lifecycle entry.
+    #[must_use]
+    pub fn new(
+        sequence: u64,
+        recorded_at: DateTime<Utc>,
+        kind: AnnouncementStreamEventKind,
+        origin_node_id: NodeIdentityId,
+        pod_slug: impl Into<String>,
+        payload: AnnouncementStreamPayload,
+    ) -> Self {
+        Self {
+            sequence,
+            recorded_at,
+            kind,
+            origin_node_id,
+            pod_slug: pod_slug.into(),
+            payload,
+        }
+    }
+}
+
 /// Cursor-paginated page of a topic-neutral Announcement Stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -5022,6 +5233,22 @@ pub struct AnnouncementStreamPage {
     pub next_cursor: Option<String>,
     /// Effective page bound applied by the server.
     pub limit: usize,
+}
+
+impl AnnouncementStreamPage {
+    /// Builds one stream page for tests and scripted transports.
+    #[must_use]
+    pub fn new(
+        entries: Vec<AnnouncementStreamEntry>,
+        next_cursor: Option<String>,
+        limit: usize,
+    ) -> Self {
+        Self {
+            entries,
+            next_cursor,
+            limit,
+        }
+    }
 }
 
 /// Successful open Bootstrap admission outcome.

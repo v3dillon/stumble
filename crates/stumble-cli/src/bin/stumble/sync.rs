@@ -2,16 +2,87 @@ use super::{
     agent_tools_error, internal_error, page, parse_id, peer_sync_error, peer_sync_failure_code,
     peer_sync_failure_is_retryable, resolve_pod, CliResult,
 };
-use crate::parser::{PeerWorkflow, SyncPodWorkflow, SyncWorkflow};
+use crate::parser::{BootstrapWorkflow, PeerWorkflow, SyncPodWorkflow, SyncWorkflow};
 use serde_json::json;
 use stumble_core::{
-    AgentTools, AuthContext, HarnessCapability, NodeInfo, PeerId, CURRENT_PROTOCOL_VERSION,
+    AgentTools, AuthContext, BootstrapEndpointId, HarnessCapability, NodeInfo, PeerId,
+    CURRENT_PROTOCOL_VERSION,
 };
 
 pub(super) fn execute(command: SyncWorkflow, tools: &AgentTools, actor: &AuthContext) -> CliResult {
     match command {
         SyncWorkflow::Peer { command } => execute_peer(command, tools, actor),
         SyncWorkflow::Pod { command } => execute_pod(command, tools, actor),
+        SyncWorkflow::Bootstrap { command } => execute_bootstrap(command, tools, actor),
+    }
+}
+
+fn execute_bootstrap(
+    command: BootstrapWorkflow,
+    tools: &AgentTools,
+    actor: &AuthContext,
+) -> CliResult {
+    match command {
+        BootstrapWorkflow::List => serde_json::to_value(
+            tools
+                .list_bootstrap_endpoints(actor)
+                .map_err(agent_tools_error)?,
+        )
+        .map_err(internal_error),
+        BootstrapWorkflow::Status => {
+            serde_json::to_value(tools.bootstrap_status(actor).map_err(agent_tools_error)?)
+                .map_err(internal_error)
+        }
+        BootstrapWorkflow::Run => {
+            // Multi-thread runtime so the sync client can block_on HTTP off the
+            // store write path without nesting on a current_thread runtime.
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .map_err(internal_error)?;
+            let client =
+                stumble_api::ReqwestAnnouncementStreamClient::new(runtime.handle().clone());
+            let report = tools
+                .sync_bootstrap_endpoints(actor, &client, chrono::Utc::now())
+                .map_err(agent_tools_error)?;
+            // Keep runtime alive until all block_on calls finish.
+            drop(runtime);
+            serde_json::to_value(report).map_err(internal_error)
+        }
+        BootstrapWorkflow::Add(args) => serde_json::to_value(
+            tools
+                .add_bootstrap_endpoint(actor, &args.label, &args.base_url, chrono::Utc::now())
+                .map_err(agent_tools_error)?,
+        )
+        .map_err(internal_error),
+        BootstrapWorkflow::Disable(args) => {
+            let id = parse_id::<BootstrapEndpointId>(&args.id)?;
+            serde_json::to_value(
+                tools
+                    .set_bootstrap_endpoint_enabled(actor, id, false)
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error)
+        }
+        BootstrapWorkflow::Enable(args) => {
+            let id = parse_id::<BootstrapEndpointId>(&args.id)?;
+            serde_json::to_value(
+                tools
+                    .set_bootstrap_endpoint_enabled(actor, id, true)
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error)
+        }
+        BootstrapWorkflow::Remove(args) => {
+            let id = parse_id::<BootstrapEndpointId>(&args.id)?;
+            serde_json::to_value(
+                tools
+                    .remove_bootstrap_endpoint(actor, id)
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error)
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-//! Open Bootstrap admission and topic-neutral Announcement Streams.
+//! Open Bootstrap admission, Announcement Streams, and Home Node outbound sync.
 //!
 //! A Bootstrap-capable node accepts verifiable public Pod Announcements without
 //! User accounts or Trusted Peer relationships. Admission verifies origin
@@ -6,20 +6,33 @@
 //! compatibility, lease, and resource bounds. It never assigns trust, quality,
 //! rank, or personalized ordering.
 //!
+//! Home Nodes also maintain a User-controlled list of Bootstrap endpoints and
+//! fetch stream pages outbound through [`client`].
+//!
 //! # Module layout
 //!
 //! - [`probe`] — Origin reachability / public-manifest port
 //! - [`admit`] — open announcement and withdrawal admission
 //! - [`stream`] — cursor-paginated Announcement Stream and expiry transitions
 //! - [`types`] — bounds, audit helpers, Bootstrap-admitted key bookkeeping
+//! - [`client`] — Home Node outbound Bootstrap config and stream synchronization
 
 mod admit;
+mod client;
 mod probe;
 mod stream;
 mod types;
 
 pub use admit::{
     admit_bootstrap_announcement, admit_bootstrap_withdrawal, count_active_origin_announcements,
+};
+pub use client::{
+    add_bootstrap_endpoint, apply_bootstrap_stream_pages, bootstrap_endpoint_statuses,
+    ensure_default_bootstrap_endpoint, fetch_bootstrap_stream_pages, list_bootstrap_endpoints,
+    normalize_bootstrap_base_url, plan_bootstrap_sync, remove_bootstrap_endpoint,
+    request_is_public_only, set_bootstrap_endpoint_enabled, sync_bootstrap_endpoints,
+    AnnouncementStreamClient, BootstrapEndpointSyncPlan, FetchedBootstrapStream,
+    ScriptedAnnouncementStreamClient,
 };
 pub use probe::{
     manifest_matches, probe_view_matching, FixedOriginProbe, OriginProbe, OriginProbeError,
@@ -178,7 +191,10 @@ mod tests {
         let other = create_node_identity("other", None);
         let peer_only = sample_announcement(&other, announced, "peer-only");
         crate::pod_announcement::retain_verified_pod_announcement(
-            &mut store, peer_only, None, None, announced,
+            &mut store,
+            peer_only,
+            crate::pod_announcement::DeliveryProvenance::LOCAL,
+            announced,
         )
         .unwrap();
 

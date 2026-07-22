@@ -176,8 +176,13 @@ pub fn admit_bootstrap_announcement(
     }
 
     // --- Single retain/verification primitive ---
-    let known = retain_verified_pod_announcement(store, announcement, None, None, now)
-        .map_err(|error| reject(store, map_store_error(error), &subject, now))?;
+    let known = retain_verified_pod_announcement(
+        store,
+        announcement,
+        crate::pod_announcement::DeliveryProvenance::LOCAL,
+        now,
+    )
+    .map_err(|error| reject(store, map_store_error(error), &subject, now))?;
 
     mark_bootstrap_admitted(
         store,
