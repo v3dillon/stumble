@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 /// Federation and adapter contract understood by this first-release node.
@@ -4873,6 +4873,269 @@ pub struct PodAnnouncementSearchResponse {
     pub query: String,
     /// Replaceable results backed by verified signed announcements.
     pub results: Vec<PodAnnouncementSearchResult>,
+}
+
+/// Stable machine-readable reason a Bootstrap Node rejected open admission.
+///
+/// Reasons are inspectable by Origins and operators. They do not encode quality,
+/// trust, rank, or personalized policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BootstrapAdmissionRejectionReason {
+    /// Payload failed structural or canonical-field validation.
+    Malformed,
+    /// Origin identity fields are inconsistent or unusable.
+    InvalidIdentity,
+    /// Signature verification failed.
+    InvalidSignature,
+    /// Canonical Origin endpoint was not reachable (transport/DNS).
+    UnreachableOrigin,
+    /// Origin responded but did not yield a usable public manifest.
+    ManifestUnavailable,
+    /// Advertised protocol is not compatible with this Bootstrap Node.
+    IncompatibleProtocol,
+    /// Announcement Lease is expired or otherwise not current.
+    StaleLease,
+    /// A covering Pod Withdrawal already ends discovery for this Pod.
+    AnnouncementWithdrawn,
+    /// Per-network or per-Origin admission rate limit was exceeded.
+    RateLimited,
+    /// Signed payload exceeded the bounded size accepted by open admission.
+    PayloadTooLarge,
+    /// Reachable manifest does not match the signed announcement.
+    ManifestMismatch,
+    /// Origin already holds the maximum number of active admitted Pods.
+    OriginQuotaExceeded,
+    /// This node does not currently enable Bootstrap admission.
+    BootstrapDisabled,
+}
+
+impl BootstrapAdmissionRejectionReason {
+    /// Wire code returned on public Bootstrap rejection responses.
+    #[must_use]
+    pub const fn as_code(self) -> &'static str {
+        match self {
+            Self::Malformed => "malformed",
+            Self::InvalidIdentity => "invalid_identity",
+            Self::InvalidSignature => "invalid_signature",
+            Self::UnreachableOrigin => "unreachable_origin",
+            Self::ManifestUnavailable => "manifest_unavailable",
+            Self::IncompatibleProtocol => "incompatible_protocol",
+            Self::StaleLease => "stale_lease",
+            Self::AnnouncementWithdrawn => "announcement_withdrawn",
+            Self::RateLimited => "rate_limited",
+            Self::PayloadTooLarge => "payload_too_large",
+            Self::ManifestMismatch => "manifest_mismatch",
+            Self::OriginQuotaExceeded => "origin_quota_exceeded",
+            Self::BootstrapDisabled => "bootstrap_disabled",
+        }
+    }
+}
+
+impl std::fmt::Display for BootstrapAdmissionRejectionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_code())
+    }
+}
+
+/// Lifecycle kind recorded in a topic-neutral Announcement Stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AnnouncementStreamEventKind {
+    /// Newly admitted public Pod Announcement.
+    Admitted,
+    /// Lease or public-metadata renewal of an already admitted Pod.
+    Renewed,
+    /// Origin-signed withdrawal ending new discovery for the Pod.
+    Withdrawn,
+    /// Lease expiry transition emitted by the Bootstrap/Index node.
+    Expired,
+}
+
+/// Typed public artifact carried by an Announcement Stream entry.
+///
+/// Exactly one variant is present; admission and withdrawal are not dual
+/// optional fields on the same record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AnnouncementStreamPayload {
+    /// Origin-signed announcement for admitted, renewed, or expired transitions.
+    Announcement(PodAnnouncement),
+    /// Origin-signed withdrawal for withdrawn transitions.
+    Withdrawal(PodWithdrawal),
+}
+
+impl AnnouncementStreamPayload {
+    /// Returns the announcement body when this payload carries one.
+    #[must_use]
+    pub fn as_announcement(&self) -> Option<&PodAnnouncement> {
+        match self {
+            Self::Announcement(announcement) => Some(announcement),
+            Self::Withdrawal(_) => None,
+        }
+    }
+
+    /// Returns the withdrawal body when this payload carries one.
+    #[must_use]
+    pub fn as_withdrawal(&self) -> Option<&PodWithdrawal> {
+        match self {
+            Self::Withdrawal(withdrawal) => Some(withdrawal),
+            Self::Announcement(_) => None,
+        }
+    }
+}
+
+/// One ordered lifecycle record in an Announcement Stream.
+///
+/// Entries carry only public Origin-signed discovery artifacts. They never
+/// include Taste Profiles, Subscriptions, feedback, or personalized ranking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct AnnouncementStreamEntry {
+    /// Monotonic stream position used as a resume cursor.
+    pub sequence: u64,
+    /// Time at which this Bootstrap/Index node recorded the transition.
+    pub recorded_at: DateTime<Utc>,
+    /// Lifecycle transition kind.
+    pub kind: AnnouncementStreamEventKind,
+    /// Origin Node of the affected public Pod.
+    pub origin_node_id: NodeIdentityId,
+    /// Public Pod slug affected by the transition.
+    pub pod_slug: String,
+    /// Typed Origin-signed artifact for this lifecycle transition.
+    pub payload: AnnouncementStreamPayload,
+}
+
+/// Cursor-paginated page of a topic-neutral Announcement Stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct AnnouncementStreamPage {
+    /// Stream entries strictly after the request cursor, in sequence order.
+    pub entries: Vec<AnnouncementStreamEntry>,
+    /// Opaque cursor to resume after the last returned entry, if more may exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Effective page bound applied by the server.
+    pub limit: usize,
+}
+
+/// Successful open Bootstrap admission outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct BootstrapAdmissionAcceptance {
+    /// Whether admission was newly applied or an idempotent replay.
+    pub outcome: BootstrapAdmissionOutcomeKind,
+    /// Verified announcement retained by this Bootstrap Node.
+    pub known: KnownPodAnnouncement,
+    /// Stream sequence assigned when a lifecycle entry was appended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_sequence: Option<u64>,
+}
+
+/// Distinguishes first-time admission, renewals, and pure idempotent replays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BootstrapAdmissionOutcomeKind {
+    /// First acceptance of this public Pod into Bootstrap state.
+    Admitted,
+    /// Preferable renewal of an already admitted public Pod.
+    Renewed,
+    /// Canonically identical submission already present; no new stream effect.
+    Idempotent,
+}
+
+/// Distinguishes first-time withdrawal admission from pure idempotent replays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BootstrapWithdrawalOutcomeKind {
+    /// Withdrawal newly applied to Bootstrap-admitted state.
+    Admitted,
+    /// Canonically identical withdrawal already present; no new stream effect.
+    Idempotent,
+}
+
+/// Minimal operator audit record for a rejected open admission attempt.
+///
+/// Contains no User identifiers, Taste Profile data, or product analytics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct BootstrapRejectionAudit {
+    /// Stable audit identity.
+    pub id: Uuid,
+    /// Origin Node when identity could be parsed from the submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_node_id: Option<NodeIdentityId>,
+    /// Origin public key when present on the submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_public_key: Option<String>,
+    /// Announced Pod slug when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_slug: Option<String>,
+    /// Stable machine-readable rejection reason.
+    pub reason: BootstrapAdmissionRejectionReason,
+    /// Time at which rejection was recorded.
+    pub rejected_at: DateTime<Utc>,
+}
+
+/// Origin Pod identity key used by Bootstrap-admitted bookkeeping.
+pub type BootstrapAdmittedKey = (NodeIdentityId, String);
+
+/// Rate-limit and stream bookkeeping for Bootstrap open admission.
+///
+/// Persisted so limits and cursors survive process restart. Only keys in
+/// [`Self::admitted_keys`] are treated as Bootstrap-admitted for quota,
+/// expiry transitions, and stream lifecycle effects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct BootstrapRuntimeState {
+    /// Next monotonic Announcement Stream sequence number (starts at 1).
+    pub next_stream_sequence: u64,
+    /// Timestamps of recent admission attempts used for per-network limits.
+    pub recent_network_admissions: Vec<DateTime<Utc>>,
+    /// Recent per-Origin admission attempt timestamps.
+    pub recent_origin_admissions: BTreeMap<NodeIdentityId, Vec<DateTime<Utc>>>,
+    /// Public Pod keys admitted through open Bootstrap (not all known announcements).
+    ///
+    /// Expiry and withdrawal are terminal for this set: keys leave after one
+    /// lifecycle effect so the set remains bounded to currently active admissions.
+    pub admitted_keys: BTreeSet<BootstrapAdmittedKey>,
+}
+
+impl Default for BootstrapRuntimeState {
+    fn default() -> Self {
+        Self {
+            // Sequence positions are 1-based so an empty cursor (`after = 0`)
+            // resumes from the beginning without skipping the first entry.
+            next_stream_sequence: 1,
+            recent_network_admissions: Vec::new(),
+            recent_origin_admissions: BTreeMap::new(),
+            admitted_keys: BTreeSet::new(),
+        }
+    }
+}
+
+/// Successful open Bootstrap withdrawal admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct BootstrapWithdrawalAcceptance {
+    /// Whether withdrawal was newly applied or an idempotent replay.
+    pub outcome: BootstrapWithdrawalOutcomeKind,
+    /// Verified withdrawal retained by this Bootstrap Node.
+    pub known: KnownPodWithdrawal,
+    /// Stream sequence assigned when a lifecycle entry was appended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_sequence: Option<u64>,
 }
 
 /// Signed recommendation of one public Pod by another public Pod.

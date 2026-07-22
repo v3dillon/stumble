@@ -115,6 +115,12 @@ pub struct InMemoryStore {
     pub trusted_peers: HashMap<PeerId, TrustedPeer>,
     pub known_pod_announcements: HashMap<(NodeIdentityId, String), KnownPodAnnouncement>,
     pub known_pod_withdrawals: HashMap<(NodeIdentityId, String), KnownPodWithdrawal>,
+    /// Topic-neutral Announcement Stream log keyed by monotonic sequence.
+    pub announcement_stream_entries: BTreeMap<u64, AnnouncementStreamEntry>,
+    /// Minimal operator audit of Bootstrap admission rejections.
+    pub bootstrap_rejection_audits: Vec<BootstrapRejectionAudit>,
+    /// Bootstrap rate-limit and stream sequence bookkeeping.
+    pub bootstrap_runtime: Option<BootstrapRuntimeState>,
     pub trust_policies: HashMap<(UserId, Option<TenantId>), TrustPolicy>,
     pub pod_endorsements: HashMap<Uuid, PodEndorsement>,
     pub pod_explore_sample_sets: HashMap<Uuid, PodExploreSamples>,
@@ -194,6 +200,13 @@ struct PersistedStore {
     known_pod_announcements: Vec<KnownPodAnnouncement>,
     #[serde(default)]
     known_pod_withdrawals: Vec<KnownPodWithdrawal>,
+    #[serde(default)]
+    announcement_stream_entries: Vec<AnnouncementStreamEntry>,
+    #[serde(default)]
+    bootstrap_rejection_audits: Vec<BootstrapRejectionAudit>,
+    /// Zero or one Bootstrap runtime bookkeeping record.
+    #[serde(default)]
+    bootstrap_runtime: Vec<BootstrapRuntimeState>,
     #[serde(default)]
     trust_policies: Vec<TrustPolicy>,
     #[serde(default)]
@@ -439,6 +452,13 @@ impl From<&InMemoryStore> for PersistedStore {
             trusted_peers: store.trusted_peers.values().cloned().collect(),
             known_pod_announcements: store.known_pod_announcements.values().cloned().collect(),
             known_pod_withdrawals: store.known_pod_withdrawals.values().cloned().collect(),
+            announcement_stream_entries: store
+                .announcement_stream_entries
+                .values()
+                .cloned()
+                .collect(),
+            bootstrap_rejection_audits: store.bootstrap_rejection_audits.clone(),
+            bootstrap_runtime: store.bootstrap_runtime.clone().into_iter().collect(),
             trust_policies: store.trust_policies.values().cloned().collect(),
             pod_endorsements: store.pod_endorsements.values().cloned().collect(),
             pod_explore_sample_sets: store.pod_explore_sample_sets.values().cloned().collect(),
@@ -659,6 +679,13 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                     )
                 })
                 .collect(),
+            announcement_stream_entries: snapshot
+                .announcement_stream_entries
+                .into_iter()
+                .map(|entry| (entry.sequence, entry))
+                .collect(),
+            bootstrap_rejection_audits: snapshot.bootstrap_rejection_audits,
+            bootstrap_runtime: snapshot.bootstrap_runtime.into_iter().next(),
             trust_policies: snapshot
                 .trust_policies
                 .into_iter()
@@ -834,6 +861,9 @@ const STORE_COLLECTIONS: &[&str] = &[
     "trusted_peers",
     "known_pod_announcements",
     "known_pod_withdrawals",
+    "announcement_stream_entries",
+    "bootstrap_rejection_audits",
+    "bootstrap_runtime",
     "trust_policies",
     "pod_endorsements",
     "pod_explore_sample_sets",
@@ -1232,6 +1262,10 @@ fn record_key(
                     .unwrap_or(serde_json::Value::Null),
             ])?);
         }
+        "announcement_stream_entries" => &["sequence"],
+        "bootstrap_rejection_audits" => &["id"],
+        // Singleton bookkeeping record; fixed key so upserts replace in place.
+        "bootstrap_runtime" => return Ok("bootstrap".to_string()),
         "pod_rules" | "pod_skill_packs" => &["pod_id"],
         "pod_curation_policies" => &["pod_id"],
         "pod_placements" => &["candidate_id", "pod_id"],

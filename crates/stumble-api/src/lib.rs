@@ -68,6 +68,7 @@ impl IntoResponse for ApiError {
 fn agent_tools_error_code(error: &AgentToolsError) -> &'static str {
     match error {
         AgentToolsError::Forbidden { .. } => "forbidden",
+        AgentToolsError::BootstrapRejected { reason, .. } => reason.as_code(),
         AgentToolsError::Store(StoreError::InvalidSignature) | AgentToolsError::Signing(_) => {
             "invalid_signature"
         }
@@ -97,6 +98,22 @@ impl From<AgentToolsError> for ApiError {
             AgentToolsError::LockPoisoned | AgentToolsError::Persistence(_)
         ) {
             StatusCode::INTERNAL_SERVER_ERROR
+        } else if matches!(
+            value,
+            AgentToolsError::BootstrapRejected {
+                reason: BootstrapAdmissionRejectionReason::RateLimited,
+                ..
+            }
+        ) {
+            StatusCode::TOO_MANY_REQUESTS
+        } else if matches!(
+            value,
+            AgentToolsError::BootstrapRejected {
+                reason: BootstrapAdmissionRejectionReason::BootstrapDisabled,
+                ..
+            }
+        ) {
+            StatusCode::NOT_FOUND
         } else {
             StatusCode::BAD_REQUEST
         };
@@ -250,6 +267,15 @@ pub fn router_with_options(
             "/discovery/withdrawals/receive",
             post(receive_pod_withdrawal),
         )
+        .route(
+            "/bootstrap/announcements",
+            post(bootstrap_admit_announcement),
+        )
+        .route(
+            "/bootstrap/announcements/stream",
+            get(bootstrap_announcement_stream),
+        )
+        .route("/bootstrap/withdrawals", post(bootstrap_admit_withdrawal))
         .route("/home/discover-public-pods", get(home_discover_public_pods))
         .route("/auth/dev-token", post(dev_token))
         .route("/me", get(me))
@@ -1572,6 +1598,41 @@ async fn produce_pod_announcement(
         &ctx,
         &request.pod_slug,
         &request.public_pod_url,
+    )?))
+}
+
+/// Open Bootstrap admission: no User account or Trusted Peer required.
+async fn bootstrap_admit_announcement(
+    State(state): State<ApiState>,
+    Json(announcement): Json<PodAnnouncement>,
+) -> Result<Json<BootstrapAdmissionAcceptance>, ApiError> {
+    Ok(Json(
+        state.tools.admit_bootstrap_announcement(announcement)?,
+    ))
+}
+
+/// Open Bootstrap withdrawal admission: no User account or Trusted Peer required.
+async fn bootstrap_admit_withdrawal(
+    State(state): State<ApiState>,
+    Json(withdrawal): Json<PodWithdrawal>,
+) -> Result<Json<BootstrapWithdrawalAcceptance>, ApiError> {
+    Ok(Json(state.tools.admit_bootstrap_withdrawal(withdrawal)?))
+}
+
+#[derive(Debug, Deserialize)]
+struct AnnouncementStreamQuery {
+    cursor: Option<String>,
+    limit: Option<usize>,
+}
+
+/// Topic-neutral cursor-paginated Announcement Stream (no personalization).
+async fn bootstrap_announcement_stream(
+    State(state): State<ApiState>,
+    Query(query): Query<AnnouncementStreamQuery>,
+) -> Result<Json<AnnouncementStreamPage>, ApiError> {
+    Ok(Json(state.tools.announcement_stream(
+        query.cursor.as_deref(),
+        query.limit,
     )?))
 }
 

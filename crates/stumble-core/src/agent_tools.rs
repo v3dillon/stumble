@@ -1,3 +1,7 @@
+use crate::bootstrap::{
+    admit_bootstrap_announcement, admit_bootstrap_withdrawal, project_bootstrap_withdrawal,
+    read_announcement_stream, OriginProbe, UnreachableOriginProbe,
+};
 use crate::domain::*;
 use crate::feed_mix::{
     compare_feed_candidates, compose_feed_candidates, content_matches_any_topic,
@@ -99,6 +103,14 @@ pub enum AgentToolsError {
         /// Protocol version supported by this node.
         supported: &'static str,
     },
+    /// Open Bootstrap admission or stream request was rejected.
+    #[error("bootstrap rejected: {reason}")]
+    BootstrapRejected {
+        /// Stable machine-readable rejection reason.
+        reason: BootstrapAdmissionRejectionReason,
+        /// Human-readable detail for operators and Origins.
+        message: String,
+    },
 }
 
 const MAX_DISCOVERY_TASK_ATTEMPTS: usize = 3;
@@ -108,6 +120,24 @@ const DEFAULT_PENDING_PROPOSAL_SECONDS: u64 = 3_600;
 pub struct AgentTools {
     store: Arc<RwLock<InMemoryStore>>,
     persistence: Option<Persistence>,
+    /// Independent Bootstrap capability configuration (not a Hub role).
+    bootstrap: BootstrapCapability,
+}
+
+/// Runtime configuration for open Bootstrap admission and Announcement Streams.
+#[derive(Clone)]
+struct BootstrapCapability {
+    enabled: bool,
+    origin_probe: Arc<dyn OriginProbe>,
+}
+
+impl Default for BootstrapCapability {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            origin_probe: Arc::new(UnreachableOriginProbe),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -585,6 +615,7 @@ impl AgentTools {
         Self {
             store: Arc::new(RwLock::new(store)),
             persistence: None,
+            bootstrap: BootstrapCapability::default(),
         }
     }
 
@@ -592,6 +623,7 @@ impl AgentTools {
         Self {
             store: Arc::new(RwLock::new(store)),
             persistence: Some(Persistence::Json(Arc::new(path.into()))),
+            bootstrap: BootstrapCapability::default(),
         }
     }
 
@@ -602,7 +634,31 @@ impl AgentTools {
                 path: Arc::new(path.into()),
                 baseline: Arc::new(Mutex::new(store)),
             }),
+            bootstrap: BootstrapCapability::default(),
         }
+    }
+
+    /// Enables or reconfigures the independent Bootstrap capability.
+    ///
+    /// Bootstrap does not imply Hub authority or private-state proxying. The
+    /// injected [`OriginProbe`] verifies Origin reachability and public manifests.
+    #[must_use]
+    pub fn with_bootstrap_capability(
+        mut self,
+        enabled: bool,
+        origin_probe: Arc<dyn OriginProbe>,
+    ) -> Self {
+        self.bootstrap = BootstrapCapability {
+            enabled,
+            origin_probe,
+        };
+        self
+    }
+
+    /// Returns whether this process currently enables open Bootstrap admission.
+    #[must_use]
+    pub fn bootstrap_enabled(&self) -> bool {
+        self.bootstrap.enabled
     }
 
     pub fn open_home_node(
@@ -7212,11 +7268,152 @@ impl AgentTools {
             "hub_search_pods".to_string(),
             format!("{base}/hub/search-pods"),
         );
+        if self.bootstrap.enabled {
+            endpoints.insert(
+                "bootstrap_announcements".to_string(),
+                format!("{base}/bootstrap/announcements"),
+            );
+            endpoints.insert(
+                "bootstrap_announcement_stream".to_string(),
+                format!("{base}/bootstrap/announcements/stream"),
+            );
+            endpoints.insert(
+                "bootstrap_withdrawals".to_string(),
+                format!("{base}/bootstrap/withdrawals"),
+            );
+        }
         Ok(WellKnownNode {
             protocol: CURRENT_PROTOCOL_VERSION.to_string(),
             node,
             endpoints,
         })
+    }
+
+    /// Open Bootstrap admission for a public Pod Announcement.
+    ///
+    /// Requires no User account or Trusted Peer relationship. Verifies origin
+    /// identity, signature, lease, protocol, canonical URL, reachability, live
+    /// public manifest, and resource bounds before retaining the announcement
+    /// and appending a topic-neutral stream entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentToolsError::BootstrapRejected`] with a stable reason code
+    /// when verification or policy fails, or persistence errors when the store
+    /// cannot commit.
+    pub fn admit_bootstrap_announcement(
+        &self,
+        announcement: PodAnnouncement,
+    ) -> Result<BootstrapAdmissionAcceptance, AgentToolsError> {
+        self.admit_bootstrap_announcement_at(announcement, Utc::now())
+    }
+
+    /// Open Bootstrap admission at an explicit clock time.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::admit_bootstrap_announcement`].
+    pub fn admit_bootstrap_announcement_at(
+        &self,
+        announcement: PodAnnouncement,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<BootstrapAdmissionAcceptance, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let result = admit_bootstrap_announcement(
+            &mut store,
+            announcement,
+            self.bootstrap.origin_probe.as_ref(),
+            self.bootstrap.enabled,
+            now,
+        );
+        // Persist acceptance and rejection audit rows transactionally.
+        self.persist_locked(&mut store)?;
+        result.map_err(|reason| AgentToolsError::BootstrapRejected {
+            message: format!("bootstrap admission rejected: {reason}"),
+            reason,
+        })
+    }
+
+    /// Open Bootstrap admission for an Origin-signed Pod Withdrawal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentToolsError::BootstrapRejected`] on verification or policy
+    /// failure, or a persistence error when the store cannot commit.
+    pub fn admit_bootstrap_withdrawal(
+        &self,
+        withdrawal: PodWithdrawal,
+    ) -> Result<BootstrapWithdrawalAcceptance, AgentToolsError> {
+        self.admit_bootstrap_withdrawal_at(withdrawal, Utc::now())
+    }
+
+    /// Open Bootstrap withdrawal admission at an explicit clock time.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::admit_bootstrap_withdrawal`].
+    pub fn admit_bootstrap_withdrawal_at(
+        &self,
+        withdrawal: PodWithdrawal,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<BootstrapWithdrawalAcceptance, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let result =
+            admit_bootstrap_withdrawal(&mut store, withdrawal, self.bootstrap.enabled, now);
+        self.persist_locked(&mut store)?;
+        result.map_err(|reason| AgentToolsError::BootstrapRejected {
+            message: format!("bootstrap withdrawal rejected: {reason}"),
+            reason,
+        })
+    }
+
+    /// Reads a topic-neutral cursor-paginated Announcement Stream page.
+    ///
+    /// Emits pending lease-expiry transitions at `now` before serving. The
+    /// stream never includes Taste Profiles, Subscriptions, feedback, or
+    /// personalized ranking data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentToolsError::BootstrapRejected`] when Bootstrap is disabled
+    /// or the cursor is unknown/invalid, or a persistence error when expiry
+    /// transitions cannot be committed.
+    pub fn announcement_stream(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<AnnouncementStreamPage, AgentToolsError> {
+        self.announcement_stream_at(cursor, limit, Utc::now())
+    }
+
+    /// Reads the Announcement Stream at an explicit clock time.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::announcement_stream`].
+    pub fn announcement_stream_at(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<AnnouncementStreamPage, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let page = read_announcement_stream(&mut store, cursor, limit, self.bootstrap.enabled, now)
+            .map_err(|reason| AgentToolsError::BootstrapRejected {
+                message: format!("announcement stream rejected: {reason}"),
+                reason,
+            })?;
+        self.persist_locked(&mut store)?;
+        Ok(page)
     }
 
     pub fn pod_manifest(
@@ -7676,6 +7873,8 @@ impl AgentTools {
             return Err(StoreError::UntrustedPeer.into());
         }
         let known = retain_verified_pod_withdrawal(&mut store, withdrawal, Some(peer_id), now)?;
+        // Keep Bootstrap stream closed under co-located Index/peer withdraw retain.
+        project_bootstrap_withdrawal(&mut store, &known.withdrawal, now);
         record_harness_write(
             &mut store,
             ctx,
@@ -7714,6 +7913,8 @@ impl AgentTools {
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let known = retain_verified_pod_withdrawal(&mut store, withdrawal, None, now)?;
+        // Keep Bootstrap stream closed under co-located Index/peer withdraw retain.
+        project_bootstrap_withdrawal(&mut store, &known.withdrawal, now);
         self.persist_locked(&mut store)?;
         Ok(known)
     }

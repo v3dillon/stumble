@@ -19,8 +19,25 @@ Public HTTP contracts (typed machine-readable `code` on failures):
 | `POST` | `/discovery/withdrawals/produce` | Origin produces a withdrawal (optionally makes the Pod private) |
 | `POST` | `/discovery/withdrawals` | Verify and index a withdrawal |
 | `POST` | `/discovery/withdrawals/receive` | Receive a peer-delivered withdrawal |
+| `POST` | `/bootstrap/announcements` | Open Bootstrap admission (no User account or Trusted Peer) |
+| `GET`  | `/bootstrap/announcements/stream` | Topic-neutral cursor-paginated Announcement Stream |
+| `POST` | `/bootstrap/withdrawals` | Open Bootstrap withdrawal admission |
 
-Failure codes include `invalid_signature`, `announcement_expired`, `announcement_withdrawn`, `announcement_stale`, `withdrawal_stale`, and `validation_error`.
+Failure codes include `invalid_signature`, `announcement_expired`, `announcement_withdrawn`, `announcement_stale`, `withdrawal_stale`, and `validation_error`. Bootstrap open admission additionally returns stable codes: `malformed`, `invalid_identity`, `invalid_signature`, `unreachable_origin`, `incompatible_protocol`, `stale_lease`, `rate_limited`, `payload_too_large`, `manifest_mismatch`, `origin_quota_exceeded`, and `bootstrap_disabled`.
+
+## Open Bootstrap admission and Announcement Streams
+
+Bootstrap is an independent node capability (enabled via `AgentTools::with_bootstrap_capability`), not a Hub role and not an Origin proxy for private state. When enabled, a public Origin may submit a signed `PodAnnouncement` to `POST /bootstrap/announcements` without a User account or pre-existing Trusted Peer relationship.
+
+Admission verifies, in order relevant to the failure: payload size bounds; Origin identity consistency; Ed25519 signature and lease integrity; protocol compatibility (`stumble/1.0`); canonical public Pod URL; per-network and per-Origin submission rate limits; Origin reachability and the current public manifest through an injectable `OriginProbe` port; and a per-Origin active-admission quota that bounds materially duplicate public Pods without inventing a global quality score. Canonically identical resubmissions (same announcement identity and payload) are idempotent and do not append a second stream effect. Preferable renewals of an already admitted Pod append a `renewed` stream entry.
+
+Rejected attempts persist a minimal operator audit (`BootstrapRejectionAudit`) with reason, optional Origin key material, Pod slug, and timestamp only—no User identifiers, Taste Profiles, or product analytics.
+
+The **Announcement Stream** at `GET /bootstrap/announcements/stream?cursor=&limit=` is topic-neutral and cursor-paginated (bounded page size). It emits lifecycle entries `admitted`, `renewed`, `withdrawn`, and `expired`. Empty cursor starts at the beginning; numeric cursors resume strictly after the last consumed sequence without gaps or duplicate effects across SQLite restart; unknown or future positions are rejected safely as `malformed`. Serving a page advances expiry transitions for leases that are no longer active under the injectable clock. Open withdrawal admission is `POST /bootstrap/withdrawals`.
+
+Well-known node metadata advertises `bootstrap_announcements`, `bootstrap_announcement_stream`, and `bootstrap_withdrawals` only when Bootstrap is enabled. The public protocol never carries Taste Profile, Subscription, feedback, popularity, endorsement-derived authority, or personalized ranking data.
+
+Admission, stream entries, rejection audits, leases, and rate-limit bookkeeping persist transactionally in the authoritative SQLite store (`known_pod_announcements`, `known_pod_withdrawals`, `announcement_stream_entries`, `bootstrap_rejection_audits`, `bootstrap_runtime`). Focused temporary-SQLite coverage is in `crates/stumble-core/tests/bootstrap_admission_stream.rs` and `crates/stumble-api/tests/bootstrap_admission_stream.rs`.
 
 Changes to trusted peers, configured Index Nodes, and local Pod, node, source, or topic blocks pass through Pending Proposal approval. `explore_public_pods` applies that User-owned Trust Policy and does not create a Subscription. For an unsubscribed remote Pod, the Origin may separately produce a bounded signed `PodExploreSamples` artifact; the Home Node accepts it only for the exact current announcement and filters its Content References locally. Signed Pod Endorsements likewise bind the exact known current announcements of both public Pods before adding bounded, inspectable local ranking evidence. Neither signatures nor endorsements establish a global quality or reputation score.
 
