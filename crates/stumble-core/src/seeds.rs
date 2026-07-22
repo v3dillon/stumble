@@ -15,6 +15,8 @@ pub fn seed_store() -> InMemoryStore {
     let mut store = InMemoryStore::default();
     // Sponsored Bootstrap is ordinary removable Home Node config, not protocol authority.
     crate::bootstrap::ensure_default_bootstrap_endpoint(&mut store, Utc::now());
+    // Automatic Discovery Peer gossip is enabled by default (outbound only).
+    crate::discovery_peer::ensure_discovery_peer_gossip_config(&mut store);
     let local_node = create_node_identity("local stumble node", None);
     store
         .node_identities

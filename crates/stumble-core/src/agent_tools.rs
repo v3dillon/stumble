@@ -6,10 +6,15 @@ use crate::bootstrap::{
     set_bootstrap_endpoint_enabled, AnnouncementStreamClient, OriginProbe, UnreachableOriginProbe,
 };
 use crate::discovery_peer::{
-    admit_discovery_peer_advertisement, disable_discovery_peer_service,
-    enable_discovery_peer_service, peer_service_is_enabled, project_peer_serving_announcement,
+    admit_discovery_peer_advertisement, apply_discovery_peer_stream_pages,
+    disable_discovery_peer_service, discovery_status, enable_discovery_peer_service,
+    ensure_discovery_peer_gossip_config, fetch_discovery_peer_stream_pages,
+    list_active_outbound_peers, outbound_discovery_peer_statuses, peer_gossip_is_enabled,
+    peer_service_is_enabled, plan_discovery_peer_sync, project_peer_serving_announcement,
     read_peer_announcement_stream, renew_discovery_peer_advertisement,
-    sample_discovery_peer_advertisements, DiscoveryPeerProbe, UnreachableDiscoveryPeerProbe,
+    sample_discovery_peer_advertisements, sample_known_discovery_peer_advertisements,
+    set_automatic_peer_gossip_enabled, DiscoveryPeerProbe, DiscoveryPeerStreamClient,
+    PeerAdvertisementSampleClient, UnreachableDiscoveryPeerProbe,
 };
 use crate::domain::*;
 use crate::feed_mix::{
@@ -7439,6 +7444,10 @@ impl AgentTools {
                 "bootstrap_peer_advertisements".to_string(),
                 format!("{base}/bootstrap/peer-advertisements"),
             );
+            endpoints.insert(
+                "bootstrap_peer_advertisement_sample".to_string(),
+                format!("{base}/bootstrap/peer-advertisements"),
+            );
         }
         Ok(WellKnownNode {
             protocol: CURRENT_PROTOCOL_VERSION.to_string(),
@@ -7673,6 +7682,310 @@ impl AgentTools {
                 reason,
             }
         })
+    }
+
+    /// Bootstrap-open sample of currently admitted peer advertisements (unranked).
+    ///
+    /// Available when Bootstrap capability is enabled. Does not require Discovery
+    /// Peer serving opt-in. Uses server entropy for shuffle.
+    ///
+    /// # Errors
+    ///
+    /// Returns rejection when Bootstrap is disabled.
+    pub fn bootstrap_peer_advertisement_sample(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<DiscoveryPeerAdvertisementSample, AgentToolsError> {
+        self.bootstrap_peer_advertisement_sample_at(limit, server_sample_seed(), Utc::now())
+    }
+
+    /// Bootstrap peer-advertisement sample at an explicit clock and seed.
+    ///
+    /// # Errors
+    ///
+    /// Returns rejection when Bootstrap is disabled.
+    pub fn bootstrap_peer_advertisement_sample_at(
+        &self,
+        limit: Option<usize>,
+        seed: u64,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<DiscoveryPeerAdvertisementSample, AgentToolsError> {
+        if !self.bootstrap.enabled {
+            return Err(AgentToolsError::DiscoveryPeerRejected {
+                message: "bootstrap peer sample rejected: bootstrap_disabled".into(),
+                reason: DiscoveryPeerAdmissionRejectionReason::BootstrapDisabled,
+            });
+        }
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        Ok(sample_known_discovery_peer_advertisements(
+            &store, limit, now, seed,
+        ))
+    }
+
+    /// Enables or disables automatic Discovery Peer gossip without deleting audit state.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization or persistence errors.
+    pub fn set_automatic_peer_gossip_enabled(
+        &self,
+        ctx: &AuthContext,
+        enabled: bool,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<DiscoveryPeerGossipConfig, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        let config = set_automatic_peer_gossip_enabled(&mut store, enabled, now);
+        self.persist_locked(&mut store)?;
+        Ok(config)
+    }
+
+    /// Reports automatic peer gossip configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization or lock errors.
+    pub fn peer_gossip_config(
+        &self,
+        ctx: &AuthContext,
+    ) -> Result<DiscoveryPeerGossipConfig, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        Ok(ensure_discovery_peer_gossip_config(&mut store).clone())
+    }
+
+    /// Lists the rotating outbound Discovery Peer set with sync/health state.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization or lock errors.
+    pub fn outbound_discovery_peers(
+        &self,
+        ctx: &AuthContext,
+    ) -> Result<Vec<OutboundDiscoveryPeerStatus>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        Ok(outbound_discovery_peer_statuses(&store))
+    }
+
+    /// Reports discovery readiness (including degraded Bootstrap-outage state).
+    ///
+    /// Direct Pod URL operation remains available when discovery is degraded.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization or lock errors.
+    pub fn discovery_status(&self, ctx: &AuthContext) -> Result<DiscoveryStatus, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        Ok(discovery_status(&store))
+    }
+
+    /// Learns peer advertisements from Bootstrap and existing peers, then selects
+    /// a bounded outbound set. Selection is randomized under `selection_seed`
+    /// (tests inject a fixed seed; production may use server entropy).
+    ///
+    /// Network sample fetches run **outside** the store write lock; verification,
+    /// retention, and selection run under a short write lock. Does not create
+    /// Trusted Peer relationships.
+    ///
+    /// Reachability probing is **not** applied on this path by default: outbound
+    /// learning verifies the signed advertisement locally (identity, capability,
+    /// protocol, endpoint policy, lease, signature). Live reachability remains
+    /// required when enabling a node as a Discovery Peer. Operators that want
+    /// live endpoint match during learn can call the core retain helper with an
+    /// injected [`DiscoveryPeerProbe`].
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization or persistence errors. Per-source sample failures
+    /// fall through without aborting the pass.
+    pub fn learn_and_select_discovery_peers(
+        &self,
+        ctx: &AuthContext,
+        sample_client: &dyn PeerAdvertisementSampleClient,
+        now: chrono::DateTime<Utc>,
+        selection_seed: u64,
+    ) -> Result<Vec<OutboundDiscoveryPeer>, AgentToolsError> {
+        let (mut sources, local_node_id, gossip_enabled) = {
+            let store = self
+                .store
+                .read()
+                .map_err(|_| AgentToolsError::LockPoisoned)?;
+            authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+            let mut sources: Vec<String> = store
+                .bootstrap_endpoints
+                .values()
+                .filter(|endpoint| endpoint.enabled)
+                .map(|endpoint| endpoint.base_url.clone())
+                .collect();
+            sources.extend(
+                list_active_outbound_peers(&store)
+                    .into_iter()
+                    .map(|peer| peer.public_endpoint),
+            );
+            let local_node_id = store.default_node().ok().map(|node| node.id);
+            let gossip_enabled = peer_gossip_is_enabled(&store);
+            (sources, local_node_id, gossip_enabled)
+        };
+
+        if !gossip_enabled {
+            let store = self
+                .store
+                .read()
+                .map_err(|_| AgentToolsError::LockPoisoned)?;
+            return Ok(list_active_outbound_peers(&store));
+        }
+
+        sources.sort();
+        sources.dedup();
+
+        // Sample fetches without holding any store lock (no HTTP under write).
+        let fetched =
+            crate::discovery_peer::fetch_peer_advertisement_samples(sample_client, &sources);
+
+        // Short write: verify/retain/select only (no network I/O).
+        // Probe is None: signed-ad local verify is sufficient for outbound learning.
+        // Default UnreachableDiscoveryPeerProbe would soft-skip every ad.
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let selected = crate::discovery_peer::retain_learned_samples_and_select(
+            &mut store,
+            &fetched,
+            None,
+            local_node_id,
+            now,
+            selection_seed,
+        );
+        self.persist_locked(&mut store)?;
+        Ok(selected)
+    }
+
+    /// Synchronizes Announcement Streams from each viable outbound Discovery Peer.
+    ///
+    /// Network I/O runs outside the store write lock. Invalid data, flooding,
+    /// incompatible versions, expired advertisements, or repeated transport
+    /// failures cause bounded backoff and automatic local eviction.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization or persistence errors. Per-peer typed failures are
+    /// reported inside the [`DiscoveryPeerSyncReport`].
+    pub fn sync_outbound_discovery_peers(
+        &self,
+        ctx: &AuthContext,
+        client: &dyn DiscoveryPeerStreamClient,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<DiscoveryPeerSyncReport, AgentToolsError> {
+        let plans = {
+            let store = self
+                .store
+                .read()
+                .map_err(|_| AgentToolsError::LockPoisoned)?;
+            authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+            plan_discovery_peer_sync(&store, now)
+        };
+
+        let mut outcomes = Vec::with_capacity(plans.len());
+        let mut retained_announcements = 0usize;
+        let mut retained_withdrawals = 0usize;
+        let mut evicted = Vec::new();
+
+        for plan in plans {
+            let fetched = fetch_discovery_peer_stream_pages(
+                client,
+                &plan.peer.public_endpoint,
+                plan.cursor.clone(),
+            );
+            let outcome = {
+                let mut store = self
+                    .store
+                    .write()
+                    .map_err(|_| AgentToolsError::LockPoisoned)?;
+                // Re-check lease under the write lock.
+                if let Some(known) = store
+                    .known_discovery_peer_advertisements
+                    .get(&plan.peer.node_id)
+                {
+                    if !known.advertisement.lease_is_active(now) {
+                        store.outbound_discovery_peers.remove(&plan.peer.node_id);
+                        if let Some(state) =
+                            store.discovery_peer_sync_states.get_mut(&plan.peer.node_id)
+                        {
+                            state.health = DiscoveryPeerHealth::Evicted;
+                            state.last_attempt_at = Some(now);
+                            state.last_error = Some(DiscoveryPeerSyncFailure::new(
+                                DiscoveryPeerSyncFailureKind::ExpiredAdvertisement,
+                                "peer advertisement expired before sync",
+                            ));
+                        }
+                        self.persist_locked(&mut store)?;
+                        evicted.push(plan.peer.node_id);
+                        outcomes.push(DiscoveryPeerSyncOutcome {
+                            node_id: plan.peer.node_id,
+                            public_endpoint: plan.peer.public_endpoint.clone(),
+                            ok: false,
+                            pages_fetched: 0,
+                            retained_announcements: 0,
+                            retained_withdrawals: 0,
+                            cursor: plan.cursor.clone(),
+                            health: DiscoveryPeerHealth::Evicted,
+                            error: Some(DiscoveryPeerSyncFailure::new(
+                                DiscoveryPeerSyncFailureKind::ExpiredAdvertisement,
+                                "peer advertisement expired before sync",
+                            )),
+                        });
+                        continue;
+                    }
+                }
+                let outcome =
+                    apply_discovery_peer_stream_pages(&mut store, &plan.peer, fetched, now);
+                if outcome.health == DiscoveryPeerHealth::Evicted {
+                    store.outbound_discovery_peers.remove(&outcome.node_id);
+                    evicted.push(outcome.node_id);
+                }
+                self.persist_locked(&mut store)?;
+                outcome
+            };
+            retained_announcements =
+                retained_announcements.saturating_add(outcome.retained_announcements);
+            retained_withdrawals =
+                retained_withdrawals.saturating_add(outcome.retained_withdrawals);
+            outcomes.push(outcome);
+        }
+
+        Ok(DiscoveryPeerSyncReport {
+            outcomes,
+            retained_announcements,
+            retained_withdrawals,
+            evicted,
+        })
+    }
+
+    /// Whether automatic peer gossip is currently enabled.
+    #[must_use]
+    pub fn peer_gossip_enabled(&self) -> bool {
+        self.store
+            .read()
+            .map(|store| peer_gossip_is_enabled(&store))
+            .unwrap_or(true)
     }
 
     /// Projects a verified announcement into the peer serving stream while enabled.

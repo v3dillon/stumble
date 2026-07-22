@@ -293,7 +293,7 @@ pub fn router_with_options(
         .route("/bootstrap/withdrawals", post(bootstrap_admit_withdrawal))
         .route(
             "/bootstrap/peer-advertisements",
-            post(bootstrap_admit_peer_advertisement),
+            post(bootstrap_admit_peer_advertisement).get(bootstrap_peer_advertisement_sample),
         )
         .route(
             "/discovery/peer/announcements/stream",
@@ -309,6 +309,13 @@ pub fn router_with_options(
                 .post(enable_discovery_peer)
                 .delete(disable_discovery_peer),
         )
+        .route(
+            "/home/discovery-peers",
+            get(outbound_discovery_peers)
+                .patch(set_peer_gossip)
+                .post(sync_outbound_discovery_peers),
+        )
+        .route("/home/discovery-status", get(home_discovery_status))
         .route(
             "/home/bootstrap/endpoints",
             get(list_bootstrap_endpoints).post(add_bootstrap_endpoint),
@@ -647,6 +654,11 @@ fn route_docs() -> Vec<ApiRouteDoc> {
         },
         ApiRouteDoc {
             method: "GET",
+            path: "/bootstrap/peer-advertisements",
+            description: "small randomized unranked sample of Bootstrap-admitted peer advertisements",
+        },
+        ApiRouteDoc {
+            method: "GET",
             path: "/discovery/peer/announcements/stream",
             description: "opt-in Discovery Peer Announcement Stream pages (Origin signatures unchanged)",
         },
@@ -654,6 +666,26 @@ fn route_docs() -> Vec<ApiRouteDoc> {
             method: "GET",
             path: "/discovery/peer/advertisements",
             description: "small randomized unranked sample of current peer advertisements",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/home/discovery-peers",
+            description: "list rotating outbound Discovery Peer set with cursor, health, and last-success",
+        },
+        ApiRouteDoc {
+            method: "PATCH",
+            path: "/home/discovery-peers",
+            description: "enable or disable automatic peer gossip without deleting audit state",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/home/discovery-peers",
+            description: "learn peers from samples and/or sync Announcement Streams from outbound Discovery Peers",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/home/discovery-status",
+            description: "report discovery readiness including Bootstrap-outage degraded mode",
         },
         ApiRouteDoc {
             method: "GET",
@@ -1751,6 +1783,18 @@ async fn bootstrap_admit_peer_advertisement(
     ))
 }
 
+/// Bootstrap-open unranked sample of admitted peer advertisements.
+async fn bootstrap_peer_advertisement_sample(
+    State(state): State<ApiState>,
+    Query(query): Query<PeerAdvertisementSampleQuery>,
+) -> Result<Json<DiscoveryPeerAdvertisementSample>, ApiError> {
+    Ok(Json(
+        state
+            .tools
+            .bootstrap_peer_advertisement_sample(query.limit)?,
+    ))
+}
+
 /// Discovery Peer Announcement Stream (opt-in serving only).
 async fn peer_announcement_stream(
     State(state): State<ApiState>,
@@ -1815,6 +1859,104 @@ async fn disable_discovery_peer(
         &ctx,
         chrono::Utc::now(),
     )?))
+}
+
+/// Lists the rotating outbound Discovery Peer set (not Trusted Peers).
+async fn outbound_discovery_peers(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<OutboundDiscoveryPeerStatus>>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.outbound_discovery_peers(&ctx)?))
+}
+
+#[derive(Debug, Deserialize)]
+struct SetPeerGossipRequest {
+    automatic_gossip_enabled: bool,
+}
+
+/// Enables or disables automatic peer gossip without deleting audit state.
+async fn set_peer_gossip(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<SetPeerGossipRequest>,
+) -> Result<Json<DiscoveryPeerGossipConfig>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.set_automatic_peer_gossip_enabled(
+        &ctx,
+        request.automatic_gossip_enabled,
+        chrono::Utc::now(),
+    )?))
+}
+
+#[derive(Debug, Deserialize)]
+struct OutboundDiscoveryPeerAction {
+    /// When true, learn peer samples and rotate the outbound set before sync.
+    #[serde(default)]
+    learn: bool,
+    /// When true (default), sync Announcement Streams from outbound peers.
+    #[serde(default = "default_true")]
+    sync: bool,
+}
+
+/// Learns and/or syncs the rotating outbound Discovery Peer set.
+async fn sync_outbound_discovery_peers(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<OutboundDiscoveryPeerAction>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    let handle = tokio::runtime::Handle::current();
+    let sample_client = ReqwestPeerAdvertisementSampleClient::new(handle.clone());
+    let stream_client = ReqwestDiscoveryPeerStreamClient::new(handle);
+    Ok(Json(
+        tokio::task::spawn_blocking(move || {
+            let now = chrono::Utc::now();
+            let mut body = serde_json::Map::new();
+            if request.learn {
+                let selected = state.tools.learn_and_select_discovery_peers(
+                    &ctx,
+                    &sample_client,
+                    now,
+                    // Production rotation uses server entropy; HTTP clients cannot force seeds.
+                    {
+                        use rand_core::{OsRng, RngCore};
+                        OsRng.next_u64()
+                    },
+                )?;
+                body.insert(
+                    "selected".into(),
+                    serde_json::to_value(selected).unwrap_or_default(),
+                );
+            }
+            if request.sync {
+                let report =
+                    state
+                        .tools
+                        .sync_outbound_discovery_peers(&ctx, &stream_client, now)?;
+                body.insert(
+                    "sync".into(),
+                    serde_json::to_value(report).unwrap_or_default(),
+                );
+            }
+            Ok::<_, AgentToolsError>(serde_json::Value::Object(body))
+        })
+        .await
+        .map_err(|error| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "internal",
+            message: error.to_string(),
+        })??,
+    ))
+}
+
+/// Home Node discovery readiness including degraded Bootstrap-outage mode.
+async fn home_discovery_status(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<DiscoveryStatus>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.discovery_status(&ctx)?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1959,6 +2101,134 @@ impl AnnouncementStreamClient for ReqwestAnnouncementStreamClient {
             }
             response.json().await.map_err(|error| {
                 BootstrapSyncFailure::new(BootstrapSyncFailureKind::Protocol, error.to_string())
+            })
+        })
+    }
+}
+
+/// Production HTTP client for Bootstrap/peer advertisement samples.
+pub struct ReqwestPeerAdvertisementSampleClient {
+    client: reqwest::Client,
+    handle: tokio::runtime::Handle,
+}
+
+impl ReqwestPeerAdvertisementSampleClient {
+    /// Builds a client that drives HTTP on `handle`.
+    #[must_use]
+    pub fn new(handle: tokio::runtime::Handle) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            handle,
+        }
+    }
+}
+
+impl PeerAdvertisementSampleClient for ReqwestPeerAdvertisementSampleClient {
+    fn fetch_peer_advertisement_sample(
+        &self,
+        base_url: &str,
+        request: &DiscoveryPeerSampleRequest,
+    ) -> Result<DiscoveryPeerAdvertisementSample, DiscoveryPeerSyncFailure> {
+        debug_assert!(peer_sample_request_is_public_only(request));
+        let base = base_url.trim_end_matches('/');
+        // Prefer Bootstrap open sample path; peer sample path is used for peer endpoints.
+        let bootstrap_url = format!("{base}/bootstrap/peer-advertisements");
+        let peer_url = format!("{base}/discovery/peer/advertisements");
+        let client = self.client.clone();
+        let limit = request.limit;
+        self.handle.block_on(async move {
+            for url in [bootstrap_url, peer_url] {
+                let mut http = client.get(&url);
+                if let Some(limit) = limit {
+                    http = http.query(&[("limit", limit.to_string())]);
+                }
+                let response = match http.send().await {
+                    Ok(response) => response,
+                    Err(error) => {
+                        return Err(DiscoveryPeerSyncFailure::new(
+                            DiscoveryPeerSyncFailureKind::Transport,
+                            error.to_string(),
+                        ));
+                    }
+                };
+                if response.status().is_success() {
+                    return response.json().await.map_err(|error| {
+                        DiscoveryPeerSyncFailure::new(
+                            DiscoveryPeerSyncFailureKind::Protocol,
+                            error.to_string(),
+                        )
+                    });
+                }
+                if response.status().as_u16() == 404 || response.status().as_u16() == 403 {
+                    continue;
+                }
+                return Err(DiscoveryPeerSyncFailure::new(
+                    DiscoveryPeerSyncFailureKind::Protocol,
+                    format!("peer sample HTTP {}", response.status()),
+                ));
+            }
+            Err(DiscoveryPeerSyncFailure::new(
+                DiscoveryPeerSyncFailureKind::Transport,
+                format!("no peer advertisement sample available at {base}"),
+            ))
+        })
+    }
+}
+
+/// Production HTTP client for Discovery Peer Announcement Stream pages.
+pub struct ReqwestDiscoveryPeerStreamClient {
+    client: reqwest::Client,
+    handle: tokio::runtime::Handle,
+}
+
+impl ReqwestDiscoveryPeerStreamClient {
+    /// Builds a client that drives HTTP on `handle`.
+    #[must_use]
+    pub fn new(handle: tokio::runtime::Handle) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            handle,
+        }
+    }
+}
+
+impl DiscoveryPeerStreamClient for ReqwestDiscoveryPeerStreamClient {
+    fn fetch_peer_announcement_stream(
+        &self,
+        base_url: &str,
+        request: &BootstrapStreamRequest,
+    ) -> Result<AnnouncementStreamPage, DiscoveryPeerSyncFailure> {
+        debug_assert!(peer_stream_request_is_public_only(request));
+        let base = base_url.trim_end_matches('/');
+        let url = format!("{base}/discovery/peer/announcements/stream");
+        let client = self.client.clone();
+        let cursor = request.cursor.clone();
+        let limit = request.limit;
+        self.handle.block_on(async move {
+            let mut http = client.get(&url);
+            if let Some(cursor) = &cursor {
+                http = http.query(&[("cursor", cursor.as_str())]);
+            }
+            if let Some(limit) = limit {
+                http = http.query(&[("limit", limit.to_string())]);
+            }
+            let response = http.send().await.map_err(|error| {
+                DiscoveryPeerSyncFailure::new(
+                    DiscoveryPeerSyncFailureKind::Transport,
+                    error.to_string(),
+                )
+            })?;
+            if !response.status().is_success() {
+                return Err(DiscoveryPeerSyncFailure::new(
+                    DiscoveryPeerSyncFailureKind::Protocol,
+                    format!("discovery peer stream HTTP {}", response.status()),
+                ));
+            }
+            response.json().await.map_err(|error| {
+                DiscoveryPeerSyncFailure::new(
+                    DiscoveryPeerSyncFailureKind::Protocol,
+                    error.to_string(),
+                )
             })
         })
     }

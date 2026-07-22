@@ -1,5 +1,4 @@
-//! Opt-in Discovery Peer service: signed advertisements, Bootstrap admission,
-//! and bounded public announcement/peer-sample serving.
+//! Opt-in Discovery Peer service and outbound Home Node peer rotation.
 //!
 //! Ordinary Home Nodes remain outbound-only for discovery by default. A User
 //! must explicitly enable announcement serving after declaring a public endpoint
@@ -8,6 +7,11 @@
 //! discovery artifacts—never Pod Events, Subscriptions, Taste Profiles,
 //! credentials, or administrative surfaces.
 //!
+//! Home Nodes automatically maintain a small rotating outbound Discovery Peer
+//! set learned from Bootstrap and peer samples, synchronize Origin-signed
+//! announcement lifecycle artifacts through it, and survive Bootstrap outages
+//! without granting Trusted Peer status.
+//!
 //! # Module layout
 //!
 //! - [`probe`] — public endpoint reachability + identity view port
@@ -15,10 +19,12 @@
 //! - [`advertise`] — enable/disable opt-in service and produce signed advertisements
 //! - [`admit`] — open Bootstrap admission of peer advertisements
 //! - [`serve`] — inbound Announcement Stream pages and unranked peer samples
+//! - [`client`] — outbound peer learning, rotation, sync, eviction, discovery status
 //! - [`types`] — bounds and store helpers
 
 mod admit;
 mod advertise;
+mod client;
 mod endpoint;
 mod probe;
 mod serve;
@@ -30,6 +36,18 @@ pub use advertise::{
     maybe_project_peer_serving_announcement, peer_service_is_enabled,
     project_peer_serving_announcement, renew_discovery_peer_advertisement,
 };
+pub use client::{
+    apply_discovery_peer_stream_pages, discovery_status, ensure_discovery_peer_gossip_config,
+    fetch_discovery_peer_stream_pages, fetch_peer_advertisement_samples,
+    learn_discovery_peer_advertisement, learn_peers_from_sample_sources,
+    list_active_outbound_peers, max_outbound_peers, outbound_discovery_peer_statuses,
+    peer_gossip_is_enabled, peer_sample_request_is_public_only, peer_stream_request_is_public_only,
+    plan_discovery_peer_sync, retain_learned_samples_and_select, select_outbound_discovery_peers,
+    set_automatic_peer_gossip_enabled, sync_outbound_discovery_peers, DiscoveryPeerStreamClient,
+    DiscoveryPeerSyncPlan, FetchedDiscoveryPeerStream, FetchedPeerAdvertisementSample,
+    PeerAdvertisementSampleClient, ScriptedDiscoveryPeerStreamClient,
+    ScriptedPeerAdvertisementSampleClient,
+};
 pub use endpoint::{normalize_discovery_peer_endpoint, EndpointPolicyError};
 pub use probe::{
     peer_identity_view_for_advertisement, peer_identity_view_for_node, DiscoveryPeerProbe,
@@ -38,7 +56,7 @@ pub use probe::{
 };
 pub use serve::{
     peer_advertisement_sample_is_public_only, read_peer_announcement_stream,
-    sample_discovery_peer_advertisements,
+    sample_discovery_peer_advertisements, sample_known_discovery_peer_advertisements,
 };
 pub use types::{
     ensure_discovery_peer_service, estimated_payload_bytes, DEFAULT_PEER_SAMPLE_LIMIT,

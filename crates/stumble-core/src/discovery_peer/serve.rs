@@ -97,7 +97,23 @@ pub fn sample_discovery_peer_advertisements(
     if !peer_service_is_enabled(store) {
         return Err(DiscoveryPeerAdmissionRejectionReason::PeerServiceDisabled);
     }
+    Ok(sample_known_discovery_peer_advertisements(
+        store, limit, now, seed,
+    ))
+}
 
+/// Samples currently valid known peer advertisements without opt-in gates.
+///
+/// Used by Bootstrap Nodes (open sample of admitted ads) and as the shared
+/// selection core for Discovery Peer samples. Unranked; `seed` controls
+/// deterministic shuffle for tests or server entropy.
+#[must_use]
+pub fn sample_known_discovery_peer_advertisements(
+    store: &InMemoryStore,
+    limit: Option<usize>,
+    now: DateTime<Utc>,
+    seed: u64,
+) -> DiscoveryPeerAdvertisementSample {
     let limit = limit
         .unwrap_or(DEFAULT_PEER_SAMPLE_LIMIT)
         .clamp(1, MAX_PEER_SAMPLE_LIMIT);
@@ -118,7 +134,7 @@ pub fn sample_discovery_peer_advertisements(
     }
     eligible.truncate(limit);
 
-    Ok(DiscoveryPeerAdvertisementSample::new(eligible, limit))
+    DiscoveryPeerAdvertisementSample::new(eligible, limit)
 }
 
 /// Asserts a peer sample carries only public advertisement fields (privacy seam).

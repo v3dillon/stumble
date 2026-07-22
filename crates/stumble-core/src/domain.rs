@@ -4863,6 +4863,14 @@ pub struct KnownPodAnnouncement {
     /// while preserving this audit row.
     #[serde(default)]
     pub received_from_bootstrap_urls: BTreeSet<String>,
+    /// Discovery Peer public endpoints that delivered this announcement (multi-source).
+    ///
+    /// Evicting or losing a Discovery Peer excludes announcements whose *only*
+    /// remaining delivery source was that peer endpoint from current eligibility
+    /// while preserving this audit row. Independent Bootstrap/Index/peer sources
+    /// keep the announcement eligible.
+    #[serde(default)]
+    pub received_from_discovery_peer_endpoints: BTreeSet<String>,
     /// Time at which this node verified and retained it.
     pub received_at: DateTime<Utc>,
 }
@@ -5659,6 +5667,12 @@ pub struct KnownDiscoveryPeerAdvertisement {
     pub advertisement: DiscoveryPeerAdvertisement,
     /// Time at which this node verified and retained it.
     pub received_at: DateTime<Utc>,
+    /// Bootstrap base URLs and peer endpoints that delivered this advertisement.
+    ///
+    /// Accumulated across multi-source samples and copied into
+    /// [`OutboundDiscoveryPeer::learned_from`] at selection time.
+    #[serde(default)]
+    pub learned_from: BTreeSet<String>,
 }
 
 /// User opt-in state for serving as a Discovery Peer.
@@ -5812,6 +5826,295 @@ impl DiscoveryPeerAdvertisementSample {
             limit,
         }
     }
+}
+
+/// Default maximum size of the automatic outbound Discovery Peer set.
+pub const DEFAULT_MAX_OUTBOUND_DISCOVERY_PEERS: usize = 4;
+
+/// Hard upper bound on the automatic outbound Discovery Peer set.
+pub const MAX_OUTBOUND_DISCOVERY_PEERS: usize = 8;
+
+/// Consecutive hard failures before automatic local eviction of a Discovery Peer.
+pub const PEER_FAILURES_BEFORE_EVICTION: u32 = 3;
+
+/// Invalid lifecycle entries on one stream page that count as flooding.
+pub const MAX_PEER_INVALID_ENTRIES_PER_PAGE: usize = 3;
+
+/// Home Node preference for automatic Discovery Peer gossip.
+///
+/// Disabling stops automatic selection and peer stream sync without deleting
+/// cached peer advertisements, outbound audit rows, cursors, or Bootstrap config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct DiscoveryPeerGossipConfig {
+    /// When false, automatic peer learning/sync is skipped.
+    pub automatic_gossip_enabled: bool,
+    /// Bounded size of the rotating outbound peer set.
+    pub max_outbound_peers: usize,
+    /// Time of the last config mutation, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+impl Default for DiscoveryPeerGossipConfig {
+    fn default() -> Self {
+        Self {
+            automatic_gossip_enabled: true,
+            max_outbound_peers: DEFAULT_MAX_OUTBOUND_DISCOVERY_PEERS,
+            updated_at: None,
+        }
+    }
+}
+
+/// One peer in the Home Node's bounded rotating outbound Discovery Peer set.
+///
+/// Selection is automatic and capability-limited. It never creates a Trusted Peer
+/// relationship or grants Pod Event / private / administrative access.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct OutboundDiscoveryPeer {
+    /// Advertising node identity (also the local outbound set key).
+    pub node_id: NodeIdentityId,
+    /// Verified public base endpoint for peer stream and sample contracts.
+    pub public_endpoint: String,
+    /// Identity of the currently retained signed advertisement.
+    pub advertisement_id: Uuid,
+    /// Protocol version declared by the peer.
+    pub protocol_version: String,
+    /// Time at which this peer entered (or re-entered) the outbound set.
+    pub selected_at: DateTime<Utc>,
+    /// Bootstrap base URLs and peer endpoints that delivered the advertisement.
+    #[serde(default)]
+    pub learned_from: BTreeSet<String>,
+}
+
+/// Health of one outbound Discovery Peer relationship.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DiscoveryPeerHealth {
+    /// Recent sync succeeded or the peer has not yet failed.
+    Healthy,
+    /// Backed off after failures but still retained for possible resume.
+    BackedOff,
+    /// Automatically removed from the active outbound set.
+    Evicted,
+}
+
+impl DiscoveryPeerHealth {
+    /// Wire code for operator surfaces.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::BackedOff => "backed_off",
+            Self::Evicted => "evicted",
+        }
+    }
+}
+
+impl std::fmt::Display for DiscoveryPeerHealth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Per-Discovery-Peer stream cursor and health bookkeeping.
+///
+/// Survives SQLite restart so rotation, eviction, and cursor resume continue
+/// without replaying history. Keyed by peer node identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DiscoveryPeerSyncState {
+    /// Peer node identity this progress belongs to.
+    pub node_id: NodeIdentityId,
+    /// Opaque stream cursor last successfully consumed, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Time of the last fully successful page consumption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_success_at: Option<DateTime<Utc>>,
+    /// Time of the most recent sync attempt (success or failure).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    /// Consecutive hard failures since the last success.
+    #[serde(default)]
+    pub consecutive_failures: u32,
+    /// Earliest time another attempt is allowed after backoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff_until: Option<DateTime<Utc>>,
+    /// Current local health classification.
+    #[serde(default = "default_discovery_peer_health")]
+    pub health: DiscoveryPeerHealth,
+    /// Typed failure from the most recent unsuccessful attempt, cleared on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<DiscoveryPeerSyncFailure>,
+}
+
+fn default_discovery_peer_health() -> DiscoveryPeerHealth {
+    DiscoveryPeerHealth::Healthy
+}
+
+/// Typed outbound Discovery Peer synchronization failure for operators.
+///
+/// Contains no Taste Profile, Subscription, feedback, or other private evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DiscoveryPeerSyncFailure {
+    /// Stable machine-readable failure class.
+    pub kind: DiscoveryPeerSyncFailureKind,
+    /// Human-readable detail safe for operators (no private evidence).
+    pub message: String,
+}
+
+impl DiscoveryPeerSyncFailure {
+    /// Builds a typed operator-facing peer sync failure.
+    #[must_use]
+    pub fn new(kind: DiscoveryPeerSyncFailureKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+/// Stable classes of outbound Discovery Peer sync failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DiscoveryPeerSyncFailureKind {
+    /// Transport-level failure (DNS, connection, timeout, HTTP transport).
+    Transport,
+    /// Remote protocol response was unusable (status, shape, or version).
+    Protocol,
+    /// Stream page or cursor was malformed.
+    Malformed,
+    /// A delivered announcement failed local signature verification.
+    InvalidSignature,
+    /// A delivered announcement failed local validation (URL, lease, identity).
+    Validation,
+    /// Peer advertisement or stream declared an incompatible protocol.
+    IncompatibleProtocol,
+    /// Peer advertisement lease expired.
+    ExpiredAdvertisement,
+    /// Peer delivered an abusive volume of invalid lifecycle artifacts.
+    Flooding,
+    /// Peer endpoint was not reachable under local probe policy.
+    Unreachable,
+}
+
+impl DiscoveryPeerSyncFailureKind {
+    /// Wire code returned on operator surfaces.
+    #[must_use]
+    pub const fn as_code(self) -> &'static str {
+        match self {
+            Self::Transport => "transport",
+            Self::Protocol => "protocol",
+            Self::Malformed => "malformed",
+            Self::InvalidSignature => "invalid_signature",
+            Self::Validation => "validation",
+            Self::IncompatibleProtocol => "incompatible_protocol",
+            Self::ExpiredAdvertisement => "expired_advertisement",
+            Self::Flooding => "flooding",
+            Self::Unreachable => "unreachable",
+        }
+    }
+}
+
+impl std::fmt::Display for DiscoveryPeerSyncFailureKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_code())
+    }
+}
+
+/// Operator view of one outbound Discovery Peer plus its sync progress.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct OutboundDiscoveryPeerStatus {
+    /// Selected outbound peer.
+    pub peer: OutboundDiscoveryPeer,
+    /// Persisted cursor and health for this peer.
+    pub sync: DiscoveryPeerSyncState,
+}
+
+/// Summary of one outbound Discovery Peer synchronization pass.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DiscoveryPeerSyncReport {
+    /// Per-peer outcomes in selection order.
+    pub outcomes: Vec<DiscoveryPeerSyncOutcome>,
+    /// Total announcements newly retained or refreshed this pass.
+    pub retained_announcements: usize,
+    /// Total withdrawals retained this pass.
+    pub retained_withdrawals: usize,
+    /// Peers automatically evicted during this pass.
+    pub evicted: Vec<NodeIdentityId>,
+}
+
+/// Outcome of attempting sync against one outbound Discovery Peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DiscoveryPeerSyncOutcome {
+    /// Peer node identity.
+    pub node_id: NodeIdentityId,
+    /// Peer public endpoint (network address only).
+    pub public_endpoint: String,
+    /// Whether this peer completed successfully.
+    pub ok: bool,
+    /// Pages successfully consumed from this peer.
+    pub pages_fetched: usize,
+    /// Announcements retained from this peer during the pass.
+    pub retained_announcements: usize,
+    /// Withdrawals retained from this peer during the pass.
+    pub retained_withdrawals: usize,
+    /// Cursor after this attempt, when advanced or already present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Health after this attempt.
+    pub health: DiscoveryPeerHealth,
+    /// Typed failure when `ok` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<DiscoveryPeerSyncFailure>,
+}
+
+/// Home Node discovery readiness for operators and degraded-mode messaging.
+///
+/// Degraded discovery means automatic Bootstrap/peer network discovery is
+/// impaired; direct Pod URL subscription and local audit state remain available.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DiscoveryStatus {
+    /// Whether automatic peer gossip is currently enabled.
+    pub automatic_gossip_enabled: bool,
+    /// Number of enabled Bootstrap endpoints in local configuration.
+    pub enabled_bootstrap_count: usize,
+    /// Number of currently selected healthy/backed-off outbound peers.
+    pub active_outbound_peer_count: usize,
+    /// True when no viable Bootstrap remains and automatic network discovery is limited.
+    pub degraded: bool,
+    /// Stable reason code when `degraded` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded_reason: Option<String>,
+    /// Operator-facing summary (no private evidence).
+    pub message: String,
+}
+
+/// Outbound request for a peer-advertisement sample (pagination-free public only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DiscoveryPeerSampleRequest {
+    /// Optional sample size bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 /// Signed recommendation of one public Pod by another public Pod.

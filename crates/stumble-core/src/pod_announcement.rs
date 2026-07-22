@@ -19,8 +19,9 @@ use uuid::Uuid;
 /// Immediate delivery provenance for a verified announcement retention.
 ///
 /// Local/origin retains omit remote sources. Remote delivery records at most one
-/// peer, one Index URL, and one Bootstrap URL per call; Index and Bootstrap URLs
-/// accumulate across retains of the same signed announcement identity.
+/// Trusted Peer, one Index URL, one Bootstrap URL, and one Discovery Peer endpoint
+/// per call; Index, Bootstrap, and Discovery Peer sources accumulate across retains
+/// of the same signed announcement identity.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeliveryProvenance {
     /// Trusted peer that delivered the announcement, when peer-sourced.
@@ -29,6 +30,8 @@ pub struct DeliveryProvenance {
     pub index_url: Option<String>,
     /// Bootstrap base URL that delivered the announcement.
     pub bootstrap_url: Option<String>,
+    /// Discovery Peer public endpoint that delivered the announcement.
+    pub discovery_peer_endpoint: Option<String>,
 }
 
 impl DeliveryProvenance {
@@ -37,15 +40,17 @@ impl DeliveryProvenance {
         peer_id: None,
         index_url: None,
         bootstrap_url: None,
+        discovery_peer_endpoint: None,
     };
 
-    /// Peer-delivered announcement provenance.
+    /// Peer-delivered announcement provenance (Trusted Peer).
     #[must_use]
     pub const fn peer(peer_id: PeerId) -> Self {
         Self {
             peer_id: Some(peer_id),
             index_url: None,
             bootstrap_url: None,
+            discovery_peer_endpoint: None,
         }
     }
 
@@ -56,6 +61,7 @@ impl DeliveryProvenance {
             peer_id: None,
             index_url: Some(url.into()),
             bootstrap_url: None,
+            discovery_peer_endpoint: None,
         }
     }
 
@@ -66,6 +72,18 @@ impl DeliveryProvenance {
             peer_id: None,
             index_url: None,
             bootstrap_url: Some(url.into()),
+            discovery_peer_endpoint: None,
+        }
+    }
+
+    /// Automatic Discovery Peer stream provenance (not Trusted Peer).
+    #[must_use]
+    pub fn discovery_peer(endpoint: impl Into<String>) -> Self {
+        Self {
+            peer_id: None,
+            index_url: None,
+            bootstrap_url: None,
+            discovery_peer_endpoint: Some(endpoint.into()),
         }
     }
 }
@@ -79,11 +97,27 @@ pub fn retains_bootstrap_url(store: &InMemoryStore, base_url: &str) -> bool {
         .any(|endpoint| endpoint.enabled && endpoint.base_url == base_url)
 }
 
+/// Whether any currently selected outbound Discovery Peer still provides
+/// provenance for `endpoint`.
+#[must_use]
+pub fn retains_discovery_peer_endpoint(store: &InMemoryStore, endpoint: &str) -> bool {
+    store.outbound_discovery_peers.values().any(|peer| {
+        peer.public_endpoint == endpoint
+            && store
+                .discovery_peer_sync_states
+                .get(&peer.node_id)
+                .map(|state| state.health != crate::domain::DiscoveryPeerHealth::Evicted)
+                .unwrap_or(true)
+    })
+}
+
 /// Whether a retained announcement still has active delivery provenance.
 ///
 /// Local/origin retains (no remote sources) remain eligible. Remote sources are
-/// active when a peer delivered them, any recorded Index URL still matches Trust
-/// Policy, or at least one enabled Bootstrap still matches a recorded delivery URL.
+/// active when a Trusted Peer delivered them, any recorded Index URL still matches
+/// Trust Policy, at least one enabled Bootstrap still matches a recorded delivery
+/// URL, or at least one currently selected Discovery Peer matches a recorded
+/// delivery endpoint.
 #[must_use]
 pub fn announcement_delivery_is_active(
     store: &InMemoryStore,
@@ -93,7 +127,8 @@ pub fn announcement_delivery_is_active(
     let has_peer = known.received_from_peer_id.is_some();
     let has_index = !known.received_from_index_urls.is_empty();
     let has_bootstrap = !known.received_from_bootstrap_urls.is_empty();
-    if !has_peer && !has_index && !has_bootstrap {
+    let has_discovery_peer = !known.received_from_discovery_peer_endpoints.is_empty();
+    if !has_peer && !has_index && !has_bootstrap && !has_discovery_peer {
         return true;
     }
     if has_peer {
@@ -106,10 +141,17 @@ pub fn announcement_delivery_is_active(
     {
         return true;
     }
-    known
+    if known
         .received_from_bootstrap_urls
         .iter()
         .any(|url| retains_bootstrap_url(store, url))
+    {
+        return true;
+    }
+    known
+        .received_from_discovery_peer_endpoints
+        .iter()
+        .any(|endpoint| retains_discovery_peer_endpoint(store, endpoint))
 }
 
 /// Compares two verified announcements for the same Pod.
@@ -433,17 +475,19 @@ pub fn retain_verified_pod_announcement(
         }
     }
 
-    let (peer_id, mut index_urls, mut bootstrap_urls) =
+    let (peer_id, mut index_urls, mut bootstrap_urls, mut discovery_peer_endpoints) =
         if let Some(existing) = store.known_pod_announcements.get(&key) {
             if existing.announcement.id == announcement.id {
                 (
                     provenance.peer_id.or(existing.received_from_peer_id),
                     existing.received_from_index_urls.clone(),
                     existing.received_from_bootstrap_urls.clone(),
+                    existing.received_from_discovery_peer_endpoints.clone(),
                 )
             } else {
                 (
                     provenance.peer_id,
+                    std::collections::BTreeSet::new(),
                     std::collections::BTreeSet::new(),
                     std::collections::BTreeSet::new(),
                 )
@@ -451,6 +495,7 @@ pub fn retain_verified_pod_announcement(
         } else {
             (
                 provenance.peer_id,
+                std::collections::BTreeSet::new(),
                 std::collections::BTreeSet::new(),
                 std::collections::BTreeSet::new(),
             )
@@ -461,12 +506,16 @@ pub fn retain_verified_pod_announcement(
     if let Some(url) = provenance.bootstrap_url {
         bootstrap_urls.insert(url);
     }
+    if let Some(endpoint) = provenance.discovery_peer_endpoint {
+        discovery_peer_endpoints.insert(endpoint);
+    }
 
     let known = KnownPodAnnouncement {
         announcement,
         received_from_peer_id: peer_id,
         received_from_index_urls: index_urls,
         received_from_bootstrap_urls: bootstrap_urls,
+        received_from_discovery_peer_endpoints: discovery_peer_endpoints,
         received_at: now,
     };
     store.known_pod_announcements.insert(key, known.clone());

@@ -102,6 +102,7 @@ pub fn admit_discovery_peer_advertisement(
     let known = KnownDiscoveryPeerAdvertisement {
         advertisement: advertisement.clone(),
         received_at: now,
+        learned_from: std::collections::BTreeSet::new(),
     };
     let is_new = !store
         .known_discovery_peer_advertisements

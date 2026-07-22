@@ -1,6 +1,6 @@
 # Rotate Discovery Peers and survive Bootstrap outages
 
-Status: ready-for-agent
+Status: done
 Blocked by: 03, 06
 Source: ../PRD.md
 
@@ -10,16 +10,17 @@ Allow Home Nodes to maintain a small automatic outbound Discovery Peer set, sync
 
 ## Acceptance criteria
 
-- [ ] A Home Node learns signed peer advertisements from Bootstrap Nodes and existing Discovery Peers and verifies identity, capability, reachability, protocol version, and lease locally.
-- [ ] Peer selection is bounded, randomized with deterministic test control, and does not imply Trusted Peer status.
-- [ ] The Home Node persists a small rotating outbound set with per-peer stream cursor, provenance, health, and last-success state.
-- [ ] Peer synchronization accepts only unchanged valid Origin-signed announcement lifecycle artifacts and never grants access to private or administrative state.
-- [ ] Invalid data, flooding, incompatible versions, expired advertisements, or repeated transport failures cause bounded backoff and automatic local eviction.
-- [ ] An independently learned announcement remains eligible when one delivery source disappears, while provenance records every current source.
-- [ ] Established Home Nodes continue receiving new announcements through viable peers while every configured Bootstrap is unavailable.
-- [ ] A fresh node with no viable Bootstrap reports degraded discovery clearly while preserving direct Pod URL operation.
-- [ ] Users can disable automatic peer gossip without deleting cached audit state or affecting Bootstrap and direct-address paths.
-- [ ] Rotation, eviction, cursor resume, and bootstrap-outage behavior survive process restart without blocking the async runtime.
+- [x] A Home Node learns signed peer advertisements from Bootstrap Nodes and existing Discovery Peers and verifies identity, capability, reachability, protocol version, and lease locally.
+- [x] Peer selection is bounded, randomized with deterministic test control, and does not imply Trusted Peer status.
+- [x] The Home Node persists a small rotating outbound set with per-peer stream cursor, provenance, health, and last-success state.
+- [x] Peer synchronization accepts only unchanged valid Origin-signed announcement lifecycle artifacts and never grants access to private or administrative state.
+- [x] Invalid data, flooding, incompatible versions, expired advertisements, or repeated transport failures cause bounded backoff and automatic local eviction.
+- [x] An independently learned announcement remains eligible when one delivery source disappears, while provenance records every current source.
+- [x] Established Home Nodes continue receiving new announcements through viable peers while every configured Bootstrap is unavailable.
+- [x] A fresh node with no viable Bootstrap reports degraded discovery clearly while preserving direct Pod URL operation.
+- [x] Users can disable automatic peer gossip without deleting cached audit state or affecting Bootstrap and direct-address paths.
+- [x] Rotation, eviction, cursor resume, and bootstrap-outage behavior survive process restart without blocking the async runtime.
 
 ## Comments
 
+Implemented in `discovery_peer/client.rs` with thin `AgentTools` + HTTP operator surfaces. Focused tests: unit module tests and `crates/stumble-core/tests/discovery_peer_rotation.rs`.

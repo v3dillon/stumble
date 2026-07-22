@@ -134,6 +134,12 @@ pub struct InMemoryStore {
     pub bootstrap_endpoints: HashMap<BootstrapEndpointId, BootstrapEndpointConfig>,
     /// Per-endpoint Announcement Stream cursor and last-attempt state.
     pub bootstrap_sync_states: HashMap<BootstrapEndpointId, BootstrapSyncState>,
+    /// Home Node automatic Discovery Peer gossip preference (enabled by default).
+    pub discovery_peer_gossip_config: Option<DiscoveryPeerGossipConfig>,
+    /// Bounded rotating outbound Discovery Peer set (not Trusted Peers).
+    pub outbound_discovery_peers: HashMap<NodeIdentityId, OutboundDiscoveryPeer>,
+    /// Per-peer stream cursor, health, and last-success state.
+    pub discovery_peer_sync_states: HashMap<NodeIdentityId, DiscoveryPeerSyncState>,
     pub trust_policies: HashMap<(UserId, Option<TenantId>), TrustPolicy>,
     pub pod_endorsements: HashMap<Uuid, PodEndorsement>,
     pub pod_explore_sample_sets: HashMap<Uuid, PodExploreSamples>,
@@ -234,6 +240,13 @@ struct PersistedStore {
     bootstrap_endpoints: Vec<BootstrapEndpointConfig>,
     #[serde(default)]
     bootstrap_sync_states: Vec<BootstrapSyncState>,
+    /// Zero or one Discovery Peer gossip config record.
+    #[serde(default)]
+    discovery_peer_gossip_config: Vec<DiscoveryPeerGossipConfig>,
+    #[serde(default)]
+    outbound_discovery_peers: Vec<OutboundDiscoveryPeer>,
+    #[serde(default)]
+    discovery_peer_sync_states: Vec<DiscoveryPeerSyncState>,
     #[serde(default)]
     trust_policies: Vec<TrustPolicy>,
     #[serde(default)]
@@ -500,6 +513,17 @@ impl From<&InMemoryStore> for PersistedStore {
                 .collect(),
             bootstrap_endpoints: store.bootstrap_endpoints.values().cloned().collect(),
             bootstrap_sync_states: store.bootstrap_sync_states.values().cloned().collect(),
+            discovery_peer_gossip_config: store
+                .discovery_peer_gossip_config
+                .clone()
+                .into_iter()
+                .collect(),
+            outbound_discovery_peers: store.outbound_discovery_peers.values().cloned().collect(),
+            discovery_peer_sync_states: store
+                .discovery_peer_sync_states
+                .values()
+                .cloned()
+                .collect(),
             trust_policies: store.trust_policies.values().cloned().collect(),
             pod_endorsements: store.pod_endorsements.values().cloned().collect(),
             pod_explore_sample_sets: store.pod_explore_sample_sets.values().cloned().collect(),
@@ -749,6 +773,17 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .into_iter()
                 .map(|state| (state.endpoint_id, state))
                 .collect(),
+            discovery_peer_gossip_config: snapshot.discovery_peer_gossip_config.into_iter().next(),
+            outbound_discovery_peers: snapshot
+                .outbound_discovery_peers
+                .into_iter()
+                .map(|peer| (peer.node_id, peer))
+                .collect(),
+            discovery_peer_sync_states: snapshot
+                .discovery_peer_sync_states
+                .into_iter()
+                .map(|state| (state.node_id, state))
+                .collect(),
             trust_policies: snapshot
                 .trust_policies
                 .into_iter()
@@ -933,6 +968,9 @@ const STORE_COLLECTIONS: &[&str] = &[
     "known_discovery_peer_advertisements",
     "bootstrap_endpoints",
     "bootstrap_sync_states",
+    "discovery_peer_gossip_config",
+    "outbound_discovery_peers",
+    "discovery_peer_sync_states",
     "trust_policies",
     "pod_endorsements",
     "pod_explore_sample_sets",
@@ -1350,6 +1388,9 @@ fn record_key(
         }
         "bootstrap_endpoints" => &["id"],
         "bootstrap_sync_states" => &["endpoint_id"],
+        "discovery_peer_gossip_config" => return Ok("discovery_peer_gossip".to_string()),
+        "outbound_discovery_peers" => &["node_id"],
+        "discovery_peer_sync_states" => &["node_id"],
         "pod_rules" | "pod_skill_packs" => &["pod_id"],
         "pod_curation_policies" => &["pod_id"],
         "pod_placements" => &["candidate_id", "pod_id"],
