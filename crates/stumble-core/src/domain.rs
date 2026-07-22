@@ -1933,7 +1933,6 @@ pub enum HarnessWriteOperation {
     /// Publish a signed optional recommendation from a public Pod.
     EndorsePublicPod,
     ImportPodEvents,
-    IndexPublicPods,
     CreatePod,
     JoinPod,
     SetPrioritySubscription,
@@ -6495,101 +6494,6 @@ pub struct WellKnownNode {
     pub protocol: String,
     pub node: NodeInfo,
     pub endpoints: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HubRegisteredNode {
-    pub node_id: NodeIdentityId,
-    pub display_name: String,
-    pub base_url: String,
-    pub public_key: String,
-    pub protocol_version: String,
-    pub registered_at: DateTime<Utc>,
-    pub last_seen_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HubRegisteredPod {
-    pub id: Uuid,
-    pub node_id: NodeIdentityId,
-    pub node_base_url: String,
-    pub pod_slug: String,
-    pub pod_name: String,
-    pub description: String,
-    pub tags: Vec<String>,
-    pub skill_pack_version: i32,
-    pub latest_event_hash: Option<String>,
-    pub manifest_url: String,
-    pub events_url: String,
-    pub registered_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HubRegisterNodeRequest {
-    pub node_id: NodeIdentityId,
-    pub display_name: String,
-    pub base_url: String,
-    pub public_key: String,
-    pub protocol_version: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HubRegisterPodRequest {
-    pub node_id: NodeIdentityId,
-    pub node_base_url: String,
-    pub pod_slug: String,
-    pub pod_name: String,
-    pub description: String,
-    pub tags: Vec<String>,
-    pub skill_pack_version: i32,
-    pub latest_event_hash: Option<String>,
-    pub manifest_url: String,
-    pub events_url: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HubSearchPodResult {
-    pub pod: HubRegisteredPod,
-    pub score: f32,
-    pub reasons: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HubSearchPodsResponse {
-    pub query: String,
-    pub results: Vec<HubSearchPodResult>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PodDiscoveryScope {
-    Local,
-    Global,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PodDiscoveryFeedItem {
-    pub pod: HubRegisteredPod,
-    pub scope: PodDiscoveryScope,
-    pub score: f32,
-    pub reasons: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PodDiscoveryFeedResponse {
-    pub query: String,
-    pub local_public_pods: Vec<PodDiscoveryFeedItem>,
-    pub global_public_pods: Vec<PodDiscoveryFeedItem>,
-    pub private_interests_exported: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HomePublicPodDiscoveryResponse {
-    pub topics: Vec<String>,
-    pub local_public_pods: Vec<PodRouteCandidate>,
-    pub hub_results: Vec<HubSearchPodResult>,
-    pub private_interests_exported: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -337,7 +337,7 @@ mod tests {
         let tools = AgentTools::new(store.clone());
         let ctx = ctx(&store);
 
-        // A private pod whose name and description strongly match the query topics.
+        // A private pod whose name and description strongly match the Explore query.
         tools
             .create_pod(
                 &ctx,
@@ -349,18 +349,26 @@ mod tests {
                 },
             )
             .unwrap();
+        // Public seed pods become Explore-eligible only through verified announcements.
+        let announcement = tools
+            .pod_announcement(
+                &ctx,
+                "beautiful-interfaces",
+                "https://example.local/federation/pods/beautiful-interfaces",
+            )
+            .unwrap();
+        tools.index_pod_announcement(announcement).unwrap();
 
         let discovery = tools
-            .discover_public_pods_for_home(
+            .explore_public_pods(
                 &ctx,
-                vec!["interface".to_string(), "design".to_string()],
-                25,
+                ExploreRequest::new("interface design", 25, 0).unwrap(),
             )
             .unwrap();
         let slugs: Vec<&str> = discovery
-            .local_public_pods
+            .results
             .iter()
-            .map(|candidate| candidate.pod_slug.as_str())
+            .map(|result| result.announcement.pod_slug.as_str())
             .collect();
 
         // The private pod must never surface on the public discovery surface...
@@ -876,196 +884,26 @@ mod tests {
     }
 
     #[test]
-    fn hub_register_search_and_home_discovery_do_not_export_private_interests() {
-        let store = seed_store();
-        let tools = AgentTools::new(store.clone());
-        let context = ctx(&store);
-        let node = create_node_identity("public alien node", None);
-        tools
-            .register_hub_node(HubRegisterNodeRequest {
-                node_id: node.id,
-                display_name: "Public Alien Node".to_string(),
-                base_url: "https://alien-node.example".to_string(),
-                public_key: node.public_key.clone(),
-                protocol_version: CURRENT_PROTOCOL_VERSION.to_string(),
-            })
-            .unwrap();
-        tools
-            .register_hub_pod(HubRegisterPodRequest {
-                node_id: node.id,
-                node_base_url: "https://alien-node.example".to_string(),
-                pod_slug: "public-uap-research".to_string(),
-                pod_name: "Public UAP Research".to_string(),
-                description: "Public links about aliens, UAP, and signals.".to_string(),
-                tags: vec![
-                    "aliens".to_string(),
-                    "uap".to_string(),
-                    "signals".to_string(),
-                ],
-                skill_pack_version: 1,
-                latest_event_hash: None,
-                manifest_url:
-                    "https://alien-node.example/federation/pods/public-uap-research/manifest"
-                        .to_string(),
-                events_url: "https://alien-node.example/federation/pods/public-uap-research/events"
-                    .to_string(),
-            })
-            .unwrap();
-        let search = tools.search_hub_pods("aliens signals", 10).unwrap();
-        assert_eq!(search.results[0].pod.pod_slug, "public-uap-research");
-        let discovery = tools
-            .discover_public_pods_for_home(
-                &context,
-                vec!["aliens".to_string(), "signals".to_string()],
-                10,
-            )
-            .unwrap();
-        assert!(!discovery.private_interests_exported);
-        assert!(discovery
-            .hub_results
-            .iter()
-            .any(|result| result.pod.pod_slug == "public-uap-research"));
-    }
-
-    #[test]
-    fn local_public_pods_are_automatically_indexed_for_hub_discovery() {
-        let store = seed_store();
-        let tools = AgentTools::new(store.clone());
-        let context = ctx(&store);
-        let public = tools
-            .create_pod_for_test(
-                &context,
-                CreatePodRequest {
-                    name: "Aliens".to_string(),
-                    slug: "aliens".to_string(),
-                    description: "Public research about aliens, UAP, and signals.".to_string(),
-                    visibility: Visibility::Public,
-                },
-            )
-            .unwrap();
-        let private = tools
-            .create_pod(
-                &context,
-                CreatePodRequest {
-                    name: "Private Aliens".to_string(),
-                    slug: "private-aliens".to_string(),
-                    description: "Private notes about aliens.".to_string(),
-                    visibility: Visibility::Private,
-                },
-            )
-            .unwrap();
-
-        let before = tools.search_hub_pods("aliens", 10).unwrap();
-        assert!(!before
-            .results
-            .iter()
-            .any(|result| result.pod.pod_slug == public.slug));
-
-        let indexed = tools
-            .index_local_public_pods_in_hub(&context, "http://127.0.0.1:8787")
-            .unwrap();
-        assert!(indexed.iter().any(|pod| pod.pod_slug == public.slug));
-        assert!(!indexed.iter().any(|pod| pod.pod_slug == private.slug));
-
-        let search = tools.search_hub_pods("aliens", 10).unwrap();
-        assert!(search
-            .results
-            .iter()
-            .any(|result| result.pod.pod_slug == public.slug));
-        assert!(!search
-            .results
-            .iter()
-            .any(|result| result.pod.pod_slug == private.slug));
-    }
-
-    #[test]
-    fn discovery_feed_splits_local_public_pods_from_global_hub_pods() {
-        let store = seed_store();
-        let tools = AgentTools::new(store.clone());
-        let context = ctx(&store);
-        let local_public = tools
-            .create_pod_for_test(
-                &context,
-                CreatePodRequest {
-                    name: "Aliens".to_string(),
-                    slug: "aliens".to_string(),
-                    description: "Public research about aliens and UAP.".to_string(),
-                    visibility: Visibility::Public,
-                },
-            )
-            .unwrap();
-        let local_private = tools
-            .create_pod(
-                &context,
-                CreatePodRequest {
-                    name: "Private Aliens".to_string(),
-                    slug: "private-aliens".to_string(),
-                    description: "Private notes about aliens.".to_string(),
-                    visibility: Visibility::Private,
-                },
-            )
-            .unwrap();
-        let remote_node = create_node_identity("remote public node", None);
-        tools
-            .register_hub_node(HubRegisterNodeRequest {
-                node_id: remote_node.id,
-                display_name: "Remote Public Node".to_string(),
-                base_url: "https://remote-node.example".to_string(),
-                public_key: remote_node.public_key,
-                protocol_version: CURRENT_PROTOCOL_VERSION.to_string(),
-            })
-            .unwrap();
-        tools
-            .register_hub_pod(HubRegisterPodRequest {
-                node_id: remote_node.id,
-                node_base_url: "https://remote-node.example".to_string(),
-                pod_slug: "remote-aliens".to_string(),
-                pod_name: "Remote Aliens".to_string(),
-                description: "Remote public pod about aliens and signals.".to_string(),
-                tags: vec!["aliens".to_string(), "signals".to_string()],
-                skill_pack_version: 1,
-                latest_event_hash: None,
-                manifest_url: "https://remote-node.example/federation/pods/remote-aliens/manifest"
-                    .to_string(),
-                events_url: "https://remote-node.example/federation/pods/remote-aliens/events"
-                    .to_string(),
-            })
-            .unwrap();
-
-        let feed = tools
-            .pod_discovery_feed(&context, "http://127.0.0.1:8787", "aliens", 10)
-            .unwrap();
-        assert!(!feed.private_interests_exported);
-        assert!(feed
-            .local_public_pods
-            .iter()
-            .any(|item| item.pod.pod_slug == local_public.slug));
-        assert!(feed
-            .global_public_pods
-            .iter()
-            .any(|item| item.pod.pod_slug == "remote-aliens"));
-        assert!(!feed
-            .local_public_pods
-            .iter()
-            .chain(feed.global_public_pods.iter())
-            .any(|item| item.pod.pod_slug == local_private.slug));
-    }
-
-    #[test]
-    fn imported_hub_events_materialize_remote_pod_links_for_briefs() {
-        let store = seed_store();
-        let tools = AgentTools::new(store.clone());
-        let context = ctx(&store);
+    fn imported_peer_events_materialize_remote_pod_links_for_briefs() {
+        let mut store = seed_store();
         let remote_node = create_node_identity("remote alien node", None);
-        tools
-            .register_hub_node(HubRegisterNodeRequest {
+        let peer_id = Uuid::now_v7();
+        store.trusted_peers.insert(
+            peer_id,
+            TrustedPeer {
+                id: peer_id,
                 node_id: remote_node.id,
+                tenant_id: None,
                 display_name: "Remote Alien Node".to_string(),
                 base_url: "https://remote-alien-node.example".to_string(),
                 public_key: remote_node.public_key.clone(),
-                protocol_version: CURRENT_PROTOCOL_VERSION.to_string(),
-            })
-            .unwrap();
+                trust_level: TrustLevel::ReadOnly,
+                enabled: true,
+                created_at: Utc::now(),
+            },
+        );
+        let tools = AgentTools::new(store.clone());
+        let context = ctx(&store);
 
         let remote_pod = Pod {
             id: Uuid::now_v7(),
@@ -1121,11 +959,7 @@ mod tests {
         .unwrap();
 
         let imported = tools
-            .import_public_events_from_hub_node(
-                &context,
-                remote_node.id,
-                vec![created_event, submitted_event],
-            )
+            .import_pod_events(&context, peer_id, vec![created_event, submitted_event])
             .unwrap();
         assert_eq!(imported, 2);
 
@@ -1248,87 +1082,6 @@ mod tests {
             .items
             .iter()
             .any(|item| item.submission_id == own_submission.id));
-    }
-
-    #[test]
-    fn hub_registration_rejects_public_http_urls() {
-        let tools = AgentTools::new(seed_store());
-        let node = create_node_identity("public node", None);
-        let error = tools
-            .register_hub_node(HubRegisterNodeRequest {
-                node_id: node.id,
-                display_name: "Public Node".to_string(),
-                base_url: "http://public-node.example".to_string(),
-                public_key: node.public_key,
-                protocol_version: CURRENT_PROTOCOL_VERSION.to_string(),
-            })
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("base_url must use https unless it is loopback-only"));
-    }
-
-    #[test]
-    fn hub_registration_allows_loopback_http_for_local_hubs() {
-        let tools = AgentTools::new(seed_store());
-        let node = create_node_identity("local node", None);
-        tools
-            .register_hub_node(HubRegisterNodeRequest {
-                node_id: node.id,
-                display_name: "Local Node".to_string(),
-                base_url: "http://127.0.0.1:8787".to_string(),
-                public_key: node.public_key,
-                protocol_version: CURRENT_PROTOCOL_VERSION.to_string(),
-            })
-            .unwrap();
-        let pod = tools
-            .register_hub_pod(HubRegisterPodRequest {
-                node_id: node.id,
-                node_base_url: "http://127.0.0.1:8787".to_string(),
-                pod_slug: "local-public".to_string(),
-                pod_name: "Local Public".to_string(),
-                description: "Local public metadata.".to_string(),
-                tags: vec!["local".to_string()],
-                skill_pack_version: 1,
-                latest_event_hash: None,
-                manifest_url: "http://127.0.0.1:8787/federation/pods/local-public/manifest"
-                    .to_string(),
-                events_url: "http://127.0.0.1:8787/federation/pods/local-public/events".to_string(),
-            })
-            .unwrap();
-        assert_eq!(pod.node_base_url, "http://127.0.0.1:8787");
-    }
-
-    #[test]
-    fn hub_pod_registration_requires_endpoint_origin_to_match_node_base() {
-        let tools = AgentTools::new(seed_store());
-        let node = create_node_identity("public node", None);
-        tools
-            .register_hub_node(HubRegisterNodeRequest {
-                node_id: node.id,
-                display_name: "Public Node".to_string(),
-                base_url: "https://public-node.example".to_string(),
-                public_key: node.public_key,
-                protocol_version: CURRENT_PROTOCOL_VERSION.to_string(),
-            })
-            .unwrap();
-        let error = tools
-            .register_hub_pod(HubRegisterPodRequest {
-                node_id: node.id,
-                node_base_url: "https://public-node.example".to_string(),
-                pod_slug: "public-pod".to_string(),
-                pod_name: "Public Pod".to_string(),
-                description: "Public metadata.".to_string(),
-                tags: vec!["public".to_string()],
-                skill_pack_version: 1,
-                latest_event_hash: None,
-                manifest_url: "https://other.example/federation/pods/public-pod/manifest"
-                    .to_string(),
-                events_url: "https://public-node.example/federation/pods/public-pod/events"
-                    .to_string(),
-            })
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("manifest_url must use the same scheme, host, and port"));
     }
 
     #[test]

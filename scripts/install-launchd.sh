@@ -73,12 +73,6 @@ cat > "$PLIST" <<PLIST
 
   <key>StandardErrorPath</key>
   <string>$ERR_LOG_XML</string>
-
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>STUMBLE_DISABLE_HUB_REFRESH</key>
-    <string>${STUMBLE_DISABLE_HUB_REFRESH:-true}</string>
-  </dict>
 </dict>
 </plist>
 PLIST

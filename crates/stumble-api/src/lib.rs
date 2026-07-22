@@ -260,7 +260,6 @@ pub fn router_with_options(
         .route("/links/:id/save", post(retired_feedback_contract))
         .route("/links/:id/rate", post(retired_feedback_contract))
         .route("/me/preferences", patch(update_preferences))
-        .route("/discovery/pods", get(pod_discovery_feed))
         .route(
             "/discovery/announcements",
             post(index_pod_announcement).get(search_pod_announcements),
@@ -427,10 +426,6 @@ pub fn router_with_options(
             "/federation/sync/:peer_id",
             post(retired_peer_sync_contract),
         )
-        .route("/hub/register-node", post(hub_register_node))
-        .route("/hub/register-pod", post(hub_register_pod))
-        .route("/hub/refresh", post(hub_refresh))
-        .route("/hub/search-pods", get(hub_search_pods))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -600,7 +595,7 @@ fn route_docs() -> Vec<ApiRouteDoc> {
         ApiRouteDoc {
             method: "GET",
             path: "/home/discover-public-pods",
-            description: "home-node public pod discovery from explicit topics or private interests",
+            description: "intentional Explore of verified public Pod announcements under local Trust Policy",
         },
         ApiRouteDoc {
             method: "GET",
@@ -688,11 +683,6 @@ fn route_docs() -> Vec<ApiRouteDoc> {
             description: "report discovery readiness including Bootstrap-outage degraded mode",
         },
         ApiRouteDoc {
-            method: "GET",
-            path: "/discovery/pods",
-            description: "combined public pod discovery feed split into local public pods and global hub-indexed pods",
-        },
-        ApiRouteDoc {
             method: "POST",
             path: "/discovery/announcements",
             description: "verify and index a signed public Pod Announcement with its Announcement Lease",
@@ -726,26 +716,6 @@ fn route_docs() -> Vec<ApiRouteDoc> {
             method: "POST",
             path: "/discovery/withdrawals/receive",
             description: "receive a peer-delivered Origin-signed Pod Withdrawal",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/hub/register-node",
-            description: "register public node metadata in a custom discovery hub",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/hub/register-pod",
-            description: "register a public pod manifest in a custom discovery hub",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/hub/refresh",
-            description: "pull registered remote nodes' public federation surfaces into the global discovery index",
-        },
-        ApiRouteDoc {
-            method: "GET",
-            path: "/hub/search-pods",
-            description: "refresh this node's public pod index, then search public pod manifests indexed by a custom discovery hub",
         },
         ApiRouteDoc {
             method: "GET",
@@ -1453,49 +1423,36 @@ async fn update_preferences(
 
 #[derive(Debug, Deserialize)]
 struct PublicPodDiscoveryQuery {
+    /// Explicit Explore query; `topics` is accepted as a comma-joined alias.
+    q: Option<String>,
     topics: Option<String>,
     limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PodDiscoveryFeedQuery {
-    q: Option<String>,
-    limit: Option<usize>,
-}
-
-async fn pod_discovery_feed(
-    State(state): State<ApiState>,
-    _headers: HeaderMap,
-    Query(query): Query<PodDiscoveryFeedQuery>,
-) -> Result<Json<PodDiscoveryFeedResponse>, ApiError> {
-    let ctx = state.tools.default_auth_context()?;
-    Ok(Json(state.tools.pod_discovery_feed(
-        &ctx,
-        &state.base_url,
-        &query.q.unwrap_or_default(),
-        query.limit.unwrap_or(10),
-    )?))
+    sample_size: Option<usize>,
 }
 
 async fn home_discover_public_pods(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Query(query): Query<PublicPodDiscoveryQuery>,
-) -> Result<Json<HomePublicPodDiscoveryResponse>, ApiError> {
+) -> Result<Json<ExploreResponse>, ApiError> {
     let ctx = auth_or_default(&state, &headers)?;
-    let topics = query
-        .topics
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|topic| !topic.is_empty())
-        .map(ToString::to_string)
-        .collect();
-    Ok(Json(state.tools.discover_public_pods_for_home(
-        &ctx,
-        topics,
+    let query_text = query.q.unwrap_or_else(|| {
+        query
+            .topics
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|topic| !topic.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+    let request = ExploreRequest::new(
+        query_text,
         query.limit.unwrap_or(10),
-    )?))
+        query.sample_size.unwrap_or(0),
+    )
+    .map_err(AgentToolsError::from)?;
+    Ok(Json(state.tools.explore_public_pods(&ctx, request)?))
 }
 
 async fn dev_token(
@@ -2374,56 +2331,6 @@ async fn receive_pod_withdrawal(
     )?))
 }
 
-async fn hub_register_node(
-    State(state): State<ApiState>,
-    Json(request): Json<HubRegisterNodeRequest>,
-) -> Result<Json<HubRegisteredNode>, ApiError> {
-    Ok(Json(state.tools.register_hub_node(request)?))
-}
-
-async fn hub_register_pod(
-    State(state): State<ApiState>,
-    Json(request): Json<HubRegisterPodRequest>,
-) -> Result<Json<HubRegisteredPod>, ApiError> {
-    Ok(Json(state.tools.register_hub_pod(request)?))
-}
-
-async fn hub_refresh(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<stumble_sync::HubRefreshReport>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    stumble_sync::refresh_hub_index(&state.tools, &ctx)
-        .await
-        .map(Json)
-        .map_err(|error| ApiError {
-            status: StatusCode::BAD_GATEWAY,
-            code: "upstream_error",
-            message: error.to_string(),
-        })
-}
-
-#[derive(Debug, Deserialize)]
-struct HubSearchQuery {
-    q: Option<String>,
-    limit: Option<usize>,
-}
-
-async fn hub_search_pods(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Query(query): Query<HubSearchQuery>,
-) -> Result<Json<HubSearchPodsResponse>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    state
-        .tools
-        .index_local_public_pods_in_hub(&ctx, &state.base_url)?;
-    Ok(Json(state.tools.search_hub_pods(
-        &query.q.unwrap_or_default(),
-        query.limit.unwrap_or(10),
-    )?))
-}
-
 fn auth_or_default(state: &ApiState, headers: &HeaderMap) -> Result<AuthContext, ApiError> {
     let tools = &state.tools;
     if let Some(value) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
@@ -2578,6 +2485,57 @@ mod tests {
         assert!(!routes
             .iter()
             .any(|route| { route.method == "POST" && route.path == "/federation/sync/:peer_id" }));
+    }
+
+    #[test]
+    fn public_route_docs_contain_no_legacy_hub_routes_or_terminology() {
+        let routes = route_docs();
+        assert!(!routes.iter().any(|route| route.path.starts_with("/hub")));
+        assert!(!routes.iter().any(|route| route.path == "/discovery/pods"));
+        for route in &routes {
+            let blob = format!("{} {} {}", route.method, route.path, route.description);
+            assert!(
+                !blob.to_lowercase().contains("hub"),
+                "public route docs must not use Hub terminology: {blob}"
+            );
+        }
+        assert!(routes
+            .iter()
+            .any(|route| { route.method == "GET" && route.path == "/home/discover-public-pods" }));
+        assert!(routes
+            .iter()
+            .any(|route| { route.method == "GET" && route.path == "/discovery/announcements" }));
+    }
+
+    #[tokio::test]
+    async fn retired_hub_http_routes_are_absent_without_redirect() {
+        let app = router(AgentTools::new(seed_store()));
+        for (method, path) in [
+            ("POST", "/hub/register-node"),
+            ("POST", "/hub/register-pod"),
+            ("POST", "/hub/refresh"),
+            ("GET", "/hub/search-pods"),
+            ("GET", "/discovery/pods"),
+        ] {
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "retired route must be absent: {method} {path}"
+            );
+            assert!(
+                response
+                    .headers()
+                    .get(axum::http::header::LOCATION)
+                    .is_none(),
+                "retired route must not redirect: {method} {path}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -613,7 +613,6 @@ async fn unauthenticated_public_http_responses_never_expose_taste_profile_data()
         ("POST", "/taste-profile/learned/reset"),
         ("POST", retraction_path.as_str()),
         ("GET", "/home/discover-public-pods?topics=design"),
-        ("GET", "/hub/search-pods?q=design"),
     ] {
         let request = Request::builder()
             .method(method)
@@ -623,5 +622,26 @@ async fn unauthenticated_public_http_responses_never_expose_taste_profile_data()
             .unwrap();
         let response = public_router().oneshot(request).await.unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+    // Retired Hub and hub-era discovery routes are absent (no redirect/alias).
+    for (method, path) in [
+        ("GET", "/hub/search-pods?q=design"),
+        ("POST", "/hub/register-node"),
+        ("POST", "/hub/register-pod"),
+        ("POST", "/hub/refresh"),
+        ("GET", "/discovery/pods?q=design"),
+    ] {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let response = public_router().oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::NOT_FOUND,
+            "retired route must be absent: {method} {path}"
+        );
     }
 }

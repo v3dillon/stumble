@@ -18,34 +18,6 @@ CREATE TABLE trusted_peers (
   created_at TEXT NOT NULL
 );
 
-CREATE TABLE hub_registered_nodes (
-  node_id TEXT PRIMARY KEY,
-  display_name TEXT NOT NULL,
-  base_url TEXT NOT NULL,
-  public_key TEXT NOT NULL,
-  protocol_version TEXT NOT NULL,
-  registered_at TEXT NOT NULL,
-  last_seen_at TEXT NOT NULL
-);
-
-CREATE TABLE hub_registered_pods (
-  id TEXT PRIMARY KEY,
-  node_id TEXT NOT NULL,
-  node_base_url TEXT NOT NULL,
-  pod_slug TEXT NOT NULL,
-  pod_name TEXT NOT NULL,
-  description TEXT NOT NULL,
-  tags TEXT NOT NULL DEFAULT '[]',
-  skill_pack_version INTEGER NOT NULL,
-  latest_event_hash TEXT NULL,
-  manifest_url TEXT NOT NULL,
-  events_url TEXT NOT NULL,
-  registered_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-
-CREATE UNIQUE INDEX hub_registered_pods_node_slug_idx ON hub_registered_pods (node_id, pod_slug);
-
 CREATE TABLE sync_runs (
   id TEXT PRIMARY KEY,
   tenant_id TEXT NULL,

@@ -166,8 +166,6 @@ pub struct InMemoryStore {
     pub saves: HashSet<(UserId, SubmissionId)>,
     pub private_notes: BTreeMap<(UserId, SubmissionId), String>,
     pub reading_history: HashSet<(UserId, SubmissionId)>,
-    pub hub_nodes: HashMap<NodeIdentityId, HubRegisteredNode>,
-    pub hub_pods: HashMap<(NodeIdentityId, String), HubRegisteredPod>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -284,8 +282,6 @@ struct PersistedStore {
     saves: Vec<PersistedUserSubmission>,
     private_notes: Vec<PersistedPrivateNote>,
     reading_history: Vec<PersistedUserSubmission>,
-    hub_nodes: Vec<HubRegisteredNode>,
-    hub_pods: Vec<HubRegisteredPod>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -579,8 +575,6 @@ impl From<&InMemoryStore> for PersistedStore {
                     submission_id: *submission_id,
                 })
                 .collect(),
-            hub_nodes: store.hub_nodes.values().cloned().collect(),
-            hub_pods: store.hub_pods.values().cloned().collect(),
         }
     }
 }
@@ -883,16 +877,6 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .into_iter()
                 .map(|history| (history.user_id, history.submission_id))
                 .collect(),
-            hub_nodes: snapshot
-                .hub_nodes
-                .into_iter()
-                .map(|node| (node.node_id, node))
-                .collect(),
-            hub_pods: snapshot
-                .hub_pods
-                .into_iter()
-                .map(|pod| ((pod.node_id, pod.pod_slug.clone()), pod))
-                .collect(),
         })
     }
 }
@@ -945,6 +929,8 @@ pub fn load_or_seed_store_snapshot(
 
 const SQLITE_STORE_SCHEMA: &str =
     include_str!("../../../migrations/sqlite/0002_authoritative_store.sql");
+const SQLITE_DROP_LEGACY_HUB: &str =
+    include_str!("../../../migrations/sqlite/0003_drop_legacy_hub.sql");
 const STORE_COLLECTIONS: &[&str] = &[
     "tenants",
     "users",
@@ -1010,8 +996,6 @@ const STORE_COLLECTIONS: &[&str] = &[
     "saves",
     "private_notes",
     "reading_history",
-    "hub_nodes",
-    "hub_pods",
 ];
 
 type StoreRecords = BTreeMap<(String, String), String>;
@@ -1115,6 +1099,9 @@ fn open_sqlite_store(path: &Path) -> Result<rusqlite::Connection, StorePersisten
     let connection = rusqlite::Connection::open(path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.execute_batch(SQLITE_STORE_SCHEMA)?;
+    // Forward migration: drop non-authoritative legacy Hub caches without
+    // transforming their contents. Idempotent for new and existing databases.
+    connection.execute_batch(SQLITE_DROP_LEGACY_HUB)?;
     Ok(connection)
 }
 
@@ -1354,8 +1341,6 @@ fn record_key(
         "interest_seeds" => &["user_id", "candidate_id"],
         "trust_policies" => &["user_id", "tenant_id"],
         "saves" | "private_notes" | "reading_history" => &["user_id", "submission_id"],
-        "hub_pods" => &["node_id", "pod_slug"],
-        "hub_nodes" => &["node_id"],
         "known_pod_announcements" => {
             let announcement = value
                 .get("announcement")

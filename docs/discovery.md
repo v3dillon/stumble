@@ -34,7 +34,7 @@ Failure codes include `invalid_signature`, `announcement_expired`, `announcement
 
 ## Open Bootstrap admission and Announcement Streams
 
-Bootstrap is an independent node capability (enabled via `AgentTools::with_bootstrap_capability`), not a Hub role and not an Origin proxy for private state. When enabled, a public Origin may submit a signed `PodAnnouncement` to `POST /bootstrap/announcements` without a User account or pre-existing Trusted Peer relationship.
+Bootstrap is an independent node capability (enabled via `AgentTools::with_bootstrap_capability`), not an Origin proxy for private state. When enabled, a public Origin may submit a signed `PodAnnouncement` to `POST /bootstrap/announcements` without a User account or pre-existing Trusted Peer relationship.
 
 Admission verifies, in order relevant to the failure: payload size bounds; Origin identity consistency; Ed25519 signature and lease integrity; protocol compatibility (`stumble/1.0`); canonical public Pod URL; per-network and per-Origin submission rate limits; Origin reachability and the current public manifest through an injectable `OriginProbe` port; and a per-Origin active-admission quota that bounds materially duplicate public Pods without inventing a global quality score. Canonically identical resubmissions (same announcement identity and payload) are idempotent and do not append a second stream effect. Preferable renewals of an already admitted Pod append a `renewed` stream entry.
 

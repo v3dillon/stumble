@@ -34,7 +34,6 @@ async fn api_process_serves_http_and_keeps_diagnostics_off_stdout() {
             data_dir.0.to_str().expect("UTF-8 test path"),
             "--bind",
             "127.0.0.1:0",
-            "--disable-hub-refresh",
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -72,15 +71,44 @@ async fn api_process_serves_http_and_keeps_diagnostics_off_stdout() {
 fn api_process_refuses_to_initialize_an_empty_home_node() {
     let data_dir = TestDataDir::new();
     let output = Command::new(env!("CARGO_BIN_EXE_stumble-api"))
-        .args([
-            "--data-dir",
-            data_dir.0.to_str().expect("UTF-8 test path"),
-            "--disable-hub-refresh",
-        ])
+        .args(["--data-dir", data_dir.0.to_str().expect("UTF-8 test path")])
         .output()
         .expect("run stumble-api");
 
     assert!(!output.status.success());
     assert!(!data_dir.0.join("stumble.sqlite3").exists());
     assert!(String::from_utf8_lossy(&output.stderr).contains("Home Node is not initialized"));
+}
+
+#[test]
+fn api_process_rejects_retired_hub_refresh_options() {
+    let data_dir = TestDataDir::new();
+    data_dir.initialize();
+    for flag in ["--disable-hub-refresh", "--hub-refresh-interval-seconds"] {
+        let mut args = vec![
+            "--data-dir".to_string(),
+            data_dir.0.to_str().expect("UTF-8 test path").to_string(),
+            "--bind".to_string(),
+            "127.0.0.1:0".to_string(),
+            flag.to_string(),
+        ];
+        if flag == "--hub-refresh-interval-seconds" {
+            args.push("60".to_string());
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_stumble-api"))
+            .args(&args)
+            .output()
+            .expect("run stumble-api with retired hub option");
+        assert!(
+            !output.status.success(),
+            "retired option {flag} must fail clearly"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("unexpected argument")
+                || stderr.contains("Unrecognized option")
+                || stderr.contains(flag.trim_start_matches('-')),
+            "stderr should mention retired option {flag}: {stderr}"
+        );
+    }
 }

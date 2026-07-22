@@ -171,7 +171,7 @@ const DEFAULT_PENDING_PROPOSAL_SECONDS: u64 = 3_600;
 pub struct AgentTools {
     store: Arc<RwLock<InMemoryStore>>,
     persistence: Option<Persistence>,
-    /// Independent Bootstrap capability configuration (not a Hub role).
+    /// Independent Bootstrap capability configuration.
     bootstrap: BootstrapCapability,
     /// Independent Index capability (may share a process with Bootstrap).
     index: IndexCapability,
@@ -748,8 +748,8 @@ impl AgentTools {
 
     /// Enables or reconfigures the independent Bootstrap capability.
     ///
-    /// Bootstrap does not imply Hub authority or private-state proxying. The
-    /// injected [`OriginProbe`] verifies Origin reachability and public manifests.
+    /// Bootstrap does not grant Origin proxy authority or private-state access.
+    /// The injected [`OriginProbe`] verifies Origin reachability and public manifests.
     #[must_use]
     pub fn with_bootstrap_capability(
         mut self,
@@ -7407,10 +7407,6 @@ impl AgentTools {
             "pod_events_template".to_string(),
             format!("{base}/federation/pods/{{slug}}/events"),
         );
-        endpoints.insert(
-            "hub_search_pods".to_string(),
-            format!("{base}/hub/search-pods"),
-        );
         if self.bootstrap.enabled {
             endpoints.insert(
                 "bootstrap_announcements".to_string(),
@@ -8910,7 +8906,7 @@ impl AgentTools {
         let user_id = ctx.user_id.ok_or_else(|| {
             StoreError::Validation("Index Node results require an authenticated User".into())
         })?;
-        let index_base_url = normalized_url(validate_hub_base_url(index_base_url, "base_url")?);
+        let index_base_url = normalized_url(validate_public_base_url(index_base_url, "base_url")?);
         let policy = store
             .trust_policies
             .get(&(user_id, ctx.tenant_id))
@@ -9469,315 +9465,6 @@ impl AgentTools {
         Ok(ExploreResponse { query, results })
     }
 
-    pub fn register_hub_node(
-        &self,
-        request: HubRegisterNodeRequest,
-    ) -> Result<HubRegisteredNode, AgentToolsError> {
-        validate_protocol_version(&request.protocol_version)?;
-        let base_url = validate_hub_base_url(&request.base_url, "base_url")?;
-        let mut store = self
-            .store
-            .write()
-            .map_err(|_| AgentToolsError::LockPoisoned)?;
-        let now = Utc::now();
-        let registered = HubRegisteredNode {
-            node_id: request.node_id,
-            display_name: request.display_name,
-            base_url: normalized_url(base_url),
-            public_key: request.public_key,
-            protocol_version: request.protocol_version,
-            registered_at: store
-                .hub_nodes
-                .get(&request.node_id)
-                .map(|node| node.registered_at)
-                .unwrap_or(now),
-            last_seen_at: now,
-        };
-        store
-            .hub_nodes
-            .insert(registered.node_id, registered.clone());
-        self.persist_locked(&mut store)?;
-        Ok(registered)
-    }
-
-    pub fn list_hub_nodes(&self) -> Result<Vec<HubRegisteredNode>, AgentToolsError> {
-        let store = self
-            .store
-            .read()
-            .map_err(|_| AgentToolsError::LockPoisoned)?;
-        Ok(store.hub_nodes.values().cloned().collect())
-    }
-
-    pub fn register_hub_pod(
-        &self,
-        request: HubRegisterPodRequest,
-    ) -> Result<HubRegisteredPod, AgentToolsError> {
-        let node_base_url = validate_hub_base_url(&request.node_base_url, "node_base_url")?;
-        let manifest_url =
-            validate_hub_endpoint_url(&request.manifest_url, "manifest_url", &node_base_url)?;
-        let events_url =
-            validate_hub_endpoint_url(&request.events_url, "events_url", &node_base_url)?;
-        let mut store = self
-            .store
-            .write()
-            .map_err(|_| AgentToolsError::LockPoisoned)?;
-        if !store.hub_nodes.contains_key(&request.node_id) {
-            return Err(StoreError::Validation(format!(
-                "hub pod node_id {} is not registered",
-                request.node_id
-            ))
-            .into());
-        }
-        let now = Utc::now();
-        let key = (request.node_id, request.pod_slug.clone());
-        let registered_at = store
-            .hub_pods
-            .get(&key)
-            .map(|pod| pod.registered_at)
-            .unwrap_or(now);
-        let pod = HubRegisteredPod {
-            id: store
-                .hub_pods
-                .get(&key)
-                .map(|pod| pod.id)
-                .unwrap_or_else(Uuid::now_v7),
-            node_id: request.node_id,
-            node_base_url: normalized_url(node_base_url),
-            pod_slug: request.pod_slug,
-            pod_name: request.pod_name,
-            description: request.description,
-            tags: normalize_unique(request.tags),
-            skill_pack_version: request.skill_pack_version,
-            latest_event_hash: request.latest_event_hash,
-            manifest_url: normalized_url(manifest_url),
-            events_url: normalized_url(events_url),
-            registered_at,
-            updated_at: now,
-        };
-        store.hub_pods.insert(key, pod.clone());
-        self.persist_locked(&mut store)?;
-        Ok(pod)
-    }
-
-    pub fn index_local_public_pods_in_hub(
-        &self,
-        ctx: &AuthContext,
-        base_url: &str,
-    ) -> Result<Vec<HubRegisteredPod>, AgentToolsError> {
-        let node_base_url = validate_hub_base_url(base_url, "base_url")?;
-        let normalized_base_url = normalized_url(node_base_url.clone());
-        let mut store = self
-            .store
-            .write()
-            .map_err(|_| AgentToolsError::LockPoisoned)?;
-        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
-        let node = store.node_for_tenant(ctx.tenant_id)?;
-        let now = Utc::now();
-        let registered_node = HubRegisteredNode {
-            node_id: node.id,
-            display_name: node.display_name.clone(),
-            base_url: normalized_base_url.clone(),
-            public_key: node.public_key.clone(),
-            protocol_version: CURRENT_PROTOCOL_VERSION.to_string(),
-            registered_at: store
-                .hub_nodes
-                .get(&node.id)
-                .map(|node| node.registered_at)
-                .unwrap_or(now),
-            last_seen_at: now,
-        };
-        store.hub_nodes.insert(node.id, registered_node);
-
-        let public_pods = store
-            .pods
-            .values()
-            .filter(|pod| {
-                (pod.tenant_id == ctx.tenant_id || pod.tenant_id.is_none())
-                    && pod.visibility == Visibility::Public
-                    && pod
-                        .origin_node_id
-                        .is_none_or(|origin_node_id| origin_node_id == node.id)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut indexed = Vec::new();
-        for pod in public_pods {
-            let Some(pack) = store.pod_skill_packs.get(&pod.id) else {
-                continue;
-            };
-            let manifest_url = validate_hub_endpoint_url(
-                &format!(
-                    "{}/federation/pods/{}/manifest",
-                    normalized_base_url, pod.slug
-                ),
-                "manifest_url",
-                &node_base_url,
-            )?;
-            let events_url = validate_hub_endpoint_url(
-                &format!(
-                    "{}/federation/pods/{}/events",
-                    normalized_base_url, pod.slug
-                ),
-                "events_url",
-                &node_base_url,
-            )?;
-            let key = (node.id, pod.slug.clone());
-            let registered_at = store
-                .hub_pods
-                .get(&key)
-                .map(|pod| pod.registered_at)
-                .unwrap_or(now);
-            let registered_pod = HubRegisteredPod {
-                id: store
-                    .hub_pods
-                    .get(&key)
-                    .map(|pod| pod.id)
-                    .unwrap_or_else(Uuid::now_v7),
-                node_id: node.id,
-                node_base_url: normalized_base_url.clone(),
-                pod_slug: pod.slug.clone(),
-                pod_name: pod.name.clone(),
-                description: pod.description.clone(),
-                tags: route_tokens(&format!("{} {} {}", pod.slug, pod.name, pod.description)),
-                skill_pack_version: pack.version,
-                latest_event_hash: store.latest_event_hash(&pod.slug),
-                manifest_url: normalized_url(manifest_url),
-                events_url: normalized_url(events_url),
-                registered_at,
-                updated_at: now,
-            };
-            store.hub_pods.insert(key, registered_pod.clone());
-            indexed.push(registered_pod);
-        }
-        record_harness_write(
-            &mut store,
-            ctx,
-            HarnessWriteOperation::IndexPublicPods,
-            None,
-        );
-        self.persist_locked(&mut store)?;
-        Ok(indexed)
-    }
-
-    pub fn search_hub_pods(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<HubSearchPodsResponse, AgentToolsError> {
-        let store = self
-            .store
-            .read()
-            .map_err(|_| AgentToolsError::LockPoisoned)?;
-        let query = query.trim().to_lowercase();
-        let query_tokens = route_tokens(&query);
-        let mut results = store
-            .hub_pods
-            .values()
-            .filter_map(|pod| score_hub_pod(pod, &query_tokens))
-            .collect::<Vec<_>>();
-        results.sort_by(|a, b| b.score.total_cmp(&a.score));
-        results.truncate(limit.clamp(1, 50));
-        Ok(HubSearchPodsResponse { query, results })
-    }
-
-    pub fn pod_discovery_feed(
-        &self,
-        ctx: &AuthContext,
-        base_url: &str,
-        query: &str,
-        limit: usize,
-    ) -> Result<PodDiscoveryFeedResponse, AgentToolsError> {
-        self.index_local_public_pods_in_hub(ctx, base_url)?;
-        let store = self
-            .store
-            .read()
-            .map_err(|_| AgentToolsError::LockPoisoned)?;
-        let node = store.node_for_tenant(ctx.tenant_id)?;
-        let query = query.trim().to_lowercase();
-        let query_tokens = route_tokens(&query);
-        let mut local_public_pods = Vec::new();
-        let mut global_public_pods = Vec::new();
-        for pod in store.hub_pods.values() {
-            let scope = if pod.node_id == node.id {
-                PodDiscoveryScope::Local
-            } else {
-                PodDiscoveryScope::Global
-            };
-            let Some(item) = discovery_feed_item(pod, scope, &query_tokens) else {
-                continue;
-            };
-            match item.scope {
-                PodDiscoveryScope::Local => local_public_pods.push(item),
-                PodDiscoveryScope::Global => global_public_pods.push(item),
-            }
-        }
-        sort_discovery_feed_items(&mut local_public_pods);
-        sort_discovery_feed_items(&mut global_public_pods);
-        let limit = limit.clamp(1, 50);
-        local_public_pods.truncate(limit);
-        global_public_pods.truncate(limit);
-        Ok(PodDiscoveryFeedResponse {
-            query,
-            local_public_pods,
-            global_public_pods,
-            private_interests_exported: false,
-        })
-    }
-
-    pub fn discover_public_pods_for_home(
-        &self,
-        ctx: &AuthContext,
-        topics: Vec<String>,
-        limit: usize,
-    ) -> Result<HomePublicPodDiscoveryResponse, AgentToolsError> {
-        let mut effective_topics = normalize_unique(topics);
-        let store = self
-            .store
-            .read()
-            .map_err(|_| AgentToolsError::LockPoisoned)?;
-        if effective_topics.is_empty() {
-            if let Some(user_id) = ctx.user_id {
-                if let Some(prefs) = store.user_preferences.get(&(user_id, ctx.tenant_id)) {
-                    effective_topics = prefs.interests.clone();
-                }
-            }
-        }
-        let query = effective_topics.join(" ");
-        let route_request = RouteLinkRequest {
-            url: String::new(),
-            title: Some(query.clone()),
-            summary: Some(query.clone()),
-            tags: effective_topics.clone(),
-        };
-        // This is a public discovery surface. Routing scores every pod the caller
-        // can see (including their own private pods), so restrict the results to
-        // public slugs before returning them.
-        let public_slugs: std::collections::HashSet<String> = store
-            .pods
-            .values()
-            .filter(|pod| {
-                (pod.tenant_id == ctx.tenant_id || pod.tenant_id.is_none())
-                    && pod.visibility == Visibility::Public
-            })
-            .map(|pod| pod.slug.clone())
-            .collect();
-        drop(store);
-        let local_public_pods = self
-            .route_link_to_pods(ctx, route_request, 0.0)?
-            .candidates
-            .into_iter()
-            .filter(|candidate| candidate.score > 0.0 && public_slugs.contains(&candidate.pod_slug))
-            .take(limit.clamp(1, 25))
-            .collect();
-        let hub_results = self.search_hub_pods(&query, limit)?.results;
-        Ok(HomePublicPodDiscoveryResponse {
-            topics: effective_topics,
-            local_public_pods,
-            hub_results,
-            private_interests_exported: false,
-        })
-    }
-
     pub fn export_pod_events(
         &self,
         ctx: &AuthContext,
@@ -9822,55 +9509,6 @@ impl AgentTools {
                 return Err(StoreError::InvalidSignature.into());
             }
             event.imported_from_peer_id = Some(peer_id);
-            event.verified = true;
-            event.tenant_id = ctx.tenant_id;
-            project_imported_public_event(&mut store, ctx, &event)?;
-            store.event_log.push(event);
-            imported += 1;
-        }
-        if imported > 0 {
-            record_harness_write(
-                &mut store,
-                ctx,
-                HarnessWriteOperation::ImportPodEvents,
-                None,
-            );
-            self.persist_locked(&mut store)?;
-        }
-        Ok(imported)
-    }
-
-    pub fn import_public_events_from_hub_node(
-        &self,
-        ctx: &AuthContext,
-        node_id: NodeIdentityId,
-        events: Vec<EventLog>,
-    ) -> Result<usize, AgentToolsError> {
-        let mut store = self
-            .store
-            .write()
-            .map_err(|_| AgentToolsError::LockPoisoned)?;
-        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
-        let node = store
-            .hub_nodes
-            .get(&node_id)
-            .cloned()
-            .ok_or_else(|| StoreError::NotFound(format!("hub node {node_id}")))?;
-        let mut imported = 0;
-        for mut event in events {
-            if event.author_node_id != node_id || crate::store::is_private_event(&event.event_type)
-            {
-                continue;
-            }
-            if store.event_log.iter().any(|existing| {
-                existing.event_id == event.event_id || existing.content_hash == event.content_hash
-            }) {
-                continue;
-            }
-            if !verify_event(&event, &node.public_key)? {
-                return Err(StoreError::InvalidSignature.into());
-            }
-            event.imported_from_peer_id = None;
             event.verified = true;
             event.tenant_id = ctx.tenant_id;
             project_imported_public_event(&mut store, ctx, &event)?;
@@ -10624,11 +10262,11 @@ fn validate_protocol_version(value: &str) -> Result<(), AgentToolsError> {
     })
 }
 
-fn validate_hub_base_url(value: &str, field: &str) -> Result<Url, AgentToolsError> {
-    let mut url = parse_hub_url(value, field)?;
+fn validate_public_base_url(value: &str, field: &str) -> Result<Url, AgentToolsError> {
+    let mut url = parse_public_url(value, field)?;
     url.set_query(None);
     url.set_fragment(None);
-    validate_hub_scheme_and_host(&url, field)?;
+    validate_public_scheme_and_host(&url, field)?;
     Ok(url)
 }
 
@@ -10644,7 +10282,7 @@ fn apply_trust_policy_change(
                     StoreError::Validation("Index Node label must not be empty".into()).into(),
                 );
             }
-            let base_url = normalized_url(validate_hub_base_url(base_url, "base_url")?);
+            let base_url = normalized_url(validate_public_base_url(base_url, "base_url")?);
             if !policy
                 .index_nodes
                 .iter()
@@ -10660,7 +10298,7 @@ fn apply_trust_policy_change(
             }
         }
         TrustPolicyChange::RemoveIndexNode { base_url } => {
-            let base_url = normalized_url(validate_hub_base_url(base_url, "base_url")?);
+            let base_url = normalized_url(validate_public_base_url(base_url, "base_url")?);
             let original_len = policy.index_nodes.len();
             policy
                 .index_nodes
@@ -10709,34 +10347,7 @@ fn insert_normalized_policy_term(
     Ok(())
 }
 
-fn validate_hub_endpoint_url(
-    value: &str,
-    field: &str,
-    node_base_url: &Url,
-) -> Result<Url, AgentToolsError> {
-    let mut url = parse_hub_url(value, field)?;
-    url.set_query(None);
-    url.set_fragment(None);
-    validate_hub_scheme_and_host(&url, field)?;
-    if url.scheme() != node_base_url.scheme()
-        || url.host_str() != node_base_url.host_str()
-        || url.port_or_known_default() != node_base_url.port_or_known_default()
-    {
-        return Err(StoreError::Validation(format!(
-            "{field} must use the same scheme, host, and port as node_base_url"
-        ))
-        .into());
-    }
-    if !url
-        .path()
-        .starts_with(node_base_url.path().trim_end_matches('/'))
-    {
-        return Err(StoreError::Validation(format!("{field} must be under node_base_url")).into());
-    }
-    Ok(url)
-}
-
-fn parse_hub_url(value: &str, field: &str) -> Result<Url, AgentToolsError> {
+fn parse_public_url(value: &str, field: &str) -> Result<Url, AgentToolsError> {
     let url = Url::parse(value)
         .map_err(|error| StoreError::Validation(format!("{field} is not a valid URL: {error}")))?;
     if url.username() != "" || url.password().is_some() {
@@ -10745,14 +10356,14 @@ fn parse_hub_url(value: &str, field: &str) -> Result<Url, AgentToolsError> {
     Ok(url)
 }
 
-fn validate_hub_scheme_and_host(url: &Url, field: &str) -> Result<(), AgentToolsError> {
+fn validate_public_scheme_and_host(url: &Url, field: &str) -> Result<(), AgentToolsError> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(StoreError::Validation(format!("{field} must use http or https")).into());
     }
     if url.host_str().is_none() {
         return Err(StoreError::Validation(format!("{field} must include a host")).into());
     }
-    if !hub_url_is_loopback(url) && url.scheme() != "https" {
+    if !public_url_is_loopback(url) && url.scheme() != "https" {
         return Err(StoreError::Validation(format!(
             "{field} must use https unless it is loopback-only"
         ))
@@ -10761,7 +10372,7 @@ fn validate_hub_scheme_and_host(url: &Url, field: &str) -> Result<(), AgentTools
     Ok(())
 }
 
-fn hub_url_is_loopback(url: &Url) -> bool {
+fn public_url_is_loopback(url: &Url) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };
@@ -11004,70 +10615,6 @@ fn score_pod_route(
         score,
         reasons,
     }
-}
-
-fn score_hub_pod(pod: &HubRegisteredPod, query_tokens: &[String]) -> Option<HubSearchPodResult> {
-    let haystack = format!(
-        "{} {} {} {}",
-        pod.pod_slug,
-        pod.pod_name,
-        pod.description,
-        pod.tags.join(" ")
-    )
-    .to_lowercase();
-    let mut score = 0.0_f32;
-    let mut reasons = Vec::new();
-    for token in query_tokens {
-        if haystack.contains(token) {
-            score += if pod.tags.iter().any(|tag| tag.eq_ignore_ascii_case(token)) {
-                2.0
-            } else {
-                1.0
-            };
-            if reasons.len() < 6 {
-                reasons.push(format!("matched public pod term '{token}'"));
-            }
-        }
-    }
-    if score <= 0.0 {
-        None
-    } else {
-        Some(HubSearchPodResult {
-            pod: pod.clone(),
-            score,
-            reasons,
-        })
-    }
-}
-
-fn discovery_feed_item(
-    pod: &HubRegisteredPod,
-    scope: PodDiscoveryScope,
-    query_tokens: &[String],
-) -> Option<PodDiscoveryFeedItem> {
-    if query_tokens.is_empty() {
-        return Some(PodDiscoveryFeedItem {
-            pod: pod.clone(),
-            scope,
-            score: 0.0,
-            reasons: Vec::new(),
-        });
-    }
-    let scored = score_hub_pod(pod, query_tokens)?;
-    Some(PodDiscoveryFeedItem {
-        pod: scored.pod,
-        scope,
-        score: scored.score,
-        reasons: scored.reasons,
-    })
-}
-
-fn sort_discovery_feed_items(items: &mut [PodDiscoveryFeedItem]) {
-    items.sort_by(|a, b| {
-        b.score
-            .total_cmp(&a.score)
-            .then_with(|| b.pod.updated_at.cmp(&a.pod.updated_at))
-    });
 }
 
 fn agent_evidence_error_to_tools(error: AgentEvidenceError) -> AgentToolsError {
@@ -12303,16 +11850,16 @@ fn verified_portable_package_events(
             .map(|node| node.public_key.as_str())
             .or_else(|| {
                 store
-                    .hub_nodes
-                    .get(&event.author_node_id)
-                    .map(|node| node.public_key.as_str())
-            })
-            .or_else(|| {
-                store
                     .trusted_peers
                     .get(&event.author_node_id)
                     .filter(|peer| peer.enabled)
                     .map(|peer| peer.public_key.as_str())
+            })
+            .or_else(|| {
+                store.known_pod_announcements.values().find_map(|known| {
+                    (known.announcement.origin_node_id == event.author_node_id)
+                        .then_some(known.announcement.signer.public_key.as_str())
+                })
             })
             .ok_or(StoreError::UntrustedPeer)?;
         if !verify_event(event, public_key).map_err(|_| StoreError::InvalidSignature)? {
