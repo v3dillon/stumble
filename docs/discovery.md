@@ -15,7 +15,7 @@ Public HTTP contracts (typed machine-readable `code` on failures):
 | `POST` | `/discovery/announcements/produce` | Origin produces a signed announcement with a 30-day lease |
 | `POST` | `/discovery/announcements` | Verify and index an announcement |
 | `POST` | `/discovery/announcements/receive` | Receive a peer-delivered announcement |
-| `GET`  | `/discovery/announcements` | Search currently eligible announcements |
+| `GET`  | `/discovery/announcements` | Index search of currently eligible announcements (`q`, `limit`; no User id) |
 | `POST` | `/discovery/withdrawals/produce` | Origin produces a withdrawal (optionally makes the Pod private) |
 | `POST` | `/discovery/withdrawals` | Verify and index a withdrawal |
 | `POST` | `/discovery/withdrawals/receive` | Receive a peer-delivered withdrawal |
@@ -23,7 +23,7 @@ Public HTTP contracts (typed machine-readable `code` on failures):
 | `GET`  | `/bootstrap/announcements/stream` | Topic-neutral cursor-paginated Announcement Stream |
 | `POST` | `/bootstrap/withdrawals` | Open Bootstrap withdrawal admission |
 
-Failure codes include `invalid_signature`, `announcement_expired`, `announcement_withdrawn`, `announcement_stale`, `withdrawal_stale`, and `validation_error`. Bootstrap open admission additionally returns stable codes: `malformed`, `invalid_identity`, `invalid_signature`, `unreachable_origin`, `incompatible_protocol`, `stale_lease`, `rate_limited`, `payload_too_large`, `manifest_mismatch`, `origin_quota_exceeded`, and `bootstrap_disabled`.
+Failure codes include `invalid_signature`, `announcement_expired`, `announcement_withdrawn`, `announcement_stale`, `withdrawal_stale`, and `validation_error`. Bootstrap open admission additionally returns stable codes: `malformed`, `invalid_identity`, `invalid_signature`, `unreachable_origin`, `incompatible_protocol`, `stale_lease`, `rate_limited`, `payload_too_large`, `manifest_mismatch`, `origin_quota_exceeded`, and `bootstrap_disabled`. Public Index search returns stable codes: `malformed`, `query_too_large`, `rate_limited`, `incompatible_protocol`, `index_disabled`, `transport`, and `protocol`.
 
 ## Open Bootstrap admission and Announcement Streams
 
@@ -58,6 +58,18 @@ Direct Pod URL validation and Subscription continue with every Bootstrap disable
 | `POST /home/bootstrap/sync` | Outbound multi-endpoint stream synchronization |
 
 Focused temporary-SQLite coverage is in `crates/stumble-core/tests/bootstrap_home_node_sync.rs` and unit tests under `bootstrap::client`.
+
+## Replaceable private Index search
+
+Index is an independent node capability (`AgentTools::with_index_capability`), optionally co-located with Bootstrap. When enabled, `GET /discovery/announcements?q=&limit=` searches the node's admitted valid announcement catalog for an **explicit bounded query**. The public search API requires no User account or stable User identifier. Responses contain Origin-signed announcements plus retrieval-only relevance and reasons—never quality, trust, popularity, or personalized authority fields. Processing retains no product analytics: only short-lived rate-limit timestamps in `index_runtime` (no query text).
+
+Query bounds: max UTF-8 length `MAX_INDEX_QUERY_BYTES` (256); limit `1..=MAX_INDEX_SEARCH_LIMIT` (50). Empty queries return a bounded catalog listing. Oversized, malformed, rate-limited, disabled, and incompatible outcomes are typed (`IndexSearchFailure` / wire `code`). Well-known metadata advertises `index_search_announcements` only when Index is enabled.
+
+A Home Node may call configured Trust Policy Index Nodes **only** from an explicit User-authored Explore action (`explore_public_pods_with_indexes` / `import_explicit_index_search`). Outbound requests use the injectable `IndexSearchClient` port and carry only `IndexSearchRequest` fields (`query` + `limit`)—never Taste Profile, Subscriptions, feedback, Source Affinity, or Discovery Plan inference. Empty Explore queries stay local and do not fan out. Personal Discovery planning has no Index client parameter.
+
+Import verifies each announcement, records multi-source `received_from_index_urls` provenance (accumulating Index base URLs across retains of the same signed announcement), discards remote ordering/scores, and recomputes eligibility and order locally via Trust Policy and `explore_public_pods` Pod Similarity. Delivery stays active when any recorded Index URL remains in Trust Policy. Multiple Indexes are supported in configuration order with fallthrough on transport failure. Removing an Index excludes sole-source results while independent copies (other Index, Bootstrap, peer, or local retain) remain eligible. Provenance and rate-limit timestamps survive SQLite restart. Short intentional Index query tokens (`ai`, `go`, `web`, …) are searchable; Index search does not apply Personal Discovery stop/short-token filtering.
+
+Domain contract: `ExploreRequest` / `ExploreResponse` for intentional Explore (HTTP `/home/discover-public-pods` and related surfaces, CLI `stumble pod explore`, Agent Harness tools share the same Core types). Focused coverage: unit tests in `crates/stumble-core/src/index/`, temporary-SQLite acceptance in `crates/stumble-core/tests/index_search.rs`, and Index aggregation in `crates/stumble-core/tests/discovery_substrate.rs`.
 
 Changes to trusted peers, configured Index Nodes, and local Pod, node, source, or topic blocks pass through Pending Proposal approval. `explore_public_pods` applies that User-owned Trust Policy and does not create a Subscription. For an unsubscribed remote Pod, the Origin may separately produce a bounded signed `PodExploreSamples` artifact; the Home Node accepts it only for the exact current announcement and filters its Content References locally. Signed Pod Endorsements likewise bind the exact known current announcements of both public Pods before adding bounded, inspectable local ranking evidence. Neither signatures nor endorsements establish a global quality or reputation score.
 

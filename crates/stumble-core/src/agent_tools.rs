@@ -10,6 +10,10 @@ use crate::feed_mix::{
     compare_feed_candidates, compose_feed_candidates, content_matches_any_topic,
     normalized_intent_topics, DeliveryRecord, RankedFeedCandidate,
 };
+use crate::index::{
+    import_from_configured_indexes, retain_index_search_results, search_index_catalog,
+    IndexSearchClient,
+};
 use crate::interest_seeds::{
     candidate_submission_taste_signals, interest_seed_evidence, record_interest_seed,
     reset_interest_seed_evidence, source_affinity_is_blocked, taste_profile_projections,
@@ -126,6 +130,9 @@ pub enum AgentToolsError {
         /// Human-readable detail for operators and Origins.
         message: String,
     },
+    /// Public Index search failed with a bounded typed outcome.
+    #[error(transparent)]
+    IndexSearch(#[from] IndexSearchFailure),
 }
 
 const MAX_DISCOVERY_TASK_ATTEMPTS: usize = 3;
@@ -137,6 +144,8 @@ pub struct AgentTools {
     persistence: Option<Persistence>,
     /// Independent Bootstrap capability configuration (not a Hub role).
     bootstrap: BootstrapCapability,
+    /// Independent Index capability (may share a process with Bootstrap).
+    index: IndexCapability,
 }
 
 /// Runtime configuration for open Bootstrap admission and Announcement Streams.
@@ -152,6 +161,18 @@ impl Default for BootstrapCapability {
             enabled: false,
             origin_probe: Arc::new(UnreachableOriginProbe),
         }
+    }
+}
+
+/// Runtime configuration for public Index announcement search.
+#[derive(Clone)]
+struct IndexCapability {
+    enabled: bool,
+}
+
+impl Default for IndexCapability {
+    fn default() -> Self {
+        Self { enabled: false }
     }
 }
 
@@ -666,6 +687,7 @@ impl AgentTools {
             store: Arc::new(RwLock::new(store)),
             persistence: None,
             bootstrap: BootstrapCapability::default(),
+            index: IndexCapability::default(),
         }
     }
 
@@ -674,6 +696,7 @@ impl AgentTools {
             store: Arc::new(RwLock::new(store)),
             persistence: Some(Persistence::Json(Arc::new(path.into()))),
             bootstrap: BootstrapCapability::default(),
+            index: IndexCapability::default(),
         }
     }
 
@@ -685,6 +708,7 @@ impl AgentTools {
                 baseline: Arc::new(Mutex::new(store)),
             }),
             bootstrap: BootstrapCapability::default(),
+            index: IndexCapability::default(),
         }
     }
 
@@ -705,10 +729,26 @@ impl AgentTools {
         self
     }
 
+    /// Enables or disables the independent Index capability.
+    ///
+    /// Index may share a process with Bootstrap. Enabling Index does not grant
+    /// ranking or trust authority over Home Nodes.
+    #[must_use]
+    pub fn with_index_capability(mut self, enabled: bool) -> Self {
+        self.index = IndexCapability { enabled };
+        self
+    }
+
     /// Returns whether this process currently enables open Bootstrap admission.
     #[must_use]
     pub fn bootstrap_enabled(&self) -> bool {
         self.bootstrap.enabled
+    }
+
+    /// Returns whether this process currently enables public Index search.
+    #[must_use]
+    pub fn index_enabled(&self) -> bool {
+        self.index.enabled
     }
 
     pub fn open_home_node(
@@ -7332,6 +7372,12 @@ impl AgentTools {
                 format!("{base}/bootstrap/withdrawals"),
             );
         }
+        if self.index.enabled {
+            endpoints.insert(
+                "index_search_announcements".to_string(),
+                format!("{base}/discovery/announcements"),
+            );
+        }
         Ok(WellKnownNode {
             protocol: CURRENT_PROTOCOL_VERSION.to_string(),
             node,
@@ -8165,79 +8211,48 @@ impl AgentTools {
         Ok(known)
     }
 
-    /// Searches verified announcements held by this optional Index Node.
+    /// Searches verified announcements held by this Index-capable node.
     ///
-    /// Relevance reflects only the caller's query and never represents global
-    /// Pod quality, trust, or authority.
+    /// Relevance reflects only the caller's explicit query and never represents
+    /// global Pod quality, trust, popularity, or personalized authority.
+    /// Requires no User account. Does not retain product analytics.
     ///
     /// # Errors
     ///
-    /// Returns an error when local state is unavailable.
+    /// Returns a typed [`IndexSearchFailure`] when Index is disabled, the query
+    /// is oversized/malformed, rate-limited, or local state is unavailable.
     pub fn search_pod_announcements(
         &self,
         query: &str,
         limit: usize,
     ) -> Result<PodAnnouncementSearchResponse, AgentToolsError> {
-        let store = self
+        self.search_pod_announcements_at(&IndexSearchRequest::new(query, Some(limit)), Utc::now())
+    }
+
+    /// Index catalog search at an explicit clock time (tests / deterministic clocks).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::search_pod_announcements`].
+    pub fn search_pod_announcements_at(
+        &self,
+        request: &IndexSearchRequest,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<PodAnnouncementSearchResponse, AgentToolsError> {
+        let mut store = self
             .store
-            .read()
+            .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
-        let query = query.trim().to_lowercase();
-        let query_tokens = route_tokens(&query);
-        let now = Utc::now();
-        let mut results = store
-            .known_pod_announcements
-            .values()
-            .filter_map(|known| {
-                if !announcement_is_discovery_eligible(&store, &known.announcement, now) {
-                    return None;
-                }
-                let searchable = format!(
-                    "{} {} {}",
-                    known.announcement.pod_slug,
-                    known.announcement.pod_name,
-                    known.announcement.subject
-                )
-                .to_lowercase();
-                let matched = query_tokens
-                    .iter()
-                    .filter(|token| searchable.contains(token.as_str()))
-                    .count();
-                if !query_tokens.is_empty() && matched == 0 {
-                    return None;
-                }
-                let relevance = if query_tokens.is_empty() {
-                    1.0
-                } else {
-                    let matched = u16::try_from(matched).unwrap_or(u16::MAX);
-                    let token_count = u16::try_from(query_tokens.len()).unwrap_or(u16::MAX);
-                    f32::from(matched) / f32::from(token_count)
-                };
-                Some(PodAnnouncementSearchResult {
-                    announcement: known.announcement.clone(),
-                    relevance,
-                    reasons: vec![if query_tokens.is_empty() {
-                        "Public Pod Announcement is available from this Index Node".into()
-                    } else {
-                        "Pod subject matches the explicit Explore query".into()
-                    }],
-                })
-            })
-            .collect::<Vec<_>>();
-        results.sort_by(|left, right| {
-            right
-                .relevance
-                .total_cmp(&left.relevance)
-                .then_with(|| left.announcement.pod_slug.cmp(&right.announcement.pod_slug))
-        });
-        results.truncate(limit.clamp(1, 50));
-        Ok(PodAnnouncementSearchResponse { query, results })
+        let response = search_index_catalog(&mut store, request, self.index.enabled, now)?;
+        // Persist rate-limit timestamps only (no query text / User id).
+        self.persist_locked(&mut store)?;
+        Ok(response)
     }
 
     /// Accepts verified results fetched from one configured optional Index Node.
     ///
     /// The Index Node's relevance is discarded; Explore recomputes ordering
-    /// under the User's local Trust Policy.
+    /// under the User's local Trust Policy. Provenance records the Index URL.
     ///
     /// # Errors
     ///
@@ -8265,24 +8280,94 @@ impl AgentTools {
         if !policy.retains_index_url(&index_base_url) {
             return Err(StoreError::Validation("Index Node is not configured".into()).into());
         }
-        let result_count = response.results.len();
-        let before_import = store.known_pod_announcements.clone();
-        let before_withdrawals = store.known_pod_withdrawals.clone();
-        let now = Utc::now();
-        for result in response.results {
-            if let Err(error) = retain_verified_pod_announcement(
-                &mut store,
-                result.announcement,
-                DeliveryProvenance::index(index_base_url.clone()),
-                now,
-            ) {
-                store.known_pod_announcements = before_import;
-                store.known_pod_withdrawals = before_withdrawals;
-                return Err(error.into());
-            }
-        }
+        let retained =
+            retain_index_search_results(&mut store, &index_base_url, response, Utc::now())?;
         self.persist_locked(&mut store)?;
-        Ok(result_count)
+        Ok(retained)
+    }
+
+    /// Explicit Explore path: query configured Index Nodes with the User-authored
+    /// query string only, verify/import results, then rank locally.
+    ///
+    /// Never called from Taste Profile, Source Affinity, Subscription, feedback,
+    /// or Discovery Plan inference. Empty queries skip remote Index contact.
+    /// Remote ordering is discarded; local Trust Policy and similarity recompute
+    /// the Explore result order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Feed reads are denied, no User is authenticated,
+    /// the request is out of range, or local state is unavailable. Per-Index
+    /// transport failures are recorded on the import report without failing the
+    /// whole Explore when at least local ranking remains possible.
+    pub fn explore_public_pods_with_indexes(
+        &self,
+        ctx: &AuthContext,
+        request: ExploreRequest,
+        client: &dyn IndexSearchClient,
+    ) -> Result<ExploreResponse, AgentToolsError> {
+        if !(1..=50).contains(&request.limit) || request.sample_size > 10 {
+            return Err(ExploreRequestError.into());
+        }
+        // Import remote hits under a short write section, then rank from store.
+        {
+            let mut store = self
+                .store
+                .write()
+                .map_err(|_| AgentToolsError::LockPoisoned)?;
+            authorize_harness(&store, ctx, HarnessCapability::FeedRead, None)?;
+            let user_id = ctx.user_id.ok_or_else(|| {
+                StoreError::Validation("Explore requires an authenticated User".into())
+            })?;
+            let policy = store
+                .trust_policies
+                .get(&(user_id, ctx.tenant_id))
+                .cloned()
+                .unwrap_or_else(|| TrustPolicy::new(user_id, ctx.tenant_id));
+            let now = Utc::now();
+            import_from_configured_indexes(
+                &mut store,
+                &policy,
+                &request.query,
+                request.limit,
+                client,
+                now,
+            )?;
+            self.persist_locked(&mut store)?;
+        }
+        self.explore_public_pods(ctx, request)
+    }
+
+    /// Queries configured Index Nodes for an explicit Explore query without ranking.
+    ///
+    /// # Errors
+    ///
+    /// Same authorization and Trust Policy rules as
+    /// [`Self::accept_index_search_results`].
+    pub fn import_explicit_index_search(
+        &self,
+        ctx: &AuthContext,
+        query: &str,
+        limit: usize,
+        client: &dyn IndexSearchClient,
+    ) -> Result<IndexExploreImportReport, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::FeedRead, None)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Index Node search requires an authenticated User".into())
+        })?;
+        let policy = store
+            .trust_policies
+            .get(&(user_id, ctx.tenant_id))
+            .cloned()
+            .unwrap_or_else(|| TrustPolicy::new(user_id, ctx.tenant_id));
+        let report =
+            import_from_configured_indexes(&mut store, &policy, query, limit, client, Utc::now())?;
+        self.persist_locked(&mut store)?;
+        Ok(report)
     }
 
     /// Retains Origin-signed remote samples for a known current announcement.

@@ -51,9 +51,29 @@ pub(super) fn execute(command: PodWorkflow, tools: &AgentTools, actor: &AuthCont
                 usize::from(args.sample_size),
             )
             .map_err(|error| agent_tools_error(error.into()))?;
-            let explored = tools
-                .explore_public_pods(actor, request)
-                .map_err(agent_tools_error)?;
+            // When Indexes are configured, fan out explicit query via HTTP transport
+            // then rank locally. Empty/local-only Explore stays on the Home Node.
+            let has_indexes = tools
+                .trust_policy(actor)
+                .map(|policy| !policy.index_nodes.is_empty())
+                .unwrap_or(false);
+            let explored = if has_indexes {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .enable_all()
+                    .build()
+                    .map_err(internal_error)?;
+                let client = stumble_api::ReqwestIndexSearchClient::new(runtime.handle().clone());
+                let explored = tools
+                    .explore_public_pods_with_indexes(actor, request, &client)
+                    .map_err(agent_tools_error)?;
+                drop(runtime);
+                explored
+            } else {
+                tools
+                    .explore_public_pods(actor, request)
+                    .map_err(agent_tools_error)?
+            };
             let results = paginate(
                 explored.results,
                 args.page.limit,

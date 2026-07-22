@@ -473,6 +473,10 @@ fn agent_tools_error(error: AgentToolsError) -> (ErrorBody, ExitStatusCategory) 
             ErrorBody::new("validation_error", error.to_string()),
             ExitStatusCategory::ValidationOrConflict,
         ),
+        AgentToolsError::IndexSearch(ref failure) => (
+            ErrorBody::new(failure.kind.as_code(), error.to_string()),
+            ExitStatusCategory::ValidationOrConflict,
+        ),
         error => internal_error(error),
     }
 }

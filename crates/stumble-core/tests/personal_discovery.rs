@@ -759,7 +759,9 @@ fn import_verified_network_metadata(home: &AgentTools) -> (PodAnnouncement, PodE
     let origin_dir = TestDataDir::new("network-lead-origin");
     let index_dir = TestDataDir::new("network-lead-index");
     let origin = AgentTools::open_home_node(&origin_dir.0, seed_store).unwrap();
-    let index = AgentTools::open_home_node(&index_dir.0, seed_store).unwrap();
+    let index = AgentTools::open_home_node(&index_dir.0, seed_store)
+        .unwrap()
+        .with_index_capability(true);
     let pod = create_public_pod(
         &origin,
         "rust-systems",
@@ -1022,7 +1024,9 @@ fn invalid_stale_blocked_untrusted_or_withdrawn_metadata_cannot_influence_plans(
     let fresh_dir = TestDataDir::new("index-removed-home");
     let index_dir = TestDataDir::new("index-removed-index");
     let fresh = AgentTools::open_home_node(&fresh_dir.0, seed_store).unwrap();
-    let index = AgentTools::open_home_node(&index_dir.0, seed_store).unwrap();
+    let index = AgentTools::open_home_node(&index_dir.0, seed_store)
+        .unwrap()
+        .with_index_capability(true);
     let fresh_manager = personal_manager(&fresh);
     set_interest(&fresh, &fresh_manager, "distributed systems");
     index.index_pod_announcement(announcement.clone()).unwrap();
@@ -1201,7 +1205,9 @@ fn local_relevance_discards_remote_index_scores_and_autonomous_planning_is_local
     let unrelated_dir = TestDataDir::new("unrelated-origin");
     let index_dir = TestDataDir::new("unrelated-index");
     let unrelated = AgentTools::open_home_node(&unrelated_dir.0, seed_store).unwrap();
-    let index = AgentTools::open_home_node(&index_dir.0, seed_store).unwrap();
+    let index = AgentTools::open_home_node(&index_dir.0, seed_store)
+        .unwrap()
+        .with_index_capability(true);
     let cooking = create_public_pod(
         &unrelated,
         "cooking-notes",
@@ -1557,8 +1563,12 @@ fn restart_trust_and_equivalent_metadata_replacement_are_deterministic() {
     // Index removal: Index-only retained communities drop, and two recomputes agree.
     let index_dir = TestDataDir::new("deterministic-index-only");
     let index_only_home_dir = TestDataDir::new("deterministic-index-removal-home");
-    let index = AgentTools::open_home_node(&index_dir.0, seed_store).unwrap();
-    let index_home = AgentTools::open_home_node(&index_only_home_dir.0, seed_store).unwrap();
+    let index = AgentTools::open_home_node(&index_dir.0, seed_store)
+        .unwrap()
+        .with_index_capability(true);
+    let index_home = AgentTools::open_home_node(&index_only_home_dir.0, seed_store)
+        .unwrap()
+        .with_index_capability(true);
     let index_manager = personal_manager(&index_home);
     set_interest(&index_home, &index_manager, "distributed systems");
     index.index_pod_announcement(announcement.clone()).unwrap();
@@ -1645,7 +1655,9 @@ fn restart_trust_and_equivalent_metadata_replacement_are_deterministic() {
 #[test]
 fn private_discovery_lead_types_remain_absent_from_federation_and_outbound_artifacts() {
     let home_dir = TestDataDir::new("privacy-network-home");
-    let home = AgentTools::open_home_node(&home_dir.0, seed_store).unwrap();
+    let home = AgentTools::open_home_node(&home_dir.0, seed_store)
+        .unwrap()
+        .with_index_capability(true);
     let manager = personal_manager(&home);
     set_interest(&home, &manager, "secret-private-topic");
     // Also plant a network lead that would match systems, not the secret topic.
@@ -4841,6 +4853,7 @@ fn pre_feature_persistent_store_migration_preserves_core_home_node_state() {
 
 #[test]
 fn adversarial_personal_discovery_private_state_never_crosses_public_boundaries() {
+    // Index capability used only for local catalog search of public announcements.
     // AC9: Interest Seeds, Source Affinities, Discovery Plans, schedules, result
     // batches, reactions, and profile-derived queries must never appear on
     // federation or public discovery serialization surfaces.
@@ -4848,7 +4861,9 @@ fn adversarial_personal_discovery_private_state_never_crosses_public_boundaries(
         "stumble-pd-adversarial-privacy-{}",
         uuid::Uuid::now_v7()
     ));
-    let tools = AgentTools::initialize_home_node(&root, seed_store).unwrap();
+    let tools = AgentTools::initialize_home_node(&root, seed_store)
+        .unwrap()
+        .with_index_capability(true);
     let owner = tools.local_owner_auth_context().unwrap();
     let manager = {
         let issued = tools

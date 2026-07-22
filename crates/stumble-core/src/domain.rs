@@ -4844,9 +4844,18 @@ pub struct KnownPodAnnouncement {
     pub announcement: PodAnnouncement,
     /// Trusted peer that delivered it, absent when indexed directly.
     pub received_from_peer_id: Option<PeerId>,
-    /// Configured Index Node that returned it, absent for peer/direct indexing.
-    #[serde(default)]
-    pub received_from_index_url: Option<String>,
+    /// Configured Index Node base URLs that returned this announcement (multi-source).
+    ///
+    /// Multiple Indexes accumulate across retains of the same signed announcement
+    /// identity. Removing an Index excludes announcements whose *only* remaining
+    /// delivery source was that Index from current eligibility while preserving
+    /// this audit row. Accepts legacy singular `received_from_index_url` on load.
+    #[serde(
+        default,
+        alias = "received_from_index_url",
+        deserialize_with = "deserialize_index_provenance_urls"
+    )]
+    pub received_from_index_urls: BTreeSet<String>,
     /// Bootstrap base URLs that delivered this announcement (multi-source).
     ///
     /// Removing a configured Bootstrap excludes announcements whose *only*
@@ -4856,6 +4865,31 @@ pub struct KnownPodAnnouncement {
     pub received_from_bootstrap_urls: BTreeSet<String>,
     /// Time at which this node verified and retained it.
     pub received_at: DateTime<Utc>,
+}
+
+/// Deserializes multi-Index provenance, migrating legacy singular URL strings.
+fn deserialize_index_provenance_urls<'de, D>(deserializer: D) -> Result<BTreeSet<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        Many(Vec<String>),
+        One(String),
+    }
+
+    match Option::<OneOrMany>::deserialize(deserializer)? {
+        None => Ok(BTreeSet::new()),
+        Some(OneOrMany::One(url)) => {
+            let mut set = BTreeSet::new();
+            if !url.is_empty() {
+                set.insert(url);
+            }
+            Ok(set)
+        }
+        Some(OneOrMany::Many(urls)) => Ok(urls.into_iter().filter(|url| !url.is_empty()).collect()),
+    }
 }
 
 /// Stable identity of one configured Bootstrap endpoint on a Home Node.
@@ -5053,6 +5087,22 @@ pub struct PodAnnouncementSearchResult {
     pub reasons: Vec<String>,
 }
 
+impl PodAnnouncementSearchResult {
+    /// Builds one Index search hit. Relevance is retrieval evidence only.
+    #[must_use]
+    pub fn new(
+        announcement: PodAnnouncement,
+        relevance: f32,
+        reasons: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self {
+            announcement,
+            relevance,
+            reasons: reasons.into_iter().collect(),
+        }
+    }
+}
+
 /// Non-authoritative Pod Announcement search response.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -5062,6 +5112,161 @@ pub struct PodAnnouncementSearchResponse {
     pub query: String,
     /// Replaceable results backed by verified signed announcements.
     pub results: Vec<PodAnnouncementSearchResult>,
+}
+
+impl PodAnnouncementSearchResponse {
+    /// Builds a non-authoritative Index search response.
+    #[must_use]
+    pub fn new(query: impl Into<String>, results: Vec<PodAnnouncementSearchResult>) -> Self {
+        Self {
+            query: query.into(),
+            results,
+        }
+    }
+}
+
+/// Explicit Index search request. Contains only the User-authored query and a
+/// bound; never User identity, Taste Profile, or other private evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct IndexSearchRequest {
+    /// Explicit query string authored by the User (may be empty for catalog listing).
+    pub query: String,
+    /// Optional page size bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+impl IndexSearchRequest {
+    /// Builds a public-only Index search request (query + optional limit).
+    #[must_use]
+    pub fn new(query: impl Into<String>, limit: Option<usize>) -> Self {
+        Self {
+            query: query.into(),
+            limit,
+        }
+    }
+}
+
+/// Stable machine-readable Index search failure class.
+///
+/// Public Index processing requires no User account. Failures do not encode
+/// quality, trust, popularity, or personalized authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum IndexSearchFailureKind {
+    /// Query or limit fields failed structural validation.
+    Malformed,
+    /// Query string exceeded the bounded size accepted by Index search.
+    QueryTooLarge,
+    /// Per-network Index search rate limit was exceeded.
+    RateLimited,
+    /// Remote Index advertises an incompatible protocol version.
+    IncompatibleProtocol,
+    /// This node does not currently enable the Index capability.
+    IndexDisabled,
+    /// Transport failure talking to a remote Index Node.
+    Transport,
+    /// Remote response could not be decoded as a valid search payload.
+    Protocol,
+}
+
+impl IndexSearchFailureKind {
+    /// Wire code returned on public Index search failure responses.
+    #[must_use]
+    pub const fn as_code(self) -> &'static str {
+        match self {
+            Self::Malformed => "malformed",
+            Self::QueryTooLarge => "query_too_large",
+            Self::RateLimited => "rate_limited",
+            Self::IncompatibleProtocol => "incompatible_protocol",
+            Self::IndexDisabled => "index_disabled",
+            Self::Transport => "transport",
+            Self::Protocol => "protocol",
+        }
+    }
+}
+
+impl std::fmt::Display for IndexSearchFailureKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_code())
+    }
+}
+
+/// Bounded typed Index search failure for Home Node and Index operators.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(deny_unknown_fields)]
+#[error("index search failed ({kind}): {message}")]
+#[non_exhaustive]
+pub struct IndexSearchFailure {
+    /// Stable machine-readable failure class.
+    pub kind: IndexSearchFailureKind,
+    /// Human-readable operator detail (never contains User identifiers).
+    pub message: String,
+}
+
+impl IndexSearchFailure {
+    /// Builds a typed failure with a stable kind and message.
+    #[must_use]
+    pub fn new(kind: IndexSearchFailureKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+/// Rate-limit bookkeeping for public Index search.
+///
+/// Persists only short-lived request timestamps—never query text, User ids, or
+/// product analytics. Survives restart so abuse bounds remain continuous.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct IndexRuntimeState {
+    /// Timestamps of recent search attempts used for per-network rate limits.
+    pub recent_search_attempts: Vec<DateTime<Utc>>,
+}
+
+impl Default for IndexRuntimeState {
+    fn default() -> Self {
+        Self {
+            recent_search_attempts: Vec::new(),
+        }
+    }
+}
+
+/// Summary of importing explicit Explore results from configured Index Nodes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct IndexExploreImportReport {
+    /// Explicit query string that was sent (never inferred interests).
+    pub query: String,
+    /// Per-Index outcomes in Trust Policy configuration order.
+    pub outcomes: Vec<IndexExploreImportOutcome>,
+    /// Total announcements retained after local verification.
+    pub retained_announcements: usize,
+}
+
+/// Outcome of querying one configured Index Node during explicit Explore.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct IndexExploreImportOutcome {
+    /// Configured Index base URL.
+    pub index_base_url: String,
+    /// Whether the Index returned a usable response that was applied.
+    pub ok: bool,
+    /// Number of search hits returned before local verification.
+    pub result_count: usize,
+    /// Number of announcements retained after local verification.
+    pub retained: usize,
+    /// Typed failure when the Index could not be used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<IndexSearchFailure>,
 }
 
 /// Stable machine-readable reason a Bootstrap Node rejected open admission.

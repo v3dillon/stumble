@@ -2,6 +2,7 @@ pub mod agent_tools;
 pub mod bootstrap;
 pub mod domain;
 mod feed_mix;
+pub mod index;
 mod interest_seeds;
 mod personal_discovery;
 pub mod pod_announcement;
@@ -30,6 +31,12 @@ pub use bootstrap::{
     MAX_STREAM_PAGE_LIMIT, MAX_WITHDRAWAL_PAYLOAD_BYTES,
 };
 pub use domain::*;
+pub use index::{
+    explicit_index_search_request, import_from_configured_indexes, index_fail,
+    index_request_is_public_only, retain_index_search_results, search_index_catalog,
+    IndexSearchClient, ScriptedIndexSearchClient, DEFAULT_INDEX_SEARCH_LIMIT,
+    MAX_INDEX_QUERY_BYTES, MAX_INDEX_SEARCH_LIMIT,
+};
 pub use pod_announcement::{
     announcement_delivery_is_active, announcement_is_discovery_eligible,
     build_signed_pod_announcement, compare_announcement_preference,

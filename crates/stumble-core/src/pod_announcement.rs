@@ -19,8 +19,8 @@ use uuid::Uuid;
 /// Immediate delivery provenance for a verified announcement retention.
 ///
 /// Local/origin retains omit remote sources. Remote delivery records at most one
-/// peer, one Index URL, and one Bootstrap URL per call; Bootstrap URLs accumulate
-/// across retains of the same signed announcement identity.
+/// peer, one Index URL, and one Bootstrap URL per call; Index and Bootstrap URLs
+/// accumulate across retains of the same signed announcement identity.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeliveryProvenance {
     /// Trusted peer that delivered the announcement, when peer-sourced.
@@ -82,8 +82,8 @@ pub fn retains_bootstrap_url(store: &InMemoryStore, base_url: &str) -> bool {
 /// Whether a retained announcement still has active delivery provenance.
 ///
 /// Local/origin retains (no remote sources) remain eligible. Remote sources are
-/// active when a peer delivered them, a configured Index still matches, or at
-/// least one enabled Bootstrap still matches a recorded delivery URL.
+/// active when a peer delivered them, any recorded Index URL still matches Trust
+/// Policy, or at least one enabled Bootstrap still matches a recorded delivery URL.
 #[must_use]
 pub fn announcement_delivery_is_active(
     store: &InMemoryStore,
@@ -91,7 +91,7 @@ pub fn announcement_delivery_is_active(
     policy: Option<&TrustPolicy>,
 ) -> bool {
     let has_peer = known.received_from_peer_id.is_some();
-    let has_index = known.received_from_index_url.is_some();
+    let has_index = !known.received_from_index_urls.is_empty();
     let has_bootstrap = !known.received_from_bootstrap_urls.is_empty();
     if !has_peer && !has_index && !has_bootstrap {
         return true;
@@ -99,10 +99,12 @@ pub fn announcement_delivery_is_active(
     if has_peer {
         return true;
     }
-    if let Some(url) = &known.received_from_index_url {
-        if policy.is_some_and(|policy| policy.retains_index_url(url)) {
-            return true;
-        }
+    if known
+        .received_from_index_urls
+        .iter()
+        .any(|url| policy.is_some_and(|policy| policy.retains_index_url(url)))
+    {
+        return true;
     }
     known
         .received_from_bootstrap_urls
@@ -431,31 +433,31 @@ pub fn retain_verified_pod_announcement(
         }
     }
 
-    let (peer_id, index_url, mut bootstrap_urls) =
+    let (peer_id, mut index_urls, mut bootstrap_urls) =
         if let Some(existing) = store.known_pod_announcements.get(&key) {
             if existing.announcement.id == announcement.id {
                 (
                     provenance.peer_id.or(existing.received_from_peer_id),
-                    provenance
-                        .index_url
-                        .clone()
-                        .or_else(|| existing.received_from_index_url.clone()),
+                    existing.received_from_index_urls.clone(),
                     existing.received_from_bootstrap_urls.clone(),
                 )
             } else {
                 (
                     provenance.peer_id,
-                    provenance.index_url.clone(),
+                    std::collections::BTreeSet::new(),
                     std::collections::BTreeSet::new(),
                 )
             }
         } else {
             (
                 provenance.peer_id,
-                provenance.index_url.clone(),
+                std::collections::BTreeSet::new(),
                 std::collections::BTreeSet::new(),
             )
         };
+    if let Some(url) = provenance.index_url {
+        index_urls.insert(url);
+    }
     if let Some(url) = provenance.bootstrap_url {
         bootstrap_urls.insert(url);
     }
@@ -463,7 +465,7 @@ pub fn retain_verified_pod_announcement(
     let known = KnownPodAnnouncement {
         announcement,
         received_from_peer_id: peer_id,
-        received_from_index_url: index_url,
+        received_from_index_urls: index_urls,
         received_from_bootstrap_urls: bootstrap_urls,
         received_at: now,
     };

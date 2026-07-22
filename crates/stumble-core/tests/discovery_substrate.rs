@@ -284,7 +284,9 @@ fn public_origin_produces_a_compact_verifiable_pod_announcement() {
     assert!(wire.get("package").is_none());
 
     let index_dir = TestDataDir::new("tampered-announcement-index");
-    let index = AgentTools::open_home_node(&index_dir.0, seed_store).unwrap();
+    let index = AgentTools::open_home_node(&index_dir.0, seed_store)
+        .unwrap()
+        .with_index_capability(true);
     let mut tampered = announcement;
     tampered.subject = "An attacker changed the signed subject".into();
     assert!(index.index_pod_announcement(tampered).is_err());
@@ -375,9 +377,12 @@ fn replaceable_index_nodes_aggregate_and_search_signed_announcements() {
     let replacement_index_dir = TestDataDir::new("replacement-index");
     let home_dir = TestDataDir::new("index-home");
     let origin = AgentTools::open_home_node(&origin_dir.0, seed_store).unwrap();
-    let first_index = AgentTools::open_home_node(&first_index_dir.0, seed_store).unwrap();
-    let replacement_index =
-        AgentTools::open_home_node(&replacement_index_dir.0, seed_store).unwrap();
+    let first_index = AgentTools::open_home_node(&first_index_dir.0, seed_store)
+        .unwrap()
+        .with_index_capability(true);
+    let replacement_index = AgentTools::open_home_node(&replacement_index_dir.0, seed_store)
+        .unwrap()
+        .with_index_capability(true);
     let home = AgentTools::open_home_node(&home_dir.0, seed_store).unwrap();
     let pod = create_public_pod(
         &origin,
@@ -521,7 +526,9 @@ fn signed_pod_endorsements_remain_optional_origin_evidence() {
     let origin_dir = TestDataDir::new("endorsement-origin");
     let index_dir = TestDataDir::new("endorsement-index");
     let origin = AgentTools::open_home_node(&origin_dir.0, seed_store).unwrap();
-    let index = AgentTools::open_home_node(&index_dir.0, seed_store).unwrap();
+    let index = AgentTools::open_home_node(&index_dir.0, seed_store)
+        .unwrap()
+        .with_index_capability(true);
     let endorsing = create_public_pod(
         &origin,
         "systems-curators",
@@ -602,7 +609,9 @@ fn remote_unsubscribed_explore_uses_origin_signed_policy_filtered_samples() {
     let index_dir = TestDataDir::new("remote-sample-index");
     let home_dir = TestDataDir::new("remote-sample-home");
     let origin = AgentTools::open_home_node(&origin_dir.0, seed_store).unwrap();
-    let index = AgentTools::open_home_node(&index_dir.0, seed_store).unwrap();
+    let index = AgentTools::open_home_node(&index_dir.0, seed_store)
+        .unwrap()
+        .with_index_capability(true);
     let home = AgentTools::open_home_node(&home_dir.0, seed_store).unwrap();
     let pod = create_public_pod(
         &origin,
@@ -1192,7 +1201,10 @@ fn expiry_and_withdrawal_remove_discovery_while_preserving_subscriptions() {
     let origin_dir = TestDataDir::new("lifecycle-origin");
     let home_dir = TestDataDir::new("lifecycle-home");
     let origin = AgentTools::open_home_node(&origin_dir.0, seed_store).unwrap();
-    let home = AgentTools::open_home_node(&home_dir.0, seed_store).unwrap();
+    // Index capability enabled so search_pod_announcements exercises Index eligibility.
+    let home = AgentTools::open_home_node(&home_dir.0, seed_store)
+        .unwrap()
+        .with_index_capability(true);
     let pod = create_public_pod(&origin, "lifecycle-systems", "Lifecycle systems research");
     accept_item(
         &origin,

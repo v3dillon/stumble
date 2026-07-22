@@ -69,6 +69,7 @@ fn agent_tools_error_code(error: &AgentToolsError) -> &'static str {
     match error {
         AgentToolsError::Forbidden { .. } => "forbidden",
         AgentToolsError::BootstrapRejected { reason, .. } => reason.as_code(),
+        AgentToolsError::IndexSearch(failure) => failure.kind.as_code(),
         AgentToolsError::Store(StoreError::InvalidSignature) | AgentToolsError::Signing(_) => {
             "invalid_signature"
         }
@@ -103,7 +104,10 @@ impl From<AgentToolsError> for ApiError {
             AgentToolsError::BootstrapRejected {
                 reason: BootstrapAdmissionRejectionReason::RateLimited,
                 ..
-            }
+            } | AgentToolsError::IndexSearch(IndexSearchFailure {
+                kind: IndexSearchFailureKind::RateLimited,
+                ..
+            })
         ) {
             StatusCode::TOO_MANY_REQUESTS
         } else if matches!(
@@ -111,7 +115,10 @@ impl From<AgentToolsError> for ApiError {
             AgentToolsError::BootstrapRejected {
                 reason: BootstrapAdmissionRejectionReason::BootstrapDisabled,
                 ..
-            }
+            } | AgentToolsError::IndexSearch(IndexSearchFailure {
+                kind: IndexSearchFailureKind::IndexDisabled,
+                ..
+            })
         ) {
             StatusCode::NOT_FOUND
         } else {
@@ -605,7 +612,7 @@ fn route_docs() -> Vec<ApiRouteDoc> {
         ApiRouteDoc {
             method: "GET",
             path: "/discovery/announcements",
-            description: "search currently eligible verified Pod Announcements",
+            description: "Index search of eligible Pod Announcements by explicit query only (no User id)",
         },
         ApiRouteDoc {
             method: "POST",
@@ -1823,6 +1830,80 @@ impl AnnouncementStreamClient for ReqwestAnnouncementStreamClient {
     }
 }
 
+/// Production HTTP client for replaceable Index Node search.
+///
+/// Uses a Tokio handle so the Core inject seam can stay synchronous without
+/// adding a blocking HTTP dependency to `stumble-core`. Shared by intentional
+/// Explore paths (CLI `stumble pod explore` when Indexes are configured).
+pub struct ReqwestIndexSearchClient {
+    client: reqwest::Client,
+    handle: tokio::runtime::Handle,
+}
+
+impl ReqwestIndexSearchClient {
+    /// Builds a client that drives HTTP on `handle`.
+    #[must_use]
+    pub fn new(handle: tokio::runtime::Handle) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            handle,
+        }
+    }
+}
+
+impl IndexSearchClient for ReqwestIndexSearchClient {
+    fn search_index(
+        &self,
+        base_url: &str,
+        request: &IndexSearchRequest,
+    ) -> Result<PodAnnouncementSearchResponse, IndexSearchFailure> {
+        debug_assert!(index_request_is_public_only(request));
+        let base = base_url.trim().trim_end_matches('/');
+        let url = format!("{base}/discovery/announcements");
+        let client = self.client.clone();
+        let query = request.query.clone();
+        let limit = request.limit;
+        self.handle.block_on(async move {
+            let mut http = client.get(&url).query(&[("q", query.as_str())]);
+            if let Some(limit) = limit {
+                http = http.query(&[("limit", limit.to_string())]);
+            }
+            let response = http.send().await.map_err(|error| {
+                IndexSearchFailure::new(IndexSearchFailureKind::Transport, error.to_string())
+            })?;
+            let status = response.status();
+            if !status.is_success() {
+                // Prefer structured error bodies when present.
+                if let Ok(body) = response.json::<serde_json::Value>().await {
+                    if let Some(code) = body.get("code").and_then(|v| v.as_str()) {
+                        let kind = match code {
+                            "malformed" => IndexSearchFailureKind::Malformed,
+                            "query_too_large" => IndexSearchFailureKind::QueryTooLarge,
+                            "rate_limited" => IndexSearchFailureKind::RateLimited,
+                            "incompatible_protocol" => IndexSearchFailureKind::IncompatibleProtocol,
+                            "index_disabled" => IndexSearchFailureKind::IndexDisabled,
+                            _ => IndexSearchFailureKind::Protocol,
+                        };
+                        let message = body
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(code)
+                            .to_string();
+                        return Err(IndexSearchFailure::new(kind, message));
+                    }
+                }
+                return Err(IndexSearchFailure::new(
+                    IndexSearchFailureKind::Protocol,
+                    format!("index search HTTP {status}"),
+                ));
+            }
+            response.json().await.map_err(|error| {
+                IndexSearchFailure::new(IndexSearchFailureKind::Protocol, error.to_string())
+            })
+        })
+    }
+}
+
 async fn index_pod_announcement(
     State(state): State<ApiState>,
     Json(announcement): Json<PodAnnouncement>,
@@ -1843,13 +1924,14 @@ async fn receive_pod_announcement(
     )?))
 }
 
+/// Public Index search: explicit query only; no User account or stable User id.
 async fn search_pod_announcements(
     State(state): State<ApiState>,
     Query(query): Query<AnnouncementSearchQuery>,
 ) -> Result<Json<PodAnnouncementSearchResponse>, ApiError> {
-    Ok(Json(state.tools.search_pod_announcements(
-        &query.q.unwrap_or_default(),
-        query.limit.unwrap_or(10),
+    Ok(Json(state.tools.search_pod_announcements_at(
+        &IndexSearchRequest::new(query.q.unwrap_or_default(), query.limit),
+        chrono::Utc::now(),
     )?))
 }
 

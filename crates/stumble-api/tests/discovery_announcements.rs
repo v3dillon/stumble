@@ -76,7 +76,7 @@ fn create_public_pod(tools: &AgentTools, proposer: &AuthLike, slug: &str) -> stu
 
 #[tokio::test]
 async fn http_produce_index_and_search_announcement_with_lease() {
-    let tools = AgentTools::new(seed_store());
+    let tools = AgentTools::new(seed_store()).with_index_capability(true);
     let auth = register_harness(
         &tools,
         "lease curator",
@@ -145,7 +145,7 @@ async fn http_produce_index_and_search_announcement_with_lease() {
 
 #[tokio::test]
 async fn http_rejects_forged_announcement_with_typed_code() {
-    let tools = AgentTools::new(seed_store());
+    let tools = AgentTools::new(seed_store()).with_index_capability(true);
     let auth = register_harness(
         &tools,
         "forged curator",
@@ -193,7 +193,7 @@ async fn http_rejects_forged_announcement_with_typed_code() {
 
 #[tokio::test]
 async fn http_produce_and_index_withdrawal_removes_discovery() {
-    let tools = AgentTools::new(seed_store());
+    let tools = AgentTools::new(seed_store()).with_index_capability(true);
     let auth = register_harness(
         &tools,
         "withdraw curator",
@@ -284,8 +284,40 @@ async fn http_produce_and_index_withdrawal_removes_discovery() {
 }
 
 #[tokio::test]
+async fn http_index_search_returns_typed_disabled_and_oversized_codes() {
+    let disabled = router(AgentTools::new(seed_store()));
+    let response = disabled
+        .oneshot(
+            Request::get("/discovery/announcements?q=rust&limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body["code"], "index_disabled");
+
+    let enabled = router(AgentTools::new(seed_store()).with_index_capability(true));
+    let oversized = "x".repeat(257);
+    let response = enabled
+        .oneshot(
+            Request::get(format!("/discovery/announcements?q={oversized}&limit=10"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body["code"], "query_too_large");
+}
+
+#[tokio::test]
 async fn http_rejects_expired_announcement_with_typed_code() {
-    let tools = AgentTools::new(seed_store());
+    let tools = AgentTools::new(seed_store()).with_index_capability(true);
     let auth = register_harness(
         &tools,
         "expired curator",

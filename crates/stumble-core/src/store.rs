@@ -121,6 +121,8 @@ pub struct InMemoryStore {
     pub bootstrap_rejection_audits: Vec<BootstrapRejectionAudit>,
     /// Bootstrap rate-limit and stream sequence bookkeeping.
     pub bootstrap_runtime: Option<BootstrapRuntimeState>,
+    /// Index search rate-limit bookkeeping (timestamps only; no query analytics).
+    pub index_runtime: Option<IndexRuntimeState>,
     /// Ordered User-controlled Bootstrap endpoints for outbound stream sync.
     pub bootstrap_endpoints: HashMap<BootstrapEndpointId, BootstrapEndpointConfig>,
     /// Per-endpoint Announcement Stream cursor and last-attempt state.
@@ -211,6 +213,9 @@ struct PersistedStore {
     /// Zero or one Bootstrap runtime bookkeeping record.
     #[serde(default)]
     bootstrap_runtime: Vec<BootstrapRuntimeState>,
+    /// Zero or one Index runtime bookkeeping record.
+    #[serde(default)]
+    index_runtime: Vec<IndexRuntimeState>,
     #[serde(default)]
     bootstrap_endpoints: Vec<BootstrapEndpointConfig>,
     #[serde(default)]
@@ -467,6 +472,7 @@ impl From<&InMemoryStore> for PersistedStore {
                 .collect(),
             bootstrap_rejection_audits: store.bootstrap_rejection_audits.clone(),
             bootstrap_runtime: store.bootstrap_runtime.clone().into_iter().collect(),
+            index_runtime: store.index_runtime.clone().into_iter().collect(),
             bootstrap_endpoints: store.bootstrap_endpoints.values().cloned().collect(),
             bootstrap_sync_states: store.bootstrap_sync_states.values().cloned().collect(),
             trust_policies: store.trust_policies.values().cloned().collect(),
@@ -696,6 +702,7 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .collect(),
             bootstrap_rejection_audits: snapshot.bootstrap_rejection_audits,
             bootstrap_runtime: snapshot.bootstrap_runtime.into_iter().next(),
+            index_runtime: snapshot.index_runtime.into_iter().next(),
             bootstrap_endpoints: snapshot
                 .bootstrap_endpoints
                 .into_iter()
@@ -884,6 +891,7 @@ const STORE_COLLECTIONS: &[&str] = &[
     "announcement_stream_entries",
     "bootstrap_rejection_audits",
     "bootstrap_runtime",
+    "index_runtime",
     "bootstrap_endpoints",
     "bootstrap_sync_states",
     "trust_policies",
@@ -1288,6 +1296,7 @@ fn record_key(
         "bootstrap_rejection_audits" => &["id"],
         // Singleton bookkeeping record; fixed key so upserts replace in place.
         "bootstrap_runtime" => return Ok("bootstrap".to_string()),
+        "index_runtime" => return Ok("index".to_string()),
         "bootstrap_endpoints" => &["id"],
         "bootstrap_sync_states" => &["endpoint_id"],
         "pod_rules" | "pod_skill_packs" => &["pod_id"],
