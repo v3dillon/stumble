@@ -878,13 +878,8 @@ impl AgentTools {
             .read()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let node = store.default_node()?;
-        let user_id = store
-            .users
-            .values()
-            .min_by_key(|user| (user.created_at, user.id))
-            .map(|user| user.id);
         Ok(AuthContext {
-            user_id,
+            user_id: local_owner_user_id(&store),
             tenant_id: node.tenant_id,
             node_id: node.id,
             harness_id: None,
@@ -1670,9 +1665,13 @@ impl AgentTools {
             )
             .into());
         }
+        // When the caller has no User (node-level owner context), bind the
+        // harness to the same stable owner User as `local_owner_auth_context`.
+        // HashMap iteration order must not pick a different seed User, or Trust
+        // Policy and Personal Discovery diverge for owner vs harness paths.
         let user_id = ctx
             .user_id
-            .or_else(|| store.users.keys().next().copied())
+            .or_else(|| local_owner_user_id(&store))
             .ok_or_else(|| {
                 StoreError::Validation("an Agent Harness must belong to a User".to_string())
             })?;
@@ -11275,6 +11274,18 @@ fn authorize_harness_submission_scope(
     Ok(())
 }
 
+/// Stable local Home Node owner User: earliest `created_at`, then lowest id.
+///
+/// Used by owner credential auth and by harness registration when the caller
+/// has no User, so Trust Policy and Personal Discovery share one User key.
+fn local_owner_user_id(store: &InMemoryStore) -> Option<UserId> {
+    store
+        .users
+        .values()
+        .min_by_key(|user| (user.created_at, user.id))
+        .map(|user| user.id)
+}
+
 fn harness_for_context<'a>(
     store: &'a InMemoryStore,
     ctx: &AuthContext,
@@ -12904,7 +12915,7 @@ fn stage_pod_lifecycle(
         PodCreationMode::SimpleCreate => Some(
             proposer_user_id()
                 .or(ctx.user_id)
-                .or_else(|| store.users.keys().next().copied())
+                .or_else(|| local_owner_user_id(store))
                 .ok_or_else(|| StoreError::Validation("Pod creation requires an owner".into()))?,
         ),
         PodCreationMode::LegacyPublic => proposer_user_id(),
