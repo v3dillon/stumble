@@ -5541,6 +5541,12 @@ pub struct BootstrapRuntimeState {
     /// Expiry and withdrawal are terminal for this set: keys leave after one
     /// lifecycle effect so the set remains bounded to currently active admissions.
     pub admitted_keys: BTreeSet<BootstrapAdmittedKey>,
+    /// Timestamps of recent Discovery Peer advertisement admissions (network-wide).
+    #[serde(default)]
+    pub recent_peer_admissions: Vec<DateTime<Utc>>,
+    /// Recent per-node Discovery Peer advertisement admission timestamps.
+    #[serde(default)]
+    pub recent_peer_admissions_by_node: BTreeMap<NodeIdentityId, Vec<DateTime<Utc>>>,
 }
 
 impl Default for BootstrapRuntimeState {
@@ -5552,6 +5558,8 @@ impl Default for BootstrapRuntimeState {
             recent_network_admissions: Vec::new(),
             recent_origin_admissions: BTreeMap::new(),
             admitted_keys: BTreeSet::new(),
+            recent_peer_admissions: Vec::new(),
+            recent_peer_admissions_by_node: BTreeMap::new(),
         }
     }
 }
@@ -5568,6 +5576,242 @@ pub struct BootstrapWithdrawalAcceptance {
     /// Stream sequence assigned when a lifecycle entry was appended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_sequence: Option<u64>,
+}
+
+/// Renewable Discovery Peer Advertisement lease duration in whole days.
+pub const PEER_ADVERTISEMENT_LEASE_DURATION_DAYS: i64 = 7;
+
+/// Returns the renewable validity period carried by every Discovery Peer Advertisement.
+#[must_use]
+pub fn peer_advertisement_lease_duration() -> chrono::Duration {
+    chrono::Duration::days(PEER_ADVERTISEMENT_LEASE_DURATION_DAYS)
+}
+
+/// Narrow public capability a Discovery Peer may advertise.
+///
+/// Does not grant Pod Event, Subscription, Taste Profile, or administrative access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DiscoveryPeerCapability {
+    /// Serves bounded Announcement Stream pages and peer-advertisement samples.
+    AnnouncementServing,
+}
+
+impl DiscoveryPeerCapability {
+    /// Wire code for this capability.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AnnouncementServing => "announcement_serving",
+        }
+    }
+}
+
+impl std::fmt::Display for DiscoveryPeerCapability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Signed, renewable statement that an opted-in node serves public discovery artifacts.
+///
+/// Contains only identity, endpoint, protocol version, announcement-serving capability,
+/// and lease expiry. It never carries private state or rank assertions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DiscoveryPeerAdvertisement {
+    /// Stable identity of this signed advertisement.
+    pub id: Uuid,
+    /// Advertising node identity.
+    pub node_id: NodeIdentityId,
+    /// Node identity and verification key.
+    pub signer: NodeInfo,
+    /// Declared public base endpoint that serves discovery peer contracts.
+    pub public_endpoint: String,
+    /// Protocol version this peer serves.
+    pub protocol_version: String,
+    /// Narrow public capability (announcement serving only).
+    pub capability: DiscoveryPeerCapability,
+    /// Time at which the node signed this advertisement.
+    pub issued_at: DateTime<Utc>,
+    /// Exclusive end of the renewable peer advertisement lease.
+    pub expires_at: DateTime<Utc>,
+    /// Ed25519 signature over every preceding field.
+    pub signature: String,
+}
+
+impl DiscoveryPeerAdvertisement {
+    /// Returns whether this advertisement's lease is still active at `now`.
+    #[must_use]
+    pub fn lease_is_active(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at > now
+    }
+}
+
+/// Locally retained verified Discovery Peer Advertisement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct KnownDiscoveryPeerAdvertisement {
+    /// Peer-authored signed advertisement, unchanged by relays.
+    pub advertisement: DiscoveryPeerAdvertisement,
+    /// Time at which this node verified and retained it.
+    pub received_at: DateTime<Utc>,
+}
+
+/// User opt-in state for serving as a Discovery Peer.
+///
+/// Default is disabled: ordinary Home Nodes remain outbound-only for discovery.
+/// Survives SQLite restart together with the current advertisement lease and
+/// peer serving stream cursor high-water.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct DiscoveryPeerServiceState {
+    /// Whether announcement serving is currently enabled by the User.
+    pub enabled: bool,
+    /// Declared public base endpoint required while enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_endpoint: Option<String>,
+    /// Current signed advertisement lease when enabled and verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_advertisement: Option<DiscoveryPeerAdvertisement>,
+    /// Time of the last successful enable/renew verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<DateTime<Utc>>,
+    /// Next monotonic sequence for peer-local Announcement Stream serving.
+    pub next_stream_sequence: u64,
+}
+
+impl Default for DiscoveryPeerServiceState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            public_endpoint: None,
+            current_advertisement: None,
+            verified_at: None,
+            // Sequence positions are 1-based so empty cursors resume from start.
+            next_stream_sequence: 1,
+        }
+    }
+}
+
+/// Stable machine-readable reason a peer advertisement was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DiscoveryPeerAdmissionRejectionReason {
+    /// Payload failed structural validation.
+    Malformed,
+    /// Node identity fields are inconsistent or unusable.
+    InvalidIdentity,
+    /// Signature verification failed (forged or corrupted).
+    InvalidSignature,
+    /// Declared public endpoint was not reachable.
+    UnreachableEndpoint,
+    /// Advertised protocol is not compatible.
+    IncompatibleProtocol,
+    /// Advertisement lease is expired or otherwise not current.
+    StaleLease,
+    /// Endpoint uses a private, reserved, or non-public address policy violation.
+    PrivateEndpoint,
+    /// Endpoint violates HTTPS-outside-loopback policy.
+    InsecureEndpoint,
+    /// Signed payload exceeded the bounded size accepted for admission.
+    PayloadTooLarge,
+    /// Capability is not a permitted discovery peer capability.
+    UnsupportedCapability,
+    /// This node does not currently enable Bootstrap peer admission.
+    BootstrapDisabled,
+    /// Local discovery peer service is not enabled for inbound serving.
+    PeerServiceDisabled,
+    /// Enable/renew was denied because verification preconditions failed.
+    VerificationFailed,
+    /// Reachable endpoint identity did not match the signed advertisement or local node.
+    IdentityMismatch,
+    /// Per-network or per-node peer-advertisement admission rate limit was exceeded.
+    RateLimited,
+}
+
+impl DiscoveryPeerAdmissionRejectionReason {
+    /// Wire code returned on public peer admission/serve rejection responses.
+    #[must_use]
+    pub const fn as_code(self) -> &'static str {
+        match self {
+            Self::Malformed => "malformed",
+            Self::InvalidIdentity => "invalid_identity",
+            Self::InvalidSignature => "invalid_signature",
+            Self::UnreachableEndpoint => "unreachable_endpoint",
+            Self::IncompatibleProtocol => "incompatible_protocol",
+            Self::StaleLease => "stale_lease",
+            Self::PrivateEndpoint => "private_endpoint",
+            Self::InsecureEndpoint => "insecure_endpoint",
+            Self::PayloadTooLarge => "payload_too_large",
+            Self::UnsupportedCapability => "unsupported_capability",
+            Self::BootstrapDisabled => "bootstrap_disabled",
+            Self::PeerServiceDisabled => "peer_service_disabled",
+            Self::VerificationFailed => "verification_failed",
+            Self::IdentityMismatch => "identity_mismatch",
+            Self::RateLimited => "rate_limited",
+        }
+    }
+}
+
+impl std::fmt::Display for DiscoveryPeerAdmissionRejectionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_code())
+    }
+}
+
+/// Successful open Bootstrap admission of a Discovery Peer Advertisement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DiscoveryPeerAdmissionAcceptance {
+    /// Whether admission was newly applied or an idempotent replay.
+    pub outcome: BootstrapAdmissionOutcomeKind,
+    /// Verified peer advertisement retained by this Bootstrap Node.
+    pub known: KnownDiscoveryPeerAdvertisement,
+}
+
+/// Reachable identity facts returned by a Discovery Peer endpoint probe.
+///
+/// Used to bind enablement and Bootstrap peer-ad admission to the live node
+/// behind a public endpoint (node id, verification key, protocol).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DiscoveryPeerIdentityView {
+    /// Node identity observed at the endpoint.
+    pub node_id: NodeIdentityId,
+    /// Verification public key observed at the endpoint.
+    pub public_key: String,
+    /// Protocol version observed at the endpoint.
+    pub protocol_version: String,
+}
+
+/// Bounded randomized sample of current peer advertisements (unranked).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DiscoveryPeerAdvertisementSample {
+    /// Small unranked sample of current valid peer advertisements.
+    pub advertisements: Vec<DiscoveryPeerAdvertisement>,
+    /// Effective sample bound applied by the server.
+    pub limit: usize,
+}
+
+impl DiscoveryPeerAdvertisementSample {
+    /// Builds one peer sample response.
+    #[must_use]
+    pub fn new(advertisements: Vec<DiscoveryPeerAdvertisement>, limit: usize) -> Self {
+        Self {
+            advertisements,
+            limit,
+        }
+    }
 }
 
 /// Signed recommendation of one public Pod by another public Pod.

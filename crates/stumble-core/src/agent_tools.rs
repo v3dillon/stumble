@@ -5,6 +5,12 @@ use crate::bootstrap::{
     project_bootstrap_withdrawal, read_announcement_stream, remove_bootstrap_endpoint,
     set_bootstrap_endpoint_enabled, AnnouncementStreamClient, OriginProbe, UnreachableOriginProbe,
 };
+use crate::discovery_peer::{
+    admit_discovery_peer_advertisement, disable_discovery_peer_service,
+    enable_discovery_peer_service, peer_service_is_enabled, project_peer_serving_announcement,
+    read_peer_announcement_stream, renew_discovery_peer_advertisement,
+    sample_discovery_peer_advertisements, DiscoveryPeerProbe, UnreachableDiscoveryPeerProbe,
+};
 use crate::domain::*;
 use crate::feed_mix::{
     compare_feed_candidates, compose_feed_candidates, content_matches_any_topic,
@@ -58,6 +64,7 @@ use crate::store::{
     StoreError, StorePersistenceError,
 };
 use chrono::{Duration, Utc};
+use rand_core::{OsRng, RngCore};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -66,6 +73,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use url::Url;
 use uuid::Uuid;
+
+/// Cryptographic server entropy used for production peer-advertisement sampling.
+fn server_sample_seed() -> u64 {
+    OsRng.next_u64()
+}
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -133,6 +145,14 @@ pub enum AgentToolsError {
     /// Public Index search failed with a bounded typed outcome.
     #[error(transparent)]
     IndexSearch(#[from] IndexSearchFailure),
+    /// Discovery Peer enablement, admission, or serving was rejected.
+    #[error("discovery peer rejected: {reason}")]
+    DiscoveryPeerRejected {
+        /// Stable machine-readable rejection reason.
+        reason: DiscoveryPeerAdmissionRejectionReason,
+        /// Human-readable detail for operators.
+        message: String,
+    },
 }
 
 const MAX_DISCOVERY_TASK_ATTEMPTS: usize = 3;
@@ -146,6 +166,8 @@ pub struct AgentTools {
     bootstrap: BootstrapCapability,
     /// Independent Index capability (may share a process with Bootstrap).
     index: IndexCapability,
+    /// Injectable reachability probe for Discovery Peer enablement and admission.
+    discovery_peer_probe: Arc<dyn DiscoveryPeerProbe>,
 }
 
 /// Runtime configuration for open Bootstrap admission and Announcement Streams.
@@ -688,6 +710,7 @@ impl AgentTools {
             persistence: None,
             bootstrap: BootstrapCapability::default(),
             index: IndexCapability::default(),
+            discovery_peer_probe: Arc::new(UnreachableDiscoveryPeerProbe),
         }
     }
 
@@ -697,6 +720,7 @@ impl AgentTools {
             persistence: Some(Persistence::Json(Arc::new(path.into()))),
             bootstrap: BootstrapCapability::default(),
             index: IndexCapability::default(),
+            discovery_peer_probe: Arc::new(UnreachableDiscoveryPeerProbe),
         }
     }
 
@@ -709,6 +733,7 @@ impl AgentTools {
             }),
             bootstrap: BootstrapCapability::default(),
             index: IndexCapability::default(),
+            discovery_peer_probe: Arc::new(UnreachableDiscoveryPeerProbe),
         }
     }
 
@@ -749,6 +774,25 @@ impl AgentTools {
     #[must_use]
     pub fn index_enabled(&self) -> bool {
         self.index.enabled
+    }
+
+    /// Injects the reachability probe used for Discovery Peer enablement and
+    /// Bootstrap peer-advertisement admission.
+    #[must_use]
+    pub fn with_discovery_peer_probe(mut self, probe: Arc<dyn DiscoveryPeerProbe>) -> Self {
+        self.discovery_peer_probe = probe;
+        self
+    }
+
+    /// Returns whether this Home Node currently enables inbound Discovery Peer serving.
+    ///
+    /// Default is false: ordinary Home Nodes remain outbound-only for discovery.
+    #[must_use]
+    pub fn discovery_peer_service_enabled(&self) -> bool {
+        self.store
+            .read()
+            .map(|store| peer_service_is_enabled(&store))
+            .unwrap_or(false)
     }
 
     pub fn open_home_node(
@@ -7378,11 +7422,288 @@ impl AgentTools {
                 format!("{base}/discovery/announcements"),
             );
         }
+        // Discovery Peer inbound endpoints are advertised only while the User has
+        // explicitly opted into announcement serving (ADR-0044 / ADR-0049).
+        if self.discovery_peer_service_enabled() {
+            endpoints.insert(
+                "discovery_peer_announcement_stream".to_string(),
+                format!("{base}/discovery/peer/announcements/stream"),
+            );
+            endpoints.insert(
+                "discovery_peer_advertisement_sample".to_string(),
+                format!("{base}/discovery/peer/advertisements"),
+            );
+        }
+        if self.bootstrap.enabled {
+            endpoints.insert(
+                "bootstrap_peer_advertisements".to_string(),
+                format!("{base}/bootstrap/peer-advertisements"),
+            );
+        }
         Ok(WellKnownNode {
             protocol: CURRENT_PROTOCOL_VERSION.to_string(),
             node,
             endpoints,
         })
+    }
+
+    /// Enables inbound Discovery Peer announcement serving after verification.
+    ///
+    /// Requires a declared public endpoint and successful identity, protocol,
+    /// HTTPS-outside-loopback, and reachability checks. Produces a signed
+    /// expiring Discovery Peer Advertisement.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization, verification, or persistence errors.
+    pub fn enable_discovery_peer_service(
+        &self,
+        ctx: &AuthContext,
+        public_endpoint: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<DiscoveryPeerAdvertisement, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        let advertisement = enable_discovery_peer_service(
+            &mut store,
+            &node,
+            public_endpoint,
+            self.discovery_peer_probe.as_ref(),
+            now,
+        )
+        .map_err(|reason| AgentToolsError::DiscoveryPeerRejected {
+            message: format!("discovery peer enable rejected: {reason}"),
+            reason,
+        })?;
+        self.persist_locked(&mut store)?;
+        Ok(advertisement)
+    }
+
+    /// Disables inbound Discovery Peer serving without affecting outbound discovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization or persistence errors.
+    pub fn disable_discovery_peer_service(
+        &self,
+        ctx: &AuthContext,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<DiscoveryPeerServiceState, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        disable_discovery_peer_service(&mut store, now);
+        let state = store.discovery_peer_service.clone().unwrap_or_default();
+        self.persist_locked(&mut store)?;
+        Ok(state)
+    }
+
+    /// Reports Discovery Peer opt-in state for operators.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization or lock errors.
+    pub fn discovery_peer_service_status(
+        &self,
+        ctx: &AuthContext,
+    ) -> Result<DiscoveryPeerServiceState, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        Ok(store.discovery_peer_service.clone().unwrap_or_default())
+    }
+
+    /// Renews the current Discovery Peer Advertisement while service is enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization, verification, or persistence errors.
+    pub fn renew_discovery_peer_advertisement(
+        &self,
+        ctx: &AuthContext,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<DiscoveryPeerAdvertisement, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        let advertisement = renew_discovery_peer_advertisement(
+            &mut store,
+            &node,
+            self.discovery_peer_probe.as_ref(),
+            now,
+        )
+        .map_err(|reason| AgentToolsError::DiscoveryPeerRejected {
+            message: format!("discovery peer renew rejected: {reason}"),
+            reason,
+        })?;
+        self.persist_locked(&mut store)?;
+        Ok(advertisement)
+    }
+
+    /// Open Bootstrap admission for a signed Discovery Peer Advertisement.
+    ///
+    /// Requires no User account or Trusted Peer relationship.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentToolsError::DiscoveryPeerRejected`] on verification failure.
+    pub fn admit_discovery_peer_advertisement(
+        &self,
+        advertisement: DiscoveryPeerAdvertisement,
+    ) -> Result<DiscoveryPeerAdmissionAcceptance, AgentToolsError> {
+        self.admit_discovery_peer_advertisement_at(advertisement, Utc::now())
+    }
+
+    /// Open Bootstrap peer-advertisement admission at an explicit clock time.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::admit_discovery_peer_advertisement`].
+    pub fn admit_discovery_peer_advertisement_at(
+        &self,
+        advertisement: DiscoveryPeerAdvertisement,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<DiscoveryPeerAdmissionAcceptance, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let result = admit_discovery_peer_advertisement(
+            &mut store,
+            advertisement,
+            self.discovery_peer_probe.as_ref(),
+            self.bootstrap.enabled,
+            now,
+        );
+        self.persist_locked(&mut store)?;
+        result.map_err(|reason| AgentToolsError::DiscoveryPeerRejected {
+            message: format!("discovery peer admission rejected: {reason}"),
+            reason,
+        })
+    }
+
+    /// Serves a bounded Announcement Stream page from an enabled Discovery Peer.
+    ///
+    /// Preserves Origin announcement bytes and signatures unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentToolsError::DiscoveryPeerRejected`] when service is disabled
+    /// or the cursor is invalid.
+    pub fn peer_announcement_stream(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<AnnouncementStreamPage, AgentToolsError> {
+        self.peer_announcement_stream_at(cursor, limit, Utc::now())
+    }
+
+    /// Peer Announcement Stream at an explicit clock time.
+    ///
+    /// Read-only: acquires a shared store lock and does not persist.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::peer_announcement_stream`].
+    pub fn peer_announcement_stream_at(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<AnnouncementStreamPage, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        read_peer_announcement_stream(&store, cursor, limit, now).map_err(|reason| {
+            AgentToolsError::DiscoveryPeerRejected {
+                message: format!("discovery peer stream rejected: {reason}"),
+                reason,
+            }
+        })
+    }
+
+    /// Serves a small randomized sample of current peer advertisements (unranked).
+    ///
+    /// Uses server entropy for shuffle selection. Deterministic sampling for
+    /// tests is available via [`Self::peer_advertisement_sample_at`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentToolsError::DiscoveryPeerRejected`] when service is disabled.
+    pub fn peer_advertisement_sample(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<DiscoveryPeerAdvertisementSample, AgentToolsError> {
+        self.peer_advertisement_sample_at(limit, server_sample_seed(), Utc::now())
+    }
+
+    /// Peer advertisement sample at an explicit clock time and optional test seed.
+    ///
+    /// `seed` is for Core/tests only; production HTTP must not accept a client
+    /// seed query parameter.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::peer_advertisement_sample`].
+    pub fn peer_advertisement_sample_at(
+        &self,
+        limit: Option<usize>,
+        seed: u64,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<DiscoveryPeerAdvertisementSample, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        sample_discovery_peer_advertisements(&store, limit, now, seed).map_err(|reason| {
+            AgentToolsError::DiscoveryPeerRejected {
+                message: format!("discovery peer sample rejected: {reason}"),
+                reason,
+            }
+        })
+    }
+
+    /// Projects a verified announcement into the peer serving stream while enabled.
+    ///
+    /// Requires Administration. Verifies the announcement signature and active
+    /// lease before appending to the peer-local stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization errors, rejection when service is disabled or the
+    /// announcement fails verify/lease checks, or persistence errors.
+    pub fn project_peer_serving_announcement(
+        &self,
+        ctx: &AuthContext,
+        announcement: PodAnnouncement,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<u64, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::Administration, None)?;
+        let sequence =
+            project_peer_serving_announcement(&mut store, announcement, now).map_err(|reason| {
+                AgentToolsError::DiscoveryPeerRejected {
+                    message: format!("discovery peer project rejected: {reason}"),
+                    reason,
+                }
+            })?;
+        self.persist_locked(&mut store)?;
+        Ok(sequence)
     }
 
     /// Open Bootstrap admission for a public Pod Announcement.

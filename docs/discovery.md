@@ -22,6 +22,10 @@ Public HTTP contracts (typed machine-readable `code` on failures):
 | `POST` | `/bootstrap/announcements` | Open Bootstrap admission (no User account or Trusted Peer) |
 | `GET`  | `/bootstrap/announcements/stream` | Topic-neutral cursor-paginated Announcement Stream |
 | `POST` | `/bootstrap/withdrawals` | Open Bootstrap withdrawal admission |
+| `POST` | `/bootstrap/peer-advertisements` | Open Bootstrap admission of Discovery Peer Advertisements |
+| `GET`  | `/discovery/peer/announcements/stream` | Opt-in Discovery Peer Announcement Stream pages |
+| `GET`  | `/discovery/peer/advertisements` | Opt-in randomized unranked peer-advertisement samples |
+| `GET/POST/DELETE` | `/home/discovery-peer` | Inspect / enable / disable Discovery Peer serving |
 
 Failure codes include `invalid_signature`, `announcement_expired`, `announcement_withdrawn`, `announcement_stale`, `withdrawal_stale`, and `validation_error`. Bootstrap open admission additionally returns stable codes: `malformed`, `invalid_identity`, `invalid_signature`, `unreachable_origin`, `incompatible_protocol`, `stale_lease`, `rate_limited`, `payload_too_large`, `manifest_mismatch`, `origin_quota_exceeded`, and `bootstrap_disabled`. Public Index search returns stable codes: `malformed`, `query_too_large`, `rate_limited`, `incompatible_protocol`, `index_disabled`, `transport`, and `protocol`.
 
@@ -82,6 +86,27 @@ Home Nodes compute **deterministic Pod Similarity** in-process from verified pub
 Bounded Explore samples are retrieved from the canonical Origin through the injectable `OriginExploreSampleClient` port (`fetch_origin_explore_samples`). Acceptance requires Origin signature verification and binding to the exact current announcement (`verify_explore_samples_for_announcement` / `accept_pod_explore_samples`). Tests assert outbound sample requests are public-only (`sample_request_is_public_only`) and that pure Explore ranking does not call the Origin client. Explicit Feedback Signals continue to adjust private learning and therefore future local exposure; dismiss/ignore alone do not create durable preference (`feedback_affects_future_exposure`).
 
 Focused coverage: unit tests in `pod_similarity` and temporary-SQLite integration tests in `crates/stumble-core/tests/discovery_substrate.rs` (sample fetch, trial exposure, caps, blocks, local-only ranking).
+
+## Opt-in Discovery Peer service
+
+Ordinary Home Nodes remain **outbound-only** for discovery by default (ADR-0044): they do not bind, advertise, or accept an inbound discovery service, and well-known metadata omits peer-serving endpoints. An authorized User enables announcement serving through operator surfaces (`AgentTools::enable_discovery_peer_service` / `disable_discovery_peer_service`, HTTP `POST|DELETE /home/discovery-peer`).
+
+Enabling requires a declared public endpoint and successful verification of node identity, protocol compatibility (`stumble/1.0`), HTTPS policy outside loopback (HTTP allowed only on loopback), and external reachability via the injectable `DiscoveryPeerProbe` port. Private/reserved literal IP hosts are rejected. A verified node produces a signed, renewable **Discovery Peer Advertisement** (7-day lease) containing only identity, endpoint, protocol version, `announcement_serving` capability, and expiry—never private state or rank assertions.
+
+Bootstrap-capable nodes openly admit peer advertisements at `POST /bootstrap/peer-advertisements` after the same identity/signature/lease/protocol/endpoint/reachability checks and reject forged, stale, incompatible, private, insecure, or unreachable advertisements. Admitted ads are retained for unranked sampling.
+
+An enabled Discovery Peer serves:
+
+| Method | Path | Behavior |
+|--------|------|----------|
+| `GET` | `/discovery/peer/announcements/stream` | Bounded Announcement Stream pages; Origin announcement bytes and signatures unchanged |
+| `GET` | `/discovery/peer/advertisements` | Small randomized bounded samples of current peer advertisements (no rank/trust) |
+| `POST` | `/bootstrap/peer-advertisements` | Open Bootstrap admission of peer advertisements (Bootstrap capability) |
+| `GET/POST/DELETE` | `/home/discovery-peer` | Inspect / enable / disable opt-in serving |
+
+Peer endpoints expose no Pod Events, Subscriptions, Taste Profiles, feedback, credentials, private projections, or administrative capability. Disabling service clears the renewable advertisement and stops inbound serving without affecting outbound Bootstrap configuration, Index Explore, or direct Pod synchronization. Opt-in state, advertisement lease, and peer serving stream sequence high-water (`next_stream_sequence`) persist in SQLite (`discovery_peer_service`, `known_discovery_peer_advertisements`, peer-local `discovery_peer_stream_entries`). Peer and Bootstrap streams use independent sequence allocators so combined-role nodes never overwrite each other's stream entries. Peer advertisement samples use server entropy (no client-supplied seed). Bootstrap peer-ad admission applies rate limits and identity-bound reachability probes.
+
+Domain module: `crates/stumble-core/src/discovery_peer/`. Focused coverage: unit tests in that module and temporary-SQLite acceptance in `crates/stumble-core/tests/discovery_peer_service.rs`.
 
 Announcement lease and withdrawal state persist in the authoritative SQLite store (`known_pod_announcements`, `known_pod_withdrawals`). The focused temporary-SQLite acceptance coverage is in `crates/stumble-core/tests/discovery_substrate.rs` and `crates/stumble-api/tests/discovery_announcements.rs`. Direct outbound addressing remains covered in `crates/stumble-cli/tests/direct_subscription.rs`.
 

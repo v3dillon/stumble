@@ -1,5 +1,6 @@
 use crate::domain::{
-    EventLog, NodeIdentity, PodAnnouncement, PodEndorsement, PodExploreSamples, PodWithdrawal,
+    DiscoveryPeerAdvertisement, EventLog, NodeIdentity, PodAnnouncement, PodEndorsement,
+    PodExploreSamples, PodWithdrawal,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use chrono::Utc;
@@ -349,6 +350,60 @@ impl PodExploreSamples {
             &self.signer.public_key,
             &self.signature,
             &canonical_explore_samples_bytes(self)?,
+        )
+    }
+}
+
+fn canonical_peer_advertisement_bytes(
+    advertisement: &DiscoveryPeerAdvertisement,
+) -> Result<Vec<u8>, SigningError> {
+    let canonical = serde_json::json!({
+        "id": advertisement.id,
+        "node_id": advertisement.node_id,
+        "signer": advertisement.signer,
+        "public_endpoint": advertisement.public_endpoint,
+        "protocol_version": advertisement.protocol_version,
+        "capability": advertisement.capability,
+        "issued_at": advertisement.issued_at,
+        "expires_at": advertisement.expires_at,
+    });
+    Ok(serde_json::to_vec(&canonical)?)
+}
+
+/// Signs a Discovery Peer Advertisement with the serving node's key.
+///
+/// # Errors
+///
+/// Returns an error when the local signing key or canonical JSON is invalid.
+pub fn sign_discovery_peer_advertisement(
+    node: &NodeIdentity,
+    mut advertisement: DiscoveryPeerAdvertisement,
+) -> Result<DiscoveryPeerAdvertisement, SigningError> {
+    advertisement.signature =
+        sign_payload(node, &canonical_peer_advertisement_bytes(&advertisement)?)?;
+    Ok(advertisement)
+}
+
+impl DiscoveryPeerAdvertisement {
+    /// Verifies that this advertisement was signed by its declared node.
+    ///
+    /// Signature validity establishes identity only; it does not establish trust
+    /// or rank. The signed payload includes the renewable peer advertisement lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the advertised key, signature, or JSON is malformed.
+    pub fn verify(&self) -> Result<bool, SigningError> {
+        if self.node_id != self.signer.node_id {
+            return Ok(false);
+        }
+        if self.expires_at != self.issued_at + crate::domain::peer_advertisement_lease_duration() {
+            return Ok(false);
+        }
+        verify_payload(
+            &self.signer.public_key,
+            &self.signature,
+            &canonical_peer_advertisement_bytes(self)?,
         )
     }
 }

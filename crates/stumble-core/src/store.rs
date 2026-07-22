@@ -117,12 +117,19 @@ pub struct InMemoryStore {
     pub known_pod_withdrawals: HashMap<(NodeIdentityId, String), KnownPodWithdrawal>,
     /// Topic-neutral Announcement Stream log keyed by monotonic sequence.
     pub announcement_stream_entries: BTreeMap<u64, AnnouncementStreamEntry>,
+    /// Peer-local Announcement Stream log (separate sequence from Bootstrap).
+    pub discovery_peer_stream_entries: BTreeMap<u64, AnnouncementStreamEntry>,
     /// Minimal operator audit of Bootstrap admission rejections.
     pub bootstrap_rejection_audits: Vec<BootstrapRejectionAudit>,
     /// Bootstrap rate-limit and stream sequence bookkeeping.
     pub bootstrap_runtime: Option<BootstrapRuntimeState>,
     /// Index search rate-limit bookkeeping (timestamps only; no query analytics).
     pub index_runtime: Option<IndexRuntimeState>,
+    /// Opt-in Discovery Peer service state (disabled by default; outbound-only).
+    pub discovery_peer_service: Option<DiscoveryPeerServiceState>,
+    /// Verified Discovery Peer Advertisements retained for unranked sampling.
+    pub known_discovery_peer_advertisements:
+        HashMap<NodeIdentityId, KnownDiscoveryPeerAdvertisement>,
     /// Ordered User-controlled Bootstrap endpoints for outbound stream sync.
     pub bootstrap_endpoints: HashMap<BootstrapEndpointId, BootstrapEndpointConfig>,
     /// Per-endpoint Announcement Stream cursor and last-attempt state.
@@ -209,6 +216,8 @@ struct PersistedStore {
     #[serde(default)]
     announcement_stream_entries: Vec<AnnouncementStreamEntry>,
     #[serde(default)]
+    discovery_peer_stream_entries: Vec<AnnouncementStreamEntry>,
+    #[serde(default)]
     bootstrap_rejection_audits: Vec<BootstrapRejectionAudit>,
     /// Zero or one Bootstrap runtime bookkeeping record.
     #[serde(default)]
@@ -216,6 +225,11 @@ struct PersistedStore {
     /// Zero or one Index runtime bookkeeping record.
     #[serde(default)]
     index_runtime: Vec<IndexRuntimeState>,
+    /// Zero or one Discovery Peer service opt-in record.
+    #[serde(default)]
+    discovery_peer_service: Vec<DiscoveryPeerServiceState>,
+    #[serde(default)]
+    known_discovery_peer_advertisements: Vec<KnownDiscoveryPeerAdvertisement>,
     #[serde(default)]
     bootstrap_endpoints: Vec<BootstrapEndpointConfig>,
     #[serde(default)]
@@ -470,9 +484,20 @@ impl From<&InMemoryStore> for PersistedStore {
                 .values()
                 .cloned()
                 .collect(),
+            discovery_peer_stream_entries: store
+                .discovery_peer_stream_entries
+                .values()
+                .cloned()
+                .collect(),
             bootstrap_rejection_audits: store.bootstrap_rejection_audits.clone(),
             bootstrap_runtime: store.bootstrap_runtime.clone().into_iter().collect(),
             index_runtime: store.index_runtime.clone().into_iter().collect(),
+            discovery_peer_service: store.discovery_peer_service.clone().into_iter().collect(),
+            known_discovery_peer_advertisements: store
+                .known_discovery_peer_advertisements
+                .values()
+                .cloned()
+                .collect(),
             bootstrap_endpoints: store.bootstrap_endpoints.values().cloned().collect(),
             bootstrap_sync_states: store.bootstrap_sync_states.values().cloned().collect(),
             trust_policies: store.trust_policies.values().cloned().collect(),
@@ -700,9 +725,20 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .into_iter()
                 .map(|entry| (entry.sequence, entry))
                 .collect(),
+            discovery_peer_stream_entries: snapshot
+                .discovery_peer_stream_entries
+                .into_iter()
+                .map(|entry| (entry.sequence, entry))
+                .collect(),
             bootstrap_rejection_audits: snapshot.bootstrap_rejection_audits,
             bootstrap_runtime: snapshot.bootstrap_runtime.into_iter().next(),
             index_runtime: snapshot.index_runtime.into_iter().next(),
+            discovery_peer_service: snapshot.discovery_peer_service.into_iter().next(),
+            known_discovery_peer_advertisements: snapshot
+                .known_discovery_peer_advertisements
+                .into_iter()
+                .map(|known| (known.advertisement.node_id, known))
+                .collect(),
             bootstrap_endpoints: snapshot
                 .bootstrap_endpoints
                 .into_iter()
@@ -889,9 +925,12 @@ const STORE_COLLECTIONS: &[&str] = &[
     "known_pod_announcements",
     "known_pod_withdrawals",
     "announcement_stream_entries",
+    "discovery_peer_stream_entries",
     "bootstrap_rejection_audits",
     "bootstrap_runtime",
     "index_runtime",
+    "discovery_peer_service",
+    "known_discovery_peer_advertisements",
     "bootstrap_endpoints",
     "bootstrap_sync_states",
     "trust_policies",
@@ -1293,10 +1332,22 @@ fn record_key(
             ])?);
         }
         "announcement_stream_entries" => &["sequence"],
+        "discovery_peer_stream_entries" => &["sequence"],
         "bootstrap_rejection_audits" => &["id"],
         // Singleton bookkeeping record; fixed key so upserts replace in place.
         "bootstrap_runtime" => return Ok("bootstrap".to_string()),
         "index_runtime" => return Ok("index".to_string()),
+        "discovery_peer_service" => return Ok("discovery_peer".to_string()),
+        "known_discovery_peer_advertisements" => {
+            let advertisement = value
+                .get("advertisement")
+                .unwrap_or(&serde_json::Value::Null);
+            return Ok(serde_json::to_string(
+                advertisement
+                    .get("node_id")
+                    .unwrap_or(&serde_json::Value::Null),
+            )?);
+        }
         "bootstrap_endpoints" => &["id"],
         "bootstrap_sync_states" => &["endpoint_id"],
         "pod_rules" | "pod_skill_packs" => &["pod_id"],

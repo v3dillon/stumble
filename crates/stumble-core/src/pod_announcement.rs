@@ -470,6 +470,9 @@ pub fn retain_verified_pod_announcement(
         received_at: now,
     };
     store.known_pod_announcements.insert(key, known.clone());
+    // Opt-in Discovery Peers project retained verified announcements into the
+    // peer-local stream so pure Home Nodes can serve without Bootstrap.
+    crate::discovery_peer::maybe_project_peer_serving_announcement(store, &known.announcement, now);
     Ok(known)
 }
 

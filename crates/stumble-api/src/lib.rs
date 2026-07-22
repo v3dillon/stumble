@@ -69,6 +69,7 @@ fn agent_tools_error_code(error: &AgentToolsError) -> &'static str {
     match error {
         AgentToolsError::Forbidden { .. } => "forbidden",
         AgentToolsError::BootstrapRejected { reason, .. } => reason.as_code(),
+        AgentToolsError::DiscoveryPeerRejected { reason, .. } => reason.as_code(),
         AgentToolsError::IndexSearch(failure) => failure.kind.as_code(),
         AgentToolsError::Store(StoreError::InvalidSignature) | AgentToolsError::Signing(_) => {
             "invalid_signature"
@@ -107,7 +108,10 @@ impl From<AgentToolsError> for ApiError {
             } | AgentToolsError::IndexSearch(IndexSearchFailure {
                 kind: IndexSearchFailureKind::RateLimited,
                 ..
-            })
+            }) | AgentToolsError::DiscoveryPeerRejected {
+                reason: DiscoveryPeerAdmissionRejectionReason::RateLimited,
+                ..
+            }
         ) {
             StatusCode::TOO_MANY_REQUESTS
         } else if matches!(
@@ -118,7 +122,11 @@ impl From<AgentToolsError> for ApiError {
             } | AgentToolsError::IndexSearch(IndexSearchFailure {
                 kind: IndexSearchFailureKind::IndexDisabled,
                 ..
-            })
+            }) | AgentToolsError::DiscoveryPeerRejected {
+                reason: DiscoveryPeerAdmissionRejectionReason::PeerServiceDisabled
+                    | DiscoveryPeerAdmissionRejectionReason::BootstrapDisabled,
+                ..
+            }
         ) {
             StatusCode::NOT_FOUND
         } else {
@@ -283,6 +291,24 @@ pub fn router_with_options(
             get(bootstrap_announcement_stream),
         )
         .route("/bootstrap/withdrawals", post(bootstrap_admit_withdrawal))
+        .route(
+            "/bootstrap/peer-advertisements",
+            post(bootstrap_admit_peer_advertisement),
+        )
+        .route(
+            "/discovery/peer/announcements/stream",
+            get(peer_announcement_stream),
+        )
+        .route(
+            "/discovery/peer/advertisements",
+            get(peer_advertisement_sample),
+        )
+        .route(
+            "/home/discovery-peer",
+            get(discovery_peer_status)
+                .post(enable_discovery_peer)
+                .delete(disable_discovery_peer),
+        )
         .route(
             "/home/bootstrap/endpoints",
             get(list_bootstrap_endpoints).post(add_bootstrap_endpoint),
@@ -598,6 +624,36 @@ fn route_docs() -> Vec<ApiRouteDoc> {
             method: "POST",
             path: "/home/bootstrap/sync",
             description: "fetch Announcement Streams from enabled Bootstrap endpoints outbound",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/home/discovery-peer",
+            description: "inspect Discovery Peer opt-in serving state",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/home/discovery-peer",
+            description: "explicitly enable Discovery Peer announcement serving after reachability verification",
+        },
+        ApiRouteDoc {
+            method: "DELETE",
+            path: "/home/discovery-peer",
+            description: "disable Discovery Peer serving without affecting outbound discovery",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/bootstrap/peer-advertisements",
+            description: "open Bootstrap admission of a signed Discovery Peer Advertisement",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/discovery/peer/announcements/stream",
+            description: "opt-in Discovery Peer Announcement Stream pages (Origin signatures unchanged)",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/discovery/peer/advertisements",
+            description: "small randomized unranked sample of current peer advertisements",
         },
         ApiRouteDoc {
             method: "GET",
@@ -1680,6 +1736,84 @@ async fn bootstrap_announcement_stream(
     Ok(Json(state.tools.announcement_stream(
         query.cursor.as_deref(),
         query.limit,
+    )?))
+}
+
+/// Open Bootstrap admission of a signed Discovery Peer Advertisement.
+async fn bootstrap_admit_peer_advertisement(
+    State(state): State<ApiState>,
+    Json(advertisement): Json<DiscoveryPeerAdvertisement>,
+) -> Result<Json<DiscoveryPeerAdmissionAcceptance>, ApiError> {
+    Ok(Json(
+        state
+            .tools
+            .admit_discovery_peer_advertisement(advertisement)?,
+    ))
+}
+
+/// Discovery Peer Announcement Stream (opt-in serving only).
+async fn peer_announcement_stream(
+    State(state): State<ApiState>,
+    Query(query): Query<AnnouncementStreamQuery>,
+) -> Result<Json<AnnouncementStreamPage>, ApiError> {
+    Ok(Json(state.tools.peer_announcement_stream(
+        query.cursor.as_deref(),
+        query.limit,
+    )?))
+}
+
+#[derive(Debug, Deserialize)]
+struct PeerAdvertisementSampleQuery {
+    limit: Option<usize>,
+}
+
+/// Small randomized unranked sample of current peer advertisements.
+///
+/// Shuffle seed is server entropy only; clients cannot supply a seed.
+async fn peer_advertisement_sample(
+    State(state): State<ApiState>,
+    Query(query): Query<PeerAdvertisementSampleQuery>,
+) -> Result<Json<DiscoveryPeerAdvertisementSample>, ApiError> {
+    Ok(Json(state.tools.peer_advertisement_sample(query.limit)?))
+}
+
+#[derive(Debug, Deserialize)]
+struct EnableDiscoveryPeerRequest {
+    public_endpoint: String,
+}
+
+/// Reports Discovery Peer opt-in state (admin).
+async fn discovery_peer_status(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<DiscoveryPeerServiceState>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.discovery_peer_service_status(&ctx)?))
+}
+
+/// Explicitly enables inbound Discovery Peer announcement serving.
+async fn enable_discovery_peer(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<EnableDiscoveryPeerRequest>,
+) -> Result<Json<DiscoveryPeerAdvertisement>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.enable_discovery_peer_service(
+        &ctx,
+        &request.public_endpoint,
+        chrono::Utc::now(),
+    )?))
+}
+
+/// Disables inbound Discovery Peer serving without affecting outbound discovery.
+async fn disable_discovery_peer(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<DiscoveryPeerServiceState>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    Ok(Json(state.tools.disable_discovery_peer_service(
+        &ctx,
+        chrono::Utc::now(),
     )?))
 }
 

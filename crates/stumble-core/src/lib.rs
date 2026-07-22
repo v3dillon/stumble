@@ -1,5 +1,6 @@
 pub mod agent_tools;
 pub mod bootstrap;
+pub mod discovery_peer;
 pub mod domain;
 mod feed_mix;
 pub mod index;
@@ -29,6 +30,20 @@ pub use bootstrap::{
     DEFAULT_STREAM_PAGE_LIMIT, MAX_ACTIVE_ANNOUNCEMENTS_PER_ORIGIN, MAX_ANNOUNCEMENT_PAYLOAD_BYTES,
     MAX_NETWORK_ADMISSIONS_PER_WINDOW, MAX_ORIGIN_ADMISSIONS_PER_WINDOW, MAX_STREAM_ENTRIES,
     MAX_STREAM_PAGE_LIMIT, MAX_WITHDRAWAL_PAYLOAD_BYTES,
+};
+pub use discovery_peer::{
+    admit_discovery_peer_advertisement, disable_discovery_peer_service,
+    enable_discovery_peer_service, maybe_project_peer_serving_announcement,
+    normalize_discovery_peer_endpoint, peer_advertisement_sample_is_public_only,
+    peer_identity_view_for_advertisement, peer_identity_view_for_node, peer_service_is_enabled,
+    project_peer_serving_announcement, read_peer_announcement_stream,
+    renew_discovery_peer_advertisement, sample_discovery_peer_advertisements, DiscoveryPeerProbe,
+    DiscoveryPeerProbeError, EndpointPolicyError, FixedDiscoveryPeerProbe,
+    ScriptedDiscoveryPeerProbe, SimpleMatchingDiscoveryPeerProbe, UnreachableDiscoveryPeerProbe,
+    DEFAULT_PEER_SAMPLE_LIMIT, DEFAULT_PEER_STREAM_PAGE_LIMIT,
+    MAX_PEER_ADVERTISEMENT_PAYLOAD_BYTES, MAX_PEER_NETWORK_ADMISSIONS_PER_WINDOW,
+    MAX_PEER_NODE_ADMISSIONS_PER_WINDOW, MAX_PEER_SAMPLE_LIMIT, MAX_PEER_STREAM_ENTRIES,
+    MAX_PEER_STREAM_PAGE_LIMIT, PEER_ADMISSION_RATE_WINDOW,
 };
 pub use domain::*;
 pub use index::{
