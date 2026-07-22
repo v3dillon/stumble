@@ -5481,6 +5481,9 @@ pub struct ExplorePodResult {
     pub sample_content_references: Vec<FeedContentReference>,
     /// Whether the User already has a Subscription to this public Pod.
     pub is_subscribed: bool,
+    /// Limited labeled trial exposure for a strongly similar unendorsed Pod.
+    #[serde(default)]
+    pub trial_exposure: bool,
 }
 
 /// Structured response from intentional public Pod discovery.

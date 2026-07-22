@@ -13,6 +13,7 @@ use crate::feed_mix::{
 use crate::interest_seeds::{
     candidate_submission_taste_signals, interest_seed_evidence, record_interest_seed,
     reset_interest_seed_evidence, source_affinity_is_blocked, taste_profile_projections,
+    TasteProfileProjections,
 };
 use crate::personal_discovery::{
     build_discovery_result_batch, build_plan, clear_discovery_result_learning,
@@ -25,10 +26,17 @@ use crate::personal_discovery::{
     BatchAvailabilityInput, DiscoveryResultLearningInput, TaskAvailabilityIdentity,
 };
 use crate::pod_announcement::{
-    announcement_delivery_is_active, announcement_is_discovery_eligible,
-    issue_and_retain_origin_pod_announcement, issue_origin_pod_withdrawal,
-    refresh_public_pod_announcement_if_needed, retain_verified_pod_announcement,
-    retain_verified_pod_withdrawal, validate_public_pod_url, DeliveryProvenance,
+    announcement_is_discovery_eligible, issue_and_retain_origin_pod_announcement,
+    issue_origin_pod_withdrawal, refresh_public_pod_announcement_if_needed,
+    retain_verified_pod_announcement, retain_verified_pod_withdrawal, validate_public_pod_url,
+    DeliveryProvenance,
+};
+use crate::pod_similarity::{
+    announcement_scoring_eligible, append_trial_exposure_label, collect_policy_endorsements,
+    feedback_affects_future_exposure, fetch_verified_origin_explore_samples, rank_similar_pods,
+    score_exploration_item, verify_explore_samples_for_announcement, ExplorationCapTracker,
+    ExplorationCaps, LocalSimilarityContext, OriginExploreSampleClient, OwnedCandidateEvidence,
+    PodSimilarityScore, SampleFetchError, MAX_RESULTS_PER_ORIGIN, MAX_TRIAL_ITEMS_PER_ORIGIN,
 };
 use crate::ranking::{rank_discovery, RankingInput};
 use crate::signing::{
@@ -61,6 +69,9 @@ pub enum AgentToolsError {
     /// The Explore request's bounds are invalid.
     #[error(transparent)]
     ExploreRequest(#[from] ExploreRequestError),
+    /// Origin Explore sample fetch or verification failed.
+    #[error(transparent)]
+    SampleFetch(#[from] SampleFetchError),
     #[error(transparent)]
     CurationRationale(#[from] CurationRationaleError),
     #[error(transparent)]
@@ -358,6 +369,29 @@ impl AgentTools {
                         request.batch_intent.avoid_topics.join(", ")
                     ));
                 }
+                // Local Pod Similarity for Exploration Items (deterministic, no model).
+                let mut trial_exposure = false;
+                if kind == FeedItemKind::Exploration {
+                    if let Some(similarity) = exploration_similarity_for_item(
+                        &store,
+                        user_id,
+                        ctx.tenant_id,
+                        item,
+                        &placement_pod_ids,
+                        preferences,
+                    ) {
+                        score += similarity.score;
+                        reasons.extend(
+                            similarity
+                                .reasons
+                                .iter()
+                                .map(crate::pod_similarity::SimilarityReason::display),
+                        );
+                        trial_exposure = similarity.trial_exposure;
+                        // Label trial once at the DTO boundary; trial is not an evidence kind.
+                        append_trial_exposure_label(&mut reasons, similarity.trial_exposure);
+                    }
+                }
                 let cap_pod_ids = if subscribed_pod_ids.is_empty() {
                     placement_pod_ids
                 } else {
@@ -371,6 +405,7 @@ impl AgentTools {
                     kind,
                     pod_ids: cap_pod_ids,
                     priority_pod_ids,
+                    trial_exposure,
                 })
             })
             .filter(|candidate| candidate.score > 0.0)
@@ -380,6 +415,8 @@ impl AgentTools {
         let allowed_actions = feed_allowed_actions(&store, ctx)?;
 
         let selected = compose_feed_candidates(eligible, request.size, request.feed_mix);
+        // Apply per-Origin exploration / trial caps on top of Feed Mix pod/source caps.
+        let selected = apply_exploration_origin_caps(&store, user_id, selected);
         let items = selected
             .into_iter()
             .map(|candidate| {
@@ -543,11 +580,13 @@ impl AgentTools {
         } else {
             None
         };
+        // Durable preference changes only for explicit feedback kinds (not dismiss/ignore).
+        let affects_future = feedback_affects_future_exposure(kind);
         match kind {
-            FeedbackKind::Saved => {
+            FeedbackKind::Saved if affects_future => {
                 store.saves.insert((user_id, submission_id));
             }
-            FeedbackKind::BlockSource | FeedbackKind::BlockTopic => {
+            FeedbackKind::BlockSource | FeedbackKind::BlockTopic if affects_future => {
                 let source = item.domain.clone();
                 let preferences = store
                     .user_preferences
@@ -574,7 +613,12 @@ impl AgentTools {
                     }
                 }
             }
-            FeedbackKind::Interesting | FeedbackKind::NotForMe | FeedbackKind::Dismissed => {}
+            FeedbackKind::Interesting
+            | FeedbackKind::NotForMe
+            | FeedbackKind::Dismissed
+            | FeedbackKind::Saved
+            | FeedbackKind::BlockSource
+            | FeedbackKind::BlockTopic => {}
         }
         let is_new_feedback = !store.feedback_events.iter().any(|event| {
             event.user_id == user_id
@@ -592,16 +636,18 @@ impl AgentTools {
                 created_at: now,
                 local_only: true,
             });
-            if let Some((evidence_kind, direction)) = taste_evidence_for_feedback(kind) {
-                record_taste_learning_evidence(
-                    &mut store,
-                    user_id,
-                    ctx.tenant_id,
-                    &item,
-                    evidence_kind,
-                    direction,
-                    now,
-                );
+            if affects_future {
+                if let Some((evidence_kind, direction)) = taste_evidence_for_feedback(kind) {
+                    record_taste_learning_evidence(
+                        &mut store,
+                        user_id,
+                        ctx.tenant_id,
+                        &item,
+                        evidence_kind,
+                        direction,
+                        now,
+                    );
+                }
             }
         }
         let state = feed_feedback_state(&store, user_id, submission_id);
@@ -8269,19 +8315,57 @@ impl AgentTools {
             .known_pod_announcements
             .get(&(samples.origin_node_id, samples.pod_slug.clone()))
             .ok_or_else(|| StoreError::NotFound("current Pod Announcement".into()))?;
-        if known.announcement.id != samples.announcement_id
-            || known.announcement.signer.public_key != samples.signer.public_key
-        {
-            return Err(StoreError::Validation(
-                "Explore samples do not match the current Pod Announcement".into(),
-            )
-            .into());
-        }
+        verify_explore_samples_for_announcement(&samples, &known.announcement)?;
         store
             .pod_explore_sample_sets
             .insert(samples.announcement_id, samples.clone());
         self.persist_locked(&mut store)?;
         Ok(samples)
+    }
+
+    /// Retrieves bounded Explore samples from the canonical Origin and retains
+    /// them only when signature and current announcement binding verify.
+    ///
+    /// The injectable client performs the outbound Origin fetch. Requests carry
+    /// only announcement identity and a sample limit—never private interests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Feed reads are denied, the announcement is unknown
+    /// or ineligible, the client fails, verification fails, or persistence fails.
+    pub fn fetch_origin_explore_samples(
+        &self,
+        ctx: &AuthContext,
+        origin_node_id: NodeIdentityId,
+        pod_slug: &str,
+        limit: usize,
+        client: &dyn OriginExploreSampleClient,
+    ) -> Result<PodExploreSamples, AgentToolsError> {
+        let announcement = {
+            let store = self
+                .store
+                .read()
+                .map_err(|_| AgentToolsError::LockPoisoned)?;
+            authorize_harness(&store, ctx, HarnessCapability::FeedRead, None)?;
+            let known = store
+                .known_pod_announcements
+                .get(&(origin_node_id, pod_slug.to_string()))
+                .ok_or_else(|| StoreError::NotFound("current Pod Announcement".into()))?;
+            let now = Utc::now();
+            if !announcement_is_discovery_eligible(&store, &known.announcement, now) {
+                return Err(StoreError::Validation(
+                    "Pod Announcement is not discovery-eligible".into(),
+                )
+                .into());
+            }
+            if !known.announcement.verify()? {
+                return Err(StoreError::InvalidSignature.into());
+            }
+            known.announcement.clone()
+        };
+        // Fetch outside the store lock; never attach private matching context.
+        let samples = fetch_verified_origin_explore_samples(client, &announcement, limit)?;
+        self.accept_pod_explore_samples(ctx, samples)
     }
 
     /// Signs an optional recommendation from one locally curated public Pod.
@@ -8425,8 +8509,12 @@ impl AgentTools {
 
     /// Intentionally discovers public Pods under the User's local Trust Policy.
     ///
-    /// Explore does not create Subscriptions. Endorsements contribute bounded,
-    /// inspectable local evidence and never become a universal quality score.
+    /// Explore does not create Subscriptions. Deterministic Pod Similarity uses
+    /// verified public subject/context text, source neighborhoods, Explore
+    /// samples, and optional Endorsements. Scoring is local from synchronized
+    /// metadata and private evidence; it never issues interest-derived remote
+    /// queries. Endorsements strengthen evidence but are never mandatory and
+    /// never become transferable trust or global reputation.
     ///
     /// # Errors
     ///
@@ -8455,123 +8543,84 @@ impl AgentTools {
             .unwrap_or_else(|| TrustPolicy::new(user_id, ctx.tenant_id));
         let local_node_id = store.node_for_tenant(ctx.tenant_id)?.id;
         let query = request.query.trim().to_lowercase();
-        let query_tokens = route_tokens(&query);
+        let preferences = store.user_preferences.get(&(user_id, ctx.tenant_id));
+        let projections = taste_profile_projections(&store, user_id, ctx.tenant_id, preferences);
+        // Private evidence stays in-process for ranking only; never sent remotely.
+        let local =
+            local_similarity_context_from_store(Some(query.as_str()), preferences, &projections);
         let now = Utc::now();
-        let mut results = store
-            .known_pod_announcements
-            .values()
-            .filter_map(|known| {
-                let announcement = &known.announcement;
-                if !announcement_is_discovery_eligible(&store, announcement, now) {
-                    return None;
-                }
-                if !announcement_delivery_is_active(&store, known, Some(&policy)) {
-                    return None;
-                }
-                if policy.blocks_announcement(announcement) {
-                    return None;
-                }
-                let searchable = format!(
-                    "{} {} {}",
-                    announcement.pod_slug, announcement.pod_name, announcement.subject
-                )
-                .to_lowercase();
-                let matched = query_tokens
-                    .iter()
-                    .filter(|token| searchable.contains(token.as_str()))
-                    .count();
-                if !query_tokens.is_empty() && matched == 0 {
-                    return None;
-                }
-                let mut endorsements = store
-                    .pod_endorsements
-                    .values()
-                    .filter(|endorsement| {
-                        endorsement.endorsed_node_id == announcement.origin_node_id
-                            && endorsement.endorsed_pod_slug == announcement.pod_slug
-                            && endorsement.endorsed_announcement_id == announcement.id
-                            && store
-                                .known_pod_announcements
-                                .get(&(
-                                    endorsement.endorsing_node_id,
-                                    endorsement.endorsing_pod_slug.clone(),
-                                ))
-                                .is_some_and(|known| {
-                                    known.announcement.id == endorsement.endorsing_announcement_id
-                                })
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                endorsements.sort_by(|left, right| {
-                    left.endorsing_pod_slug
-                        .cmp(&right.endorsing_pod_slug)
-                        .then_with(|| left.id.cmp(&right.id))
-                });
-                let matched = u16::try_from(matched).unwrap_or(u16::MAX);
-                let token_count = u16::try_from(query_tokens.len()).unwrap_or(u16::MAX);
-                let mut relevance = if token_count == 0 {
-                    1.0
-                } else {
-                    f32::from(matched) / f32::from(token_count)
-                };
-                let endorsement_count = u16::try_from(endorsements.len().min(5)).unwrap_or(5);
-                relevance += f32::from(endorsement_count) * 0.1;
-                let mut reasons = vec![if query_tokens.is_empty() {
-                    "Public Pod is available through the configured Stumble Substrate".into()
-                } else {
-                    "Pod subject matches the explicit Explore query".into()
-                }];
-                if !endorsements.is_empty() {
-                    reasons.push(format!(
-                        "{} optional Pod Endorsement(s) used as local ranking evidence",
-                        endorsements.len()
-                    ));
-                }
-                let samples = store
-                    .pod_explore_sample_sets
-                    .get(&announcement.id)
-                    .map(|sample_set| {
-                        sample_set
-                            .samples
-                            .iter()
-                            .filter(|sample| !policy.blocks_content_reference(sample))
-                            .take(request.sample_size)
-                            .cloned()
-                            .collect()
-                    })
-                    .unwrap_or_else(|| {
-                        explore_content_samples(
-                            &store,
-                            ctx.tenant_id,
-                            local_node_id,
-                            announcement,
-                            &policy,
-                            request.sample_size,
-                        )
-                    });
+
+        // Materialize owned candidate evidence so ranking can borrow it safely.
+        let mut owned: Vec<OwnedCandidateEvidence> = Vec::new();
+        for known in store.known_pod_announcements.values() {
+            let announcement = &known.announcement;
+            if !announcement_scoring_eligible(&store, known, &policy, now) {
+                continue;
+            }
+            let endorsements = collect_policy_endorsements(&store, announcement, &policy);
+            let (samples, samples_verified) = retained_or_local_explore_samples(
+                &store,
+                announcement,
+                &policy,
+                ctx.tenant_id,
+                local_node_id,
+                request.sample_size,
+            );
+            let context_text = store
+                .pods
+                .values()
+                .find(|pod| {
+                    pod.slug == announcement.pod_slug
+                        && pod.origin_node_id.unwrap_or(local_node_id)
+                            == announcement.origin_node_id
+                })
+                .and_then(|pod| store.pod_skill_packs.get(&pod.id))
+                .map(|package| package.context_md.clone());
+            owned.push(OwnedCandidateEvidence {
+                announcement: announcement.clone(),
+                context_text,
+                samples,
+                endorsements,
+                samples_verified,
+            });
+        }
+
+        let candidates = owned
+            .iter()
+            .map(OwnedCandidateEvidence::as_evidence)
+            .collect();
+        let caps = ExplorationCaps::explore_defaults();
+        let ranked = rank_similar_pods(&local, candidates, &policy, caps, request.limit);
+        let results = ranked
+            .into_iter()
+            .map(|ranked| {
                 let is_subscribed = store.subscriptions.values().any(|subscription| {
                     subscription.user_id == user_id
                         && subscription.tenant_id == ctx.tenant_id
-                        && subscription.origin_node_id == announcement.origin_node_id
-                        && subscription.pod_slug == announcement.pod_slug
+                        && subscription.origin_node_id == ranked.announcement.origin_node_id
+                        && subscription.pod_slug == ranked.announcement.pod_slug
                 });
-                Some(ExplorePodResult {
-                    announcement: announcement.clone(),
-                    relevance,
+                let mut samples = ranked.samples;
+                samples.truncate(request.sample_size);
+                let mut reasons = ranked
+                    .similarity
+                    .reasons
+                    .iter()
+                    .map(crate::pod_similarity::SimilarityReason::display)
+                    .collect::<Vec<_>>();
+                // Trial is a typed flag; label once at the Explore DTO boundary.
+                append_trial_exposure_label(&mut reasons, ranked.similarity.trial_exposure);
+                ExplorePodResult {
+                    announcement: ranked.announcement,
+                    relevance: ranked.similarity.score,
                     reasons,
-                    endorsements,
+                    endorsements: ranked.endorsements,
                     sample_content_references: samples,
                     is_subscribed,
-                })
+                    trial_exposure: ranked.similarity.trial_exposure,
+                }
             })
-            .collect::<Vec<_>>();
-        results.sort_by(|left, right| {
-            right
-                .relevance
-                .total_cmp(&left.relevance)
-                .then_with(|| left.announcement.pod_slug.cmp(&right.announcement.pod_slug))
-        });
-        results.truncate(request.limit);
+            .collect();
         Ok(ExploreResponse { query, results })
     }
 
@@ -11513,6 +11562,205 @@ fn feed_content_reference(item: &Submission) -> FeedContentReference {
     }
 }
 
+/// Builds shared private LocalSimilarityContext for Explore and Feed ranking.
+fn local_similarity_context_from_store(
+    query: Option<&str>,
+    preferences: Option<&UserPreferences>,
+    projections: &TasteProfileProjections,
+) -> LocalSimilarityContext {
+    let interests = preferences
+        .map(|prefs| {
+            prefs
+                .interests
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let source_signals = projections
+        .source_affinities
+        .iter()
+        .filter(|affinity| affinity.weight > 0.0 && !affinity.explicitly_blocked)
+        .filter_map(|affinity| match &affinity.signal {
+            SourceAffinitySignal::Source(source) | SourceAffinitySignal::Community(source) => {
+                Some(source.as_str())
+            }
+            _ => None,
+        });
+    LocalSimilarityContext::from_private_evidence(query, interests, source_signals)
+}
+
+/// Retained Origin-signed samples when verified; otherwise local content without
+/// claiming verification (trial requires real retained Origin-signed samples).
+fn retained_or_local_explore_samples(
+    store: &InMemoryStore,
+    announcement: &PodAnnouncement,
+    policy: &TrustPolicy,
+    tenant_id: Option<TenantId>,
+    local_node_id: NodeIdentityId,
+    sample_size: usize,
+) -> (Vec<FeedContentReference>, bool) {
+    if let Some(sample_set) = store.pod_explore_sample_sets.get(&announcement.id) {
+        let verified = verify_explore_samples_for_announcement(sample_set, announcement).is_ok();
+        let samples = sample_set
+            .samples
+            .iter()
+            .filter(|sample| !policy.blocks_content_reference(sample))
+            .take(sample_size)
+            .cloned()
+            .collect::<Vec<_>>();
+        return (samples, verified);
+    }
+    let local_samples = explore_content_samples(
+        store,
+        tenant_id,
+        local_node_id,
+        announcement,
+        policy,
+        sample_size,
+    );
+    // Local content may inform scoring but never claims Origin-signed verification.
+    (local_samples, false)
+}
+
+/// Whether retained Origin-signed explore samples verify for this announcement.
+fn retained_samples_verified(store: &InMemoryStore, announcement: &PodAnnouncement) -> bool {
+    store
+        .pod_explore_sample_sets
+        .get(&announcement.id)
+        .is_some_and(|sample_set| {
+            verify_explore_samples_for_announcement(sample_set, announcement).is_ok()
+        })
+}
+
+/// Local similarity for an unsubscribed public Pod Exploration Item.
+///
+/// Uses the same eligibility and endorsement policy gates as Explore. Requires a
+/// real current verified announcement — never fabricates synthetic announcements.
+/// `samples_verified` only from retained Origin-signed samples.
+fn exploration_similarity_for_item(
+    store: &InMemoryStore,
+    user_id: UserId,
+    tenant_id: Option<TenantId>,
+    item: &Submission,
+    placement_pod_ids: &[PodId],
+    preferences: Option<&UserPreferences>,
+) -> Option<PodSimilarityScore> {
+    let projections = taste_profile_projections(store, user_id, tenant_id, preferences);
+    let local = local_similarity_context_from_store(None, preferences, &projections);
+    if local.is_empty() {
+        return None;
+    }
+    let policy = store
+        .trust_policies
+        .get(&(user_id, tenant_id))
+        .cloned()
+        .unwrap_or_else(|| TrustPolicy::new(user_id, tenant_id));
+    let now = Utc::now();
+    let sample_ref = feed_content_reference(item);
+    let mut best: Option<PodSimilarityScore> = None;
+    for pod_id in placement_pod_ids {
+        let Some(pod) = store.pods.get(pod_id) else {
+            continue;
+        };
+        let Some(origin) = pod.origin_node_id.or_else(|| {
+            store
+                .node_identities
+                .values()
+                .find(|node| node.tenant_id == tenant_id)
+                .map(|node| node.id)
+        }) else {
+            continue;
+        };
+        // Skip when no verified current announcement — never fabricate Uuid::nil shells.
+        let Some(known) = store
+            .known_pod_announcements
+            .get(&(origin, pod.slug.clone()))
+        else {
+            continue;
+        };
+        if !announcement_scoring_eligible(store, known, &policy, now) {
+            continue;
+        }
+        let announcement = &known.announcement;
+        let endorsements = collect_policy_endorsements(store, announcement, &policy);
+        let context_text = store
+            .pod_skill_packs
+            .get(pod_id)
+            .map(|package| package.context_md.as_str());
+        let samples_verified = retained_samples_verified(store, announcement);
+        let Some(similarity) = score_exploration_item(
+            &local,
+            announcement,
+            context_text,
+            &sample_ref,
+            &endorsements,
+            samples_verified,
+        ) else {
+            continue;
+        };
+        best = Some(match best {
+            Some(existing) if existing.score >= similarity.score => existing,
+            _ => similarity,
+        });
+    }
+    best
+}
+
+/// Enforces per-Origin exploration and trial caps after Feed Mix selection.
+fn apply_exploration_origin_caps<'a>(
+    store: &InMemoryStore,
+    _user_id: UserId,
+    selected: Vec<RankedFeedCandidate<'a>>,
+) -> Vec<RankedFeedCandidate<'a>> {
+    let caps = ExplorationCaps {
+        per_origin: MAX_RESULTS_PER_ORIGIN,
+        per_pod: usize::MAX,
+        per_source: usize::MAX,
+        per_origin_trial: MAX_TRIAL_ITEMS_PER_ORIGIN,
+    };
+    let local_node_id = store.node_identities.values().next().map(|node| node.id);
+    let mut tracker = ExplorationCapTracker::new();
+    let mut kept = Vec::with_capacity(selected.len());
+    for candidate in selected {
+        if candidate.kind != FeedItemKind::Exploration {
+            kept.push(candidate);
+            continue;
+        }
+        let origin = candidate
+            .pod_ids
+            .iter()
+            .find_map(|pod_id| {
+                store
+                    .pods
+                    .get(pod_id)
+                    .map(|pod| pod.origin_node_id.or(local_node_id))
+            })
+            .flatten()
+            .or(local_node_id);
+        let Some(origin) = origin else {
+            kept.push(candidate);
+            continue;
+        };
+        // Typed flag only — never infer trial from reason-string contains.
+        let trial = candidate.trial_exposure;
+        let pod_slug = candidate
+            .pod_ids
+            .first()
+            .and_then(|pod_id| store.pods.get(pod_id).map(|pod| pod.slug.clone()))
+            .unwrap_or_default();
+        if !tracker.can_admit_origin(origin, caps) {
+            continue;
+        }
+        if trial && !tracker.can_admit_trial(origin, caps) {
+            continue;
+        }
+        tracker.record(origin, &pod_slug, Some(&candidate.item.domain), trial);
+        kept.push(candidate);
+    }
+    kept
+}
+
 fn explore_content_samples(
     store: &InMemoryStore,
     tenant_id: Option<TenantId>,
@@ -11841,6 +12089,7 @@ fn feed_attention_value(
 fn taste_evidence_for_feedback(
     kind: FeedbackKind,
 ) -> Option<(LearnedTasteEvidenceKind, TasteEvidenceDirection)> {
+    // Dismiss/ignore never create durable preference (see feedback_affects_future_exposure).
     match kind {
         FeedbackKind::Saved => Some((
             LearnedTasteEvidenceKind::Save,
@@ -11854,11 +12103,7 @@ fn taste_evidence_for_feedback(
             LearnedTasteEvidenceKind::LessLikeThis,
             TasteEvidenceDirection::Opposing,
         )),
-        FeedbackKind::Dismissed => Some((
-            LearnedTasteEvidenceKind::Dismiss,
-            TasteEvidenceDirection::Opposing,
-        )),
-        FeedbackKind::BlockSource | FeedbackKind::BlockTopic => None,
+        FeedbackKind::Dismissed | FeedbackKind::BlockSource | FeedbackKind::BlockTopic => None,
     }
 }
 

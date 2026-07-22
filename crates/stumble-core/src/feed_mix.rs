@@ -19,6 +19,8 @@ pub(crate) struct RankedFeedCandidate<'a> {
     pub(crate) kind: FeedItemKind,
     pub(crate) pod_ids: Vec<PodId>,
     pub(crate) priority_pod_ids: Vec<PodId>,
+    /// Typed trial-exposure flag for Exploration Items (never inferred from strings).
+    pub(crate) trial_exposure: bool,
 }
 
 pub(crate) fn compare_feed_candidates(
