@@ -139,6 +139,18 @@ Domain module: `crates/stumble-core/src/discovery_peer/client.rs`. Focused cover
 
 Announcement lease and withdrawal state persist in the authoritative SQLite store (`known_pod_announcements`, `known_pod_withdrawals`). The focused temporary-SQLite acceptance coverage is in `crates/stumble-core/tests/discovery_substrate.rs` and `crates/stumble-api/tests/discovery_announcements.rs`. Direct outbound addressing remains covered in `crates/stumble-cli/tests/direct_subscription.rs`.
 
+## Sponsored multi-node acceptance and operator docs
+
+The milestone proof is a deterministic multi-node HTTP scenario against real temporary SQLite stores: separate Origin, sponsored Bootstrap/Index, Discovery Peer, and fresh Home Node, exercising public contracts for publish, open admit, cursor-sync, local match/explain/preview, subscribe, sponsor outage with peer delivery, renewal/expiry/withdrawal, malformed signature and protocol rejection, local Trust Policy blocks over Index scores, peer eviction, restart/cursor idempotency, direct Pod URL fallback, unendorsed trial exposure, browser Candidates vs Feed, and independent Bootstrap/Index enablement without Relay.
+
+```bash
+cargo test -p stumble-api --test sponsored_deployment_acceptance
+```
+
+User guide (sponsored default, multi Bootstrap, outbound-only, serving opt-in, direct address, sponsor outages): [`docs/sponsored-bootstrap-users.md`](sponsored-bootstrap-users.md).
+
+Operator runbook (open admission, rejection codes, rate limits, no-account, security logs, retention, no analytics/ranking): [`docs/sponsored-bootstrap-operators.md`](sponsored-bootstrap-operators.md).
+
 ## Personal Discovery
 
 Personal Discovery is User-scoped work governed by a private Discovery Plan. It
