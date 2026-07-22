@@ -47,11 +47,15 @@ use crate::pod_announcement::{
     DeliveryProvenance,
 };
 use crate::pod_similarity::{
-    announcement_scoring_eligible, append_trial_exposure_label, collect_policy_endorsements,
-    feedback_affects_future_exposure, fetch_verified_origin_explore_samples, rank_similar_pods,
-    score_exploration_item, verify_explore_samples_for_announcement, ExplorationCapTracker,
-    ExplorationCaps, LocalSimilarityContext, OriginExploreSampleClient, OwnedCandidateEvidence,
-    PodSimilarityScore, SampleFetchError, MAX_RESULTS_PER_ORIGIN, MAX_TRIAL_ITEMS_PER_ORIGIN,
+    announcement_scoring_eligible, append_trial_exposure_label, build_agent_evidence_record,
+    collect_active_agent_evidence_for_candidate, collect_policy_endorsements,
+    feedback_affects_future_exposure, fetch_verified_origin_explore_samples,
+    find_bounded_agent_evidence_for_pair, find_idempotent_agent_evidence,
+    rank_similar_pods_with_agent_evidence, score_exploration_item,
+    validate_agent_evidence_submission, verify_explore_samples_for_announcement,
+    AgentEvidenceError, ExplorationCapTracker, ExplorationCaps, LocalSimilarityContext,
+    OriginExploreSampleClient, OwnedCandidateEvidence, PodSimilarityScore, SampleFetchError,
+    MAX_RESULTS_PER_ORIGIN, MAX_TRIAL_ITEMS_PER_ORIGIN,
 };
 use crate::ranking::{rank_discovery, RankingInput};
 use crate::signing::{
@@ -9226,14 +9230,115 @@ impl AgentTools {
         Ok(endorsement)
     }
 
+    /// Submits bounded, confidence-scored local agent semantic evidence between
+    /// two exact current Pod Announcements.
+    ///
+    /// Evidence adjusts inspectable local Pod Similarity ordering under Core
+    /// policy only. It never creates trust, Subscription, Accepted Placement,
+    /// or Feed eligibility, and never leaves the Home Node as an Endorsement,
+    /// global score, announcement field, or remote interest query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the harness lacks [`HarnessCapability::PodSimilarityEvidence`],
+    /// announcements are stale/withdrawn/expired/blocked/mismatched/unverifiable,
+    /// bounds fail, or persistence fails.
+    pub fn submit_pod_similarity_agent_evidence(
+        &self,
+        ctx: &AuthContext,
+        request: SubmitPodSimilarityAgentEvidenceRequest,
+    ) -> Result<PodSimilarityAgentEvidence, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_harness(&store, ctx, HarnessCapability::PodSimilarityEvidence, None)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation(
+                "agent Pod Similarity evidence requires an authenticated User".into(),
+            )
+        })?;
+        let harness = harness_for_context(&store, ctx)?.ok_or(AgentToolsError::Forbidden {
+            reason: "agent Pod Similarity evidence requires an authenticated Agent Harness".into(),
+        })?;
+        let harness_id = harness.id;
+        let policy = store
+            .trust_policies
+            .get(&(user_id, ctx.tenant_id))
+            .cloned()
+            .unwrap_or_else(|| TrustPolicy::new(user_id, ctx.tenant_id));
+        let now = Utc::now();
+
+        if let Some(existing) = find_idempotent_agent_evidence(
+            &store,
+            user_id,
+            ctx.tenant_id,
+            harness_id,
+            request.harness_idempotency_key.trim(),
+        ) {
+            return Ok(existing.clone());
+        }
+
+        let (pair, left, right, public_inputs, freshness) = validate_agent_evidence_submission(
+            &store,
+            &request,
+            user_id,
+            ctx.tenant_id,
+            Some(harness),
+            &policy,
+            now,
+        )
+        .map_err(agent_evidence_error_to_tools)?;
+
+        // Bound active evidence by pair + model/harness provenance + freshness:
+        // replace any prior active record for the same bound key.
+        if let Some(prior) = find_bounded_agent_evidence_for_pair(
+            &store,
+            user_id,
+            ctx.tenant_id,
+            harness_id,
+            request.model_provenance.trim(),
+            pair,
+            now,
+        ) {
+            let prior_id = prior.id;
+            store.pod_similarity_agent_evidence.remove(&prior_id);
+        }
+
+        let evidence = build_agent_evidence_record(
+            &request,
+            user_id,
+            ctx.tenant_id,
+            harness_id,
+            left,
+            right,
+            public_inputs,
+            now,
+            freshness,
+        );
+        store
+            .pod_similarity_agent_evidence
+            .insert(evidence.id, evidence.clone());
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::SubmitPodSimilarityAgentEvidence,
+            None,
+        );
+        self.persist_locked(&mut store)?;
+        Ok(evidence)
+    }
+
     /// Intentionally discovers public Pods under the User's local Trust Policy.
     ///
     /// Explore does not create Subscriptions. Deterministic Pod Similarity uses
     /// verified public subject/context text, source neighborhoods, Explore
-    /// samples, and optional Endorsements. Scoring is local from synchronized
+    /// samples, and optional Endorsements. Authorized local agent evidence may
+    /// adjust ordering with inspectable reasons after deterministic scoring;
+    /// Core still applies blocks and caps. Scoring is local from synchronized
     /// metadata and private evidence; it never issues interest-derived remote
-    /// queries. Endorsements strengthen evidence but are never mandatory and
-    /// never become transferable trust or global reputation.
+    /// queries. Endorsements and agent evidence strengthen ranking only and are
+    /// never transferable trust or global reputation.
     ///
     /// # Errors
     ///
@@ -9271,6 +9376,8 @@ impl AgentTools {
 
         // Materialize owned candidate evidence so ranking can borrow it safely.
         let mut owned: Vec<OwnedCandidateEvidence> = Vec::new();
+        let mut agent_evidence_by_announcement: HashMap<Uuid, Vec<&PodSimilarityAgentEvidence>> =
+            HashMap::new();
         for known in store.known_pod_announcements.values() {
             let announcement = &known.announcement;
             if !announcement_scoring_eligible(&store, known, &policy, now) {
@@ -9295,6 +9402,17 @@ impl AgentTools {
                 })
                 .and_then(|pod| store.pod_skill_packs.get(&pod.id))
                 .map(|package| package.context_md.clone());
+            let agent_evidence = collect_active_agent_evidence_for_candidate(
+                &store,
+                user_id,
+                ctx.tenant_id,
+                announcement,
+                &policy,
+                now,
+            );
+            if !agent_evidence.is_empty() {
+                agent_evidence_by_announcement.insert(announcement.id, agent_evidence);
+            }
             owned.push(OwnedCandidateEvidence {
                 announcement: announcement.clone(),
                 context_text,
@@ -9309,7 +9427,14 @@ impl AgentTools {
             .map(OwnedCandidateEvidence::as_evidence)
             .collect();
         let caps = ExplorationCaps::explore_defaults();
-        let ranked = rank_similar_pods(&local, candidates, &policy, caps, request.limit);
+        let ranked = rank_similar_pods_with_agent_evidence(
+            &local,
+            candidates,
+            &policy,
+            caps,
+            request.limit,
+            &agent_evidence_by_announcement,
+        );
         let results = ranked
             .into_iter()
             .map(|ranked| {
@@ -9333,6 +9458,7 @@ impl AgentTools {
                     announcement: ranked.announcement,
                     relevance: ranked.similarity.score,
                     reasons,
+                    // Agent evidence never appears as Endorsements or announcement fields.
                     endorsements: ranked.endorsements,
                     sample_content_references: samples,
                     is_subscribed,
@@ -10942,6 +11068,15 @@ fn sort_discovery_feed_items(items: &mut [PodDiscoveryFeedItem]) {
             .total_cmp(&a.score)
             .then_with(|| b.pod.updated_at.cmp(&a.pod.updated_at))
     });
+}
+
+fn agent_evidence_error_to_tools(error: AgentEvidenceError) -> AgentToolsError {
+    match error {
+        AgentEvidenceError::CapabilityDenied => AgentToolsError::Forbidden {
+            reason: error.to_string(),
+        },
+        other => StoreError::Validation(other.to_string()).into(),
+    }
 }
 
 fn authorize_harness(

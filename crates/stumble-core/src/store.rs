@@ -142,6 +142,8 @@ pub struct InMemoryStore {
     pub discovery_peer_sync_states: HashMap<NodeIdentityId, DiscoveryPeerSyncState>,
     pub trust_policies: HashMap<(UserId, Option<TenantId>), TrustPolicy>,
     pub pod_endorsements: HashMap<Uuid, PodEndorsement>,
+    /// Private local agent semantic evidence for Pod Similarity (never federated).
+    pub pod_similarity_agent_evidence: HashMap<Uuid, PodSimilarityAgentEvidence>,
     pub pod_explore_sample_sets: HashMap<Uuid, PodExploreSamples>,
     pub subscriptions: HashMap<SubscriptionId, Subscription>,
     pub pods: HashMap<PodId, Pod>,
@@ -251,6 +253,8 @@ struct PersistedStore {
     trust_policies: Vec<TrustPolicy>,
     #[serde(default)]
     pod_endorsements: Vec<PodEndorsement>,
+    #[serde(default)]
+    pod_similarity_agent_evidence: Vec<PodSimilarityAgentEvidence>,
     #[serde(default)]
     pod_explore_sample_sets: Vec<PodExploreSamples>,
     #[serde(default)]
@@ -526,6 +530,11 @@ impl From<&InMemoryStore> for PersistedStore {
                 .collect(),
             trust_policies: store.trust_policies.values().cloned().collect(),
             pod_endorsements: store.pod_endorsements.values().cloned().collect(),
+            pod_similarity_agent_evidence: store
+                .pod_similarity_agent_evidence
+                .values()
+                .cloned()
+                .collect(),
             pod_explore_sample_sets: store.pod_explore_sample_sets.values().cloned().collect(),
             subscriptions: store.subscriptions.values().cloned().collect(),
             pods: store.pods.values().cloned().collect(),
@@ -794,6 +803,11 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .into_iter()
                 .map(|endorsement| (endorsement.id, endorsement))
                 .collect(),
+            pod_similarity_agent_evidence: snapshot
+                .pod_similarity_agent_evidence
+                .into_iter()
+                .map(|evidence| (evidence.id, evidence))
+                .collect(),
             pod_explore_sample_sets: snapshot
                 .pod_explore_sample_sets
                 .into_iter()
@@ -973,6 +987,7 @@ const STORE_COLLECTIONS: &[&str] = &[
     "discovery_peer_sync_states",
     "trust_policies",
     "pod_endorsements",
+    "pod_similarity_agent_evidence",
     "pod_explore_sample_sets",
     "subscriptions",
     "pods",

@@ -26,6 +26,8 @@ pub enum SimilarityEvidenceKind {
     Sample,
     /// Valid signed Pod Endorsement used as local ranking evidence only.
     Endorsement,
+    /// Authorized local agent semantic relationship retained only on the Home Node.
+    Agent,
 }
 
 /// One inspectable reason supporting a local Pod Similarity score.
@@ -49,6 +51,7 @@ impl SimilarityReason {
             SimilarityEvidenceKind::Endorsement => {
                 format!("endorsement evidence: {}", self.detail)
             }
+            SimilarityEvidenceKind::Agent => format!("agent evidence: {}", self.detail),
         }
     }
 }

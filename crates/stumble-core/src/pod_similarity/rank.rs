@@ -1,17 +1,21 @@
 //! Policy filtering, endorsement collection, and ranked selection.
 
+use super::agent_evidence::layer_agent_similarity_evidence;
 use super::caps::{ExplorationCapTracker, ExplorationCaps};
 use super::score::{
     score_pod_similarity, CandidatePodEvidence, LocalSimilarityContext, PodSimilarityScore,
 };
 use crate::domain::{
-    FeedContentReference, KnownPodAnnouncement, PodAnnouncement, PodEndorsement, TrustPolicy,
+    FeedContentReference, KnownPodAnnouncement, PodAnnouncement, PodEndorsement,
+    PodSimilarityAgentEvidence, TrustPolicy,
 };
 use crate::pod_announcement::{
     announcement_delivery_is_active, announcement_is_discovery_eligible,
 };
 use crate::store::InMemoryStore;
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+use uuid::Uuid;
 
 /// Owned candidate evidence so Explore / Feed can rank without HashMap dances.
 #[derive(Debug, Clone)]
@@ -156,6 +160,11 @@ pub fn filter_samples_by_policy(
 }
 
 /// Scores and ranks candidates, applying blocks before ranking and Origin caps after.
+///
+/// Optional agent evidence is layered after deterministic scoring and before
+/// caps. Blocks still exclude candidates first, so agent evidence cannot
+/// override Trust Policy. Without agent evidence, behavior matches the pure
+/// deterministic baseline.
 #[must_use]
 pub fn rank_similar_pods(
     local: &LocalSimilarityContext,
@@ -163,6 +172,20 @@ pub fn rank_similar_pods(
     policy: &TrustPolicy,
     caps: ExplorationCaps,
     limit: usize,
+) -> Vec<RankedSimilarPod> {
+    rank_similar_pods_with_agent_evidence(local, candidates, policy, caps, limit, &HashMap::new())
+}
+
+/// Like [`rank_similar_pods`], with optional active agent evidence keyed by
+/// candidate announcement id.
+#[must_use]
+pub fn rank_similar_pods_with_agent_evidence(
+    local: &LocalSimilarityContext,
+    candidates: Vec<CandidatePodEvidence<'_>>,
+    policy: &TrustPolicy,
+    caps: ExplorationCaps,
+    limit: usize,
+    agent_evidence_by_announcement: &HashMap<Uuid, Vec<&PodSimilarityAgentEvidence>>,
 ) -> Vec<RankedSimilarPod> {
     let mut scored = Vec::new();
     for candidate in candidates {
@@ -177,8 +200,13 @@ pub fn rank_similar_pods(
             endorsements: candidate.endorsements,
             samples_verified: candidate.samples_verified,
         };
-        let similarity = score_pod_similarity(local, &evidence);
+        let mut similarity = score_pod_similarity(local, &evidence);
+        if let Some(agent_evidence) = agent_evidence_by_announcement.get(&candidate.announcement.id)
+        {
+            similarity = layer_agent_similarity_evidence(similarity, agent_evidence);
+        }
         // Zero-signal empty-query baseline always admits; otherwise require positive score.
+        // Agent evidence cannot create eligibility from a zero deterministic base.
         if !local.is_empty() && similarity.score <= 0.0 {
             continue;
         }
@@ -197,6 +225,7 @@ pub fn rank_similar_pods(
             .then_with(|| left.announcement.pod_slug.cmp(&right.announcement.pod_slug))
     });
 
+    // Deterministic caps apply after agent evidence is considered.
     let mut tracker = ExplorationCapTracker::new();
     let mut selected = Vec::new();
     for candidate in scored {

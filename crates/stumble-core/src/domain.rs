@@ -1611,6 +1611,12 @@ pub enum HarnessCapability {
     Administration,
     /// Independently approve or reject sensitive changes.
     Approval,
+    /// Submit local agent semantic evidence that enriches Pod Similarity only.
+    ///
+    /// Evidence stays on the Home Node, adjusts inspectable local ordering under
+    /// Core policy, and never creates trust, Subscriptions, Accepted Placements,
+    /// or Feed eligibility by itself.
+    PodSimilarityEvidence,
 }
 
 impl std::fmt::Display for HarnessCapability {
@@ -1627,6 +1633,7 @@ impl std::fmt::Display for HarnessCapability {
             Self::SubscriptionManagement => "subscription_management",
             Self::Administration => "administration",
             Self::Approval => "approval",
+            Self::PodSimilarityEvidence => "pod_similarity_evidence",
         })
     }
 }
@@ -1647,6 +1654,7 @@ impl std::str::FromStr for HarnessCapability {
             "subscription_management" => Ok(Self::SubscriptionManagement),
             "administration" => Ok(Self::Administration),
             "approval" => Ok(Self::Approval),
+            "pod_similarity_evidence" => Ok(Self::PodSimilarityEvidence),
             _ => Err(format!("unknown harness capability: {value}")),
         }
     }
@@ -1972,6 +1980,8 @@ pub enum HarnessWriteOperation {
     MarkDiscoveryResultBatchReviewed,
     ReviewDiscoveryResultItem,
     AttemptDiscoveryResultsReadyNotification,
+    /// Submit local agent semantic evidence for Pod Similarity ranking.
+    SubmitPodSimilarityAgentEvidence,
 }
 
 /// Current lifecycle state with state-specific lease data.
@@ -6147,6 +6157,83 @@ pub struct PodEndorsement {
     pub endorsed_at: DateTime<Utc>,
     /// Ed25519 signature over every preceding field.
     pub signature: String,
+}
+
+/// Public announcement identity referenced by local agent Pod Similarity evidence.
+///
+/// Identifies the exact current Pod Announcement the agent used as an input.
+/// Never federated and never treated as an Endorsement or global score.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct PodSimilarityAgentEvidenceAnnouncementRef {
+    /// Exact signed announcement identity.
+    pub announcement_id: Uuid,
+    /// Origin Node of the referenced public Pod.
+    pub origin_node_id: NodeIdentityId,
+    /// Public Pod slug at the Origin.
+    pub pod_slug: String,
+}
+
+/// Strict structured input through which an authorized harness submits local
+/// semantic relationship evidence between two exact current Pod Announcements.
+///
+/// Evidence remains Home Node private state: it is never exported as an
+/// Endorsement, announcement field, global score, or remote interest query.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct SubmitPodSimilarityAgentEvidenceRequest {
+    /// First exact current Pod Announcement in the semantic relationship.
+    pub left_announcement_id: Uuid,
+    /// Second exact current Pod Announcement in the semantic relationship.
+    pub right_announcement_id: Uuid,
+    /// Bounded harness confidence retained only as local ranking evidence.
+    pub confidence: CandidateConfidence,
+    /// Human-inspectable explanation of the claimed relationship.
+    pub explanation: String,
+    /// Public inputs the agent used; must include both relationship announcements.
+    pub public_inputs: Vec<PodSimilarityAgentEvidenceAnnouncementRef>,
+    /// Model or harness provenance used for idempotency and audit.
+    pub model_provenance: String,
+    /// Retry-safe key assigned by the executing harness workflow.
+    pub harness_idempotency_key: String,
+    /// Optional requested freshness in hours; Core clamps to policy bounds.
+    #[serde(default)]
+    pub freshness_hours: Option<u32>,
+}
+
+/// Private Home Node record of agent-enriched Pod Similarity evidence.
+///
+/// Survives SQLite restart with audit provenance. Never creates trust,
+/// Subscription, Accepted Placement, or Feed eligibility by itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct PodSimilarityAgentEvidence {
+    /// Stable local evidence identity.
+    pub id: Uuid,
+    /// User whose Home Node ranking may consider this evidence.
+    pub user_id: UserId,
+    /// Optional hosted tenant boundary.
+    pub tenant_id: Option<TenantId>,
+    /// Authenticated harness that submitted the evidence.
+    pub submitted_by: AgentHarnessId,
+    /// First announcement bound by the semantic relationship.
+    pub left: PodSimilarityAgentEvidenceAnnouncementRef,
+    /// Second announcement bound by the semantic relationship.
+    pub right: PodSimilarityAgentEvidenceAnnouncementRef,
+    /// Bounded confidence retained only as local ranking evidence.
+    pub confidence: CandidateConfidence,
+    /// Human-inspectable explanation.
+    pub explanation: String,
+    /// Public inputs identified at submission time.
+    pub public_inputs: Vec<PodSimilarityAgentEvidenceAnnouncementRef>,
+    /// Model or harness provenance for idempotency and audit.
+    pub model_provenance: String,
+    /// Retry-safe key assigned by the executing harness workflow.
+    pub harness_idempotency_key: String,
+    /// Time at which Core accepted the evidence.
+    pub submitted_at: DateTime<Utc>,
+    /// Time after which the evidence is no longer active for ranking.
+    pub expires_at: DateTime<Utc>,
 }
 
 /// Origin-signed permitted Content Reference samples for one announcement.

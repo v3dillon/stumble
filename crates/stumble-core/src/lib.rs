@@ -72,15 +72,18 @@ pub use pod_announcement::{
     validate_public_pod_url, DeliveryProvenance,
 };
 pub use pod_similarity::{
-    append_trial_exposure_label, collect_endorsements_for_announcement,
+    agent_evidence_is_active, append_trial_exposure_label,
+    collect_active_agent_evidence_for_candidate, collect_endorsements_for_announcement,
     feedback_affects_future_exposure, fetch_verified_origin_explore_samples,
-    filter_samples_by_policy, rank_similar_pods, sample_request_is_public_only,
-    score_exploration_item, score_pod_similarity, verify_explore_samples_for_announcement,
-    CandidatePodEvidence, CapturedSampleRequest, ExplorationCapTracker, ExplorationCaps,
-    LocalSimilarityContext, OriginExploreSampleClient, OwnedCandidateEvidence, PodSimilarityScore,
-    RankedSimilarPod, SampleFetchError, ScriptedOriginExploreSampleClient, SimilarityEvidenceKind,
-    SimilarityReason, MAX_ORIGIN_EXPLORE_SAMPLES, MAX_RESULTS_PER_ORIGIN,
-    MAX_TRIAL_ITEMS_PER_ORIGIN, TRIAL_EXPOSURE_REASON, TRIAL_SIMILARITY_THRESHOLD,
+    filter_samples_by_policy, layer_agent_similarity_evidence, rank_similar_pods,
+    rank_similar_pods_with_agent_evidence, sample_request_is_public_only, score_exploration_item,
+    score_pod_similarity, verify_explore_samples_for_announcement, AgentEvidenceError,
+    AgentEvidencePodPair, CandidatePodEvidence, CapturedSampleRequest, ExplorationCapTracker,
+    ExplorationCaps, LocalSimilarityContext, OriginExploreSampleClient, OwnedCandidateEvidence,
+    PodSimilarityScore, RankedSimilarPod, SampleFetchError, ScriptedOriginExploreSampleClient,
+    SimilarityEvidenceKind, SimilarityReason, MAX_AGENT_EVIDENCE_BOOST, MAX_ORIGIN_EXPLORE_SAMPLES,
+    MAX_RESULTS_PER_ORIGIN, MAX_TRIAL_ITEMS_PER_ORIGIN, TRIAL_EXPOSURE_REASON,
+    TRIAL_SIMILARITY_THRESHOLD,
 };
 pub use ranking::*;
 pub use seeds::*;
