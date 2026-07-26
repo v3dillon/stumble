@@ -238,6 +238,62 @@ fn user_can_inspect_and_edit_explicit_taste_preferences() {
 }
 
 #[test]
+fn legacy_preferences_can_be_edited_after_sqlite_restart() {
+    let data_dir = TestDataDir::new();
+    let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
+    let (user, token) = feedback_harness(&tools);
+    let user_id = user.user_id.unwrap();
+    drop(tools);
+
+    let database_path = data_dir.0.join("stumble.sqlite3");
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    let record_key =
+        serde_json::to_string(&[serde_json::json!(user_id), serde_json::Value::Null]).unwrap();
+    let value_json: String = connection
+        .query_row(
+            "SELECT value_json FROM stumble_store_records
+             WHERE collection = 'user_preferences' AND record_key = ?1",
+            [&record_key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_str(&value_json).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("blocked_source_affinities");
+    connection
+        .execute(
+            "UPDATE stumble_store_records SET value_json = ?1
+             WHERE collection = 'user_preferences' AND record_key = ?2",
+            rusqlite::params![serde_json::to_string(&legacy).unwrap(), record_key],
+        )
+        .unwrap();
+    drop(connection);
+
+    let reopened = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
+    let user = reopened
+        .authenticate_token(token.expose())
+        .unwrap()
+        .unwrap();
+    let mut update = UpdateTasteProfileRequest::default();
+    update.interests = Some(vec!["consciousness".into()]);
+    let profile = reopened.update_taste_profile(&user, update).unwrap();
+
+    assert_eq!(profile.explicit.interests, vec!["consciousness"]);
+    let connection = rusqlite::Connection::open(database_path).unwrap();
+    let migrated: String = connection
+        .query_row(
+            "SELECT value_json FROM stumble_store_records
+             WHERE collection = 'user_preferences' AND record_key = ?1",
+            [&record_key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(migrated.contains("\"blocked_source_affinities\""));
+}
+
+#[test]
 fn corroborated_feedback_learns_explainable_weights_and_weak_signal_does_not_rank() {
     let data_dir = TestDataDir::new();
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();

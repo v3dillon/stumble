@@ -108,8 +108,23 @@ fn candidate_and_idempotency_evidence_survive_sqlite_restart() {
             |row| row.get(0),
         )
         .unwrap();
-    let persisted_submission: serde_json::Value = serde_json::from_str(&value_json).unwrap();
-    assert_eq!(persisted_submission["target"]["kind"], "pod_placements");
+    let mut legacy_submission: serde_json::Value = serde_json::from_str(&value_json).unwrap();
+    let record = legacy_submission.as_object_mut().unwrap();
+    let mut target = record.remove("target").unwrap();
+    let placements = target.get_mut("placements").unwrap().take();
+    let task_context = target.get_mut("task_context").unwrap().take();
+    record.insert("proposed_placements".into(), placements);
+    record.insert("task_context".into(), task_context);
+    connection
+        .execute(
+            "UPDATE stumble_store_records SET value_json = ?1
+             WHERE collection = 'candidate_submissions' AND record_key = ?2",
+            rusqlite::params![
+                serde_json::to_string(&legacy_submission).unwrap(),
+                record_key
+            ],
+        )
+        .unwrap();
     let candidate_record_key = serde_json::to_string(&[submitted.candidate.id]).unwrap();
     let candidate_value_json: String = connection
         .query_row(
@@ -151,7 +166,7 @@ fn candidate_and_idempotency_evidence_survive_sqlite_restart() {
     );
     assert!(!retry.submission.target.learning_enabled());
     let connection = rusqlite::Connection::open(database_path).unwrap();
-    let persisted: String = connection
+    let migrated: String = connection
         .query_row(
             "SELECT value_json FROM stumble_store_records
              WHERE collection = 'candidate_submissions' AND record_key = ?1",
@@ -159,8 +174,8 @@ fn candidate_and_idempotency_evidence_survive_sqlite_restart() {
             |row| row.get(0),
         )
         .unwrap();
-    assert!(persisted.contains("\"target\""));
-    assert!(!persisted.contains("proposed_placements"));
+    assert!(migrated.contains("\"target\""));
+    assert!(!migrated.contains("proposed_placements"));
     let migrated_candidate: String = connection
         .query_row(
             "SELECT value_json FROM stumble_store_records
