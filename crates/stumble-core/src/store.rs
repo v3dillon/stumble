@@ -1041,12 +1041,11 @@ pub fn load_or_initialize_sqlite_store(
     }
 
     let store = if legacy_path.exists() {
-        let store = load_store_snapshot(legacy_path)?;
         let backup_path = legacy_path.with_extension("json.migrated.bak");
         if !backup_path.exists() {
             std::fs::copy(legacy_path, backup_path)?;
         }
-        store
+        load_store_snapshot(legacy_path)?
     } else {
         seed()
     };
@@ -2010,6 +2009,14 @@ mod tests {
         let legacy_path = dir.join("store.json");
         let original = populated_legacy_store();
         save_store_snapshot(&original, &legacy_path).unwrap();
+        let mut legacy_snapshot: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&legacy_path).unwrap()).unwrap();
+        legacy_snapshot["user_preferences"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("blocked_source_affinities");
+        let legacy_bytes = serde_json::to_vec_pretty(&legacy_snapshot).unwrap();
+        std::fs::write(&legacy_path, &legacy_bytes).unwrap();
 
         let imported =
             load_or_initialize_sqlite_store(&database_path, &legacy_path, InMemoryStore::default)
@@ -2018,7 +2025,11 @@ mod tests {
             store_records(&imported).unwrap(),
             store_records(&original).unwrap()
         );
-        assert!(legacy_path.with_extension("json.migrated.bak").exists());
+        let backup_path = legacy_path.with_extension("json.migrated.bak");
+        assert_eq!(std::fs::read(&backup_path).unwrap(), legacy_bytes);
+        let canonical: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&legacy_path).unwrap()).unwrap();
+        assert!(canonical["user_preferences"][0]["blocked_source_affinities"].is_array());
 
         save_store_snapshot(&InMemoryStore::default(), &legacy_path).unwrap();
         let restarted =
