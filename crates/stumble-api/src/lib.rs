@@ -1470,14 +1470,26 @@ async fn me(
     Ok(Json(auth_or_default(&state, &headers)?))
 }
 
-async fn list_tenants(State(state): State<ApiState>) -> Result<Json<Vec<Tenant>>, ApiError> {
+async fn list_tenants(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Tenant>>, ApiError> {
+    let ctx = auth_or_default(&state, &headers)?;
+    state.tools.list_agent_harnesses(&ctx)?;
     let store = state.tools.store();
     let store = store.read().map_err(|_| ApiError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         code: "internal_error",
         message: "lock poisoned".to_string(),
     })?;
-    Ok(Json(store.tenants.values().cloned().collect()))
+    Ok(Json(
+        store
+            .tenants
+            .values()
+            .filter(|tenant| ctx.tenant_id.is_none_or(|tenant_id| tenant.id == tenant_id))
+            .cloned()
+            .collect(),
+    ))
 }
 
 async fn create_tenant(

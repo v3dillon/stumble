@@ -1,0 +1,79 @@
+version: 1
+data_dir: /Users/you/.stumble/nodes/home
+bind: 127.0.0.1:8790
+
+# Commands print one scoped Harness token. Keep tokens out of this file.
+credentials:
+  manager:
+    command:
+      program: /usr/bin/security
+      args: [find-generic-password, -s, io.stumble.manager, -a, you, -w]
+  personal-worker:
+    command:
+      program: /usr/bin/security
+      args: [find-generic-password, -s, io.stumble.personal-worker, -a, you, -w]
+  pod-worker:
+    command:
+      program: /usr/bin/security
+      args: [find-generic-password, -s, io.stumble.pod-worker, -a, you, -w]
+  pod-curator:
+    command:
+      program: /usr/bin/security
+      args: [find-generic-password, -s, io.stumble.pod-curator, -a, you, -w]
+
+# Change a worker's `agent` to select any compatible CLI command.
+agents:
+  codex:
+    program: /usr/bin/sandbox-exec
+    args: [-f, "{working_directory}/worker.sb", /absolute/path/to/codex, exec, --json, --ephemeral, --cd, "{working_directory}", "{prompt}"]
+  claude:
+    program: /usr/bin/sandbox-exec
+    args: [-f, "{working_directory}/claude-worker.sb", /absolute/path/to/claude, --print, --output-format, stream-json, --permission-mode, bypassPermissions, --disallowedTools, "Bash,Read,Write,Edit,NotebookEdit", "{prompt}"]
+  grok:
+    program: /usr/bin/sandbox-exec
+    args: [-f, "{working_directory}/worker.sb", /absolute/path/to/grok, --single, "{prompt}", --cwd, "{working_directory}"]
+
+# These profiles also remain available through `stumble-runner mcp PROFILE`.
+mcp:
+  manager: { credential: manager }
+  personal-worker: { credential: personal-worker }
+  pod-worker: { credential: pod-worker }
+
+workers:
+  personal:
+    credential: personal-worker
+    agent: codex
+    prompt: "Claim and complete the Personal Discovery tasks supplied on stdin using only your scoped Stumble MCP server."
+    working_directory: /Users/you/.stumble/workers/personal
+    event_path: /Users/you/.stumble/nodes/home/personal-discovery.json
+    agent_env:
+      # Give unattended harnesses a dedicated HOME containing only this MCP grant.
+      HOME: /Users/you/.stumble/workers/personal/harness-home
+      STUMBLE_WORKER_TOKEN: "{credential}"
+  pod:
+    credential: pod-worker
+    agent: codex
+    prompt: "Claim and complete the Pod Discovery tasks supplied on stdin using only your scoped Stumble MCP server."
+    working_directory: /Users/you/.stumble/workers/pod
+    event_path: /Users/you/.stumble/nodes/home/pod-discovery.json
+    skip_source_rule_indexes: [0]
+    agent_env:
+      HOME: /Users/you/.stumble/workers/pod/harness-home
+      STUMBLE_WORKER_TOKEN: "{credential}"
+
+curators:
+  pod: { credential: pod-curator }
+
+schedules:
+  personal-discovery:
+    every_seconds: 300
+    workflow: discovery
+    profile: personal
+  pod-discovery:
+    every_seconds: 300
+    workflow: discovery
+    profile: pod
+  pod-curation:
+    every_seconds: 300
+    workflow: curate
+    profile: pod

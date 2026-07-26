@@ -1502,11 +1502,13 @@ dependencies = [
 name = "stumble-cli"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum",
  "chrono",
  "clap",
  "serde",
  "serde_json",
+ "serde_yaml",
  "stumble-api",
  "stumble-core",
  "stumble-mcp",

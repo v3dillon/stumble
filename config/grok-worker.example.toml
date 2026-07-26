@@ -1,0 +1,6 @@
+[mcp_servers.stumble-worker]
+url = "http://127.0.0.1:8790/mcp"
+enabled = true
+# Grok does not expand an environment variable in HTTP headers. Replace this
+# value with this worker's narrow token inside the isolated HOME only.
+headers = { Authorization = "Bearer <WORKER_BEARER_TOKEN>" }

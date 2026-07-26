@@ -1,0 +1,6 @@
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[mcp_servers.stumble-worker]
+url = "http://127.0.0.1:8790/mcp"
+bearer_token_env_var = "STUMBLE_WORKER_TOKEN"

@@ -488,7 +488,7 @@ fn materialize_and_wake_discovery(
     pod_id: PodId,
     now: chrono::DateTime<Utc>,
 ) -> DiscoveryTask {
-    // Arrange and Act: materialize due work and invoke the real local adapter.
+    // Arrange and Act: materialize due work and invoke the unified runner.
     let task = home
         .materialize_due_discovery_tasks(worker, now)
         .unwrap()
@@ -500,13 +500,24 @@ fn materialize_and_wake_discovery(
         })
         .unwrap();
     let scheduler_event = home_dir.0.join("discovery-ready.json");
-    let wake =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/wake-discovery.sh");
-    let scheduler = Command::new(wake)
-        .env("STUMBLE_CLI", env!("CARGO_BIN_EXE_stumble"))
-        .env("STUMBLE_DISCOVERY_TOKEN", worker_token)
-        .env("STUMBLE_DATA_DIR", &home_dir.0)
-        .env("STUMBLE_DISCOVERY_EVENT_PATH", &scheduler_event)
+    let config_path = home_dir.0.join("runner.yaml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "version: 1\ndata_dir: {}\ncredentials:\n  worker:\n    command:\n      program: /usr/bin/printf\n      args: [{}]\nagents:\n  test:\n    program: /usr/bin/true\n    args: [\"{{prompt}}\"]\nworkers:\n  pod:\n    credential: worker\n    agent: test\n    prompt: test discovery\n    event_path: {}\n",
+            home_dir.0.display(),
+            worker_token,
+            scheduler_event.display()
+        ),
+    )
+    .unwrap();
+    let scheduler = Command::new(env!("CARGO_BIN_EXE_stumble-runner"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "discovery",
+            "pod",
+        ])
         .output()
         .unwrap();
 

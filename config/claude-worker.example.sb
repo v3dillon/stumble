@@ -1,0 +1,35 @@
+(version 1)
+(deny default)
+(import "system.sb")
+
+(allow process-exec process-fork process-info* signal)
+(allow sysctl-read)
+(allow mach-lookup)
+(allow ipc-posix*)
+(allow network*)
+(allow file-read-metadata)
+
+; Replace WORKER with personal or pod and adjust installed agent paths.
+(allow file-read*
+  (subpath "/System")
+  (subpath "/Library")
+  (subpath "/usr")
+  (subpath "/bin")
+  (subpath "/sbin")
+  (subpath "/dev")
+  (subpath "/private/var/folders")
+  (subpath "/Applications/ChatGPT.app")
+  (subpath "/Users/you/.local/share/claude/versions")
+  (subpath "/Users/you/.grok/downloads")
+  (literal "/Users/you/.local/bin/claude")
+  (literal "/Users/you/.grok/bin/grok")
+  (subpath "/Users/you/.stumble/workers/WORKER"))
+
+(allow file-write*
+  (subpath "/dev")
+  (subpath "/private/var/folders")
+  (subpath "/Users/you/.stumble/workers/WORKER"))
+
+; Claude Code reads its OAuth credential from Keychain during startup.
+; Pair this profile with disallowed Bash/Read/Write/Edit tools.
+(deny process-exec (literal "/bin/launchctl"))

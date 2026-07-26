@@ -200,31 +200,42 @@ batch size, and delivery mode (`notify_when_supported` or `queue_only`). Each
 schedule allows only one unreviewed result batch (backpressure). On-demand
 discovery remains available under schedule backpressure.
 
-If the Agent Harness has its own scheduler, wake and claim the same due tasks.
-If it does not, use Stumble’s local Scheduler Adapter — both paths materialize
-the same idempotent Discovery Task identities:
+Use the unified runner when an Agent Harness does not provide its own
+scheduler. One loopback process serves bearer-authenticated MCP requests and
+runs the configured discovery and curation schedules:
 
 ```bash
-export STUMBLE_DATA_DIR="$HOME/.stumble/nodes/home"
-export STUMBLE_DISCOVERY_TOKEN='<personal_discovery_execution token>'
-export STUMBLE_CLI="$HOME/.cargo/bin/stumble"
-export STUMBLE_DISCOVERY_HARNESS_COMMAND='/absolute/path/to/harness-command'
-scripts/wake-discovery.sh
+mkdir -p "$HOME/.config/stumble"
+cp config/runner.example.yaml "$HOME/.config/stumble/runner.yaml"
+# Edit absolute paths, Keychain service/account names, prompts, and agent commands.
+# Copy/edit worker.example.sb (and claude-worker.example.sb for Claude) inside
+# each configured working_directory, replacing WORKER and /Users/you.
+# Copy the matching codex-, claude-, or grok-worker example into that worker's
+# isolated HOME. Rename the MCP server for the profile; for Grok only, place the
+# narrow worker token in the isolated config because its HTTP client does not
+# expand the token environment variable.
+stumble-runner --config "$HOME/.config/stumble/runner.yaml" serve
 ```
 
-The adapter calls `stumble discover task list --state ready` and inspects
-schedule backpressure. Listing materializes due work; repeated invocations
-return the same task identities. On macOS, install with
-`scripts/install-discovery-launchd.sh`; it copies the wake script and CLI into
-`~/.local/libexec` so LaunchAgents do not depend on access to a protected
-checkout folder. Install separate jobs (labels, tokens, commands, and event
-paths) for Personal Discovery and Pod workers. Elsewhere use cron (or
-equivalent) with the same environment. The event file is mode-restricted and defaults to
-`<data-dir>/discovery-ready.json`. After a scheduled completion, attempt
-results-ready notification at most once; queue-only mode retains the batch
-silently.
+On macOS, install that one daemon with
+`scripts/install-runner-launchd.sh`. It installs only `stumble-runner`; no
+`libexec` wrappers or separate scheduler jobs are created.
 
-Run a separate, Pod-scoped unattended curation heartbeat after discovery. It
+The YAML config names credential commands, MCP profiles, agent commands, and
+scheduled workflows. Agent commands are generic argv templates containing
+`{prompt}` and optionally `{working_directory}`; Codex, Claude, Grok, and other
+CLI harnesses use the same interface. Credentials remain separate by profile,
+and HTTP clients must send their assigned Harness token as a bearer token.
+Configure unattended harnesses with an isolated MCP config containing only
+`http://127.0.0.1:8790/mcp` and their worker token; do not expose the manager
+profile to an unattended process. `agent_env` supports `{credential}` and
+`{bearer_credential}` placeholders without placing tokens in runner YAML.
+The runner writes mode-restricted Discovery-ready events, materializes the same
+idempotent task identities on retries, and exits scheduled work silently when
+nothing is due. After a scheduled completion, attempt results-ready
+notification at most once; queue-only mode retains the batch silently.
+
+Configure a Pod-scoped unattended curation schedule in the same runner. It
 lists pending Candidates and evaluates them under each Pod's configured policy;
 task-backed Candidates that pass Assisted Curation become accepted Pod content,
 while anything requiring judgment remains in the manual review queue. Keep this
@@ -287,11 +298,11 @@ lease. Inspect private notices with `list_authentication_needed_notices`.
 
 ## Scheduling fallback (Pod and Personal Discovery)
 
-If the Agent Harness has no scheduler, the local adapter materializes due tasks
-for both Pod Source Rules and Personal Discovery schedules and either writes a
-private `discovery_ready` event or invokes one explicitly configured harness
+If the Agent Harness has no scheduler, the unified runner materializes due
+tasks for both Pod Source Rules and Personal Discovery schedules, writes a
+private `discovery_ready` event, and invokes the configured generic agent
 command. It never controls a browser. See the Personal Discovery skill section
-above for the environment variables and launchd/cron install path.
+above for runner configuration and launchd installation.
 
 ## Direct two-node federation
 

@@ -9,8 +9,13 @@ default-run = "stumble"
 name = "stumble"
 path = "src/bin/stumble.rs"
 
+[[bin]]
+name = "stumble-runner"
+path = "src/bin/stumble-runner.rs"
+
 [dependencies]
 axum.workspace = true
+anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
 stumble-api = { path = "../stumble-api" }
@@ -19,6 +24,7 @@ stumble-mcp = { path = "../stumble-mcp" }
 stumble-sync = { path = "../stumble-sync" }
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 
