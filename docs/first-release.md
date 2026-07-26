@@ -224,6 +224,12 @@ equivalent) with the same environment. The event file is mode-restricted and def
 results-ready notification at most once; queue-only mode retains the batch
 silently.
 
+Run a separate, Pod-scoped unattended curation heartbeat after discovery. It
+lists pending Candidates and evaluates them under each Pod's configured policy;
+task-backed Candidates that pass Assisted Curation become accepted Pod content,
+while anything requiring judgment remains in the manual review queue. Keep this
+grant limited to `pod_curation` and the Pods served by that worker.
+
 ### Privacy and recovery
 
 Interest Seeds, Source Affinities, Discovery Plans, schedules, result batches,
