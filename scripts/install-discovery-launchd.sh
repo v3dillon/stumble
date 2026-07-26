@@ -7,6 +7,7 @@ INTERVAL="${STUMBLE_DISCOVERY_INTERVAL_SECONDS:-300}"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST="$PLIST_DIR/$LABEL.plist"
 LOG_DIR="${STUMBLE_LOG_DIR:-$HOME/.stumble/logs}"
+WAKE_BIN="${STUMBLE_DISCOVERY_WAKE_BIN:-$HOME/.local/libexec/stumble-wake-discovery}"
 
 xml_escape() {
   sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
@@ -25,9 +26,11 @@ if [[ ! "$INTERVAL" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 
-mkdir -p "$PLIST_DIR" "$LOG_DIR"
+mkdir -p "$PLIST_DIR" "$LOG_DIR" "$(dirname "$WAKE_BIN")"
+cp -Xf "$ROOT/scripts/wake-discovery.sh" "$WAKE_BIN"
+chmod 700 "$WAKE_BIN"
 LABEL_XML="$(escape_value "$LABEL")"
-WAKE_XML="$(escape_value "$ROOT/scripts/wake-discovery.sh")"
+WAKE_XML="$(escape_value "$WAKE_BIN")"
 DATA_DIR_XML="$(escape_value "${STUMBLE_DATA_DIR:-$HOME/.stumble/nodes/home}")"
 STUMBLE_XML="$(escape_value "${STUMBLE_CLI:-$ROOT/target/release/stumble}")"
 TOKEN_XML="$(escape_value "$STUMBLE_DISCOVERY_TOKEN")"
