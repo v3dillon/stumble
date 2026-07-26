@@ -294,6 +294,39 @@ fn legacy_preferences_can_be_edited_after_sqlite_restart() {
 }
 
 #[test]
+fn legacy_preferences_are_persisted_canonically_after_snapshot_load() {
+    let data_dir = TestDataDir::new();
+    let snapshot_path = data_dir.0.join("store.json");
+    let tools = AgentTools::new(seed_store());
+    let (user, _) = feedback_harness(&tools);
+    let mut update = UpdateTasteProfileRequest::default();
+    update.interests = Some(vec!["consciousness".into()]);
+    tools.update_taste_profile(&user, update).unwrap();
+    save_store_snapshot(&tools.store().read().unwrap(), &snapshot_path).unwrap();
+
+    let mut snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&snapshot_path).unwrap()).unwrap();
+    snapshot["user_preferences"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("blocked_source_affinities");
+    std::fs::write(
+        &snapshot_path,
+        serde_json::to_vec_pretty(&snapshot).unwrap(),
+    )
+    .unwrap();
+
+    load_store_snapshot(&snapshot_path).unwrap();
+
+    let migrated: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(snapshot_path).unwrap()).unwrap();
+    assert!(migrated["user_preferences"][0]["blocked_source_affinities"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn corroborated_feedback_learns_explainable_weights_and_weak_signal_does_not_rank() {
     let data_dir = TestDataDir::new();
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();

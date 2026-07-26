@@ -899,12 +899,13 @@ pub fn save_store_snapshot(
 pub fn load_store_snapshot(path: &Path) -> Result<InMemoryStore, StorePersistenceError> {
     let bytes = std::fs::read(path)?;
     let mut value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let mut migrated = false;
     if let Some(candidates) = value
         .get_mut("candidates")
         .and_then(serde_json::Value::as_array_mut)
     {
         for candidate in candidates {
-            migrate_candidate_value(candidate)?;
+            migrated |= migrate_candidate_value(candidate)?;
         }
     }
     if let Some(submissions) = value
@@ -912,7 +913,7 @@ pub fn load_store_snapshot(path: &Path) -> Result<InMemoryStore, StorePersistenc
         .and_then(serde_json::Value::as_array_mut)
     {
         for submission in submissions {
-            migrate_candidate_submission_value(submission)?;
+            migrated |= migrate_candidate_submission_value(submission)?;
         }
     }
     if let Some(preferences) = value
@@ -920,14 +921,18 @@ pub fn load_store_snapshot(path: &Path) -> Result<InMemoryStore, StorePersistenc
         .and_then(serde_json::Value::as_array_mut)
     {
         for preference in preferences {
-            migrate_user_preferences_value(preference)?;
+            migrated |= migrate_user_preferences_value(preference)?;
         }
     }
     let snapshot: PersistedStore = serde_json::from_value(value)?;
     if snapshot.version != 1 {
         return Err(StorePersistenceError::UnsupportedVersion(snapshot.version));
     }
-    snapshot.try_into()
+    let store = snapshot.try_into()?;
+    if migrated {
+        save_store_snapshot(&store, path)?;
+    }
+    Ok(store)
 }
 
 pub fn load_or_seed_store_snapshot(

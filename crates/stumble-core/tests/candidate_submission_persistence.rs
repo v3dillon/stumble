@@ -206,3 +206,53 @@ fn candidate_and_idempotency_evidence_survive_sqlite_restart() {
     .unwrap()
     .contains("legacy-private"));
 }
+
+#[test]
+fn legacy_candidate_submission_is_persisted_canonically_after_snapshot_load() {
+    let data_dir = TestDataDir::new("candidate-submission-snapshot-migration");
+    let snapshot_path = data_dir.0.join("store.json");
+    let tools = AgentTools::new(seed_store());
+    let pod = create_candidate_test_pod(&tools, "snapshot-candidates");
+    let harness = candidate_harness(
+        &tools,
+        AgentHarnessKind::Interactive,
+        vec![HarnessCapability::CandidateSubmission],
+        Some(vec![pod.id]),
+    );
+    tools
+        .submit_candidate(&harness, candidate_submission_request(&[pod.id]))
+        .unwrap();
+    save_store_snapshot(&tools.store().read().unwrap(), &snapshot_path).unwrap();
+
+    let mut snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&snapshot_path).unwrap()).unwrap();
+    let record = snapshot["candidate_submissions"][0]
+        .as_object_mut()
+        .unwrap();
+    let mut target = record.remove("target").unwrap();
+    record.insert(
+        "proposed_placements".into(),
+        target.get_mut("placements").unwrap().take(),
+    );
+    record.insert(
+        "task_context".into(),
+        target.get_mut("task_context").unwrap().take(),
+    );
+    std::fs::write(
+        &snapshot_path,
+        serde_json::to_vec_pretty(&snapshot).unwrap(),
+    )
+    .unwrap();
+
+    load_store_snapshot(&snapshot_path).unwrap();
+
+    let migrated: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(snapshot_path).unwrap()).unwrap();
+    assert_eq!(
+        migrated["candidate_submissions"][0]["target"]["kind"],
+        "pod_placements"
+    );
+    assert!(migrated["candidate_submissions"][0]
+        .get("proposed_placements")
+        .is_none());
+}
