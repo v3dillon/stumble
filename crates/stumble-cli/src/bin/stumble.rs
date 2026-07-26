@@ -227,6 +227,7 @@ fn candidate_inspection_result(
     let placements = pod_placement_results(tools, actor, inspection.placements)?;
     Ok(json!({
         "candidate": inspection.candidate,
+        "reference": inspection.reference,
         "submissions": inspection.submissions,
         "placements": placements,
         "allowed_actions": inspection.allowed_actions,

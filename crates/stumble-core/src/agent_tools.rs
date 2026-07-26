@@ -4788,18 +4788,24 @@ impl AgentTools {
             existing
         } else {
             let description = request.description.clone();
+            let title = request.title.unwrap_or_else(|| canonical_url.clone());
             let submission = Submission {
                 id: Uuid::now_v7(),
                 tenant_id: ctx.tenant_id,
                 url: request.url.clone(),
                 canonical_url: canonical_url.clone(),
-                title: request.title.unwrap_or_else(|| canonical_url.clone()),
+                title: title.clone(),
+                source_metadata: CandidateSourceMetadata {
+                    title: Some(title),
+                    ..CandidateSourceMetadata::default()
+                },
                 description,
                 domain,
                 submitted_by: ctx.user_id,
                 discovered_by_crawler: request.discovered_by_crawler,
                 submitter_note: request.note,
                 summary: request.description,
+                provenance: Vec::new(),
                 media_references: Vec::new(),
                 tags: request.tags,
                 embedding: None,
@@ -4999,21 +5005,52 @@ impl AgentTools {
             .read()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let harness = harness_for_context(&store, ctx)?;
+        Ok(store
+            .candidates
+            .values()
+            .filter(|candidate| candidate.tenant_id == ctx.tenant_id)
+            .filter(|candidate| {
+                store.candidate_submissions.values().any(|submission| {
+                    submission.candidate_id == candidate.id
+                        && candidate_submission_is_visible(&store, ctx, harness, submission)
+                })
+            })
+            .cloned()
+            .collect())
+    }
+
+    /// Lists visible Candidates with their merged summary-rich source reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when authorization state cannot be read.
+    pub fn list_candidate_references(
+        &self,
+        ctx: &AuthContext,
+    ) -> Result<Vec<CandidateListItem>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let harness = harness_for_context(&store, ctx)?;
         let mut candidates = Vec::new();
         for candidate in store
             .candidates
             .values()
             .filter(|candidate| candidate.tenant_id == ctx.tenant_id)
         {
-            let visible = store
+            let visible_submissions = store
                 .candidate_submissions
                 .values()
                 .filter(|submission| submission.candidate_id == candidate.id)
-                .any(|submission| {
+                .filter(|submission| {
                     candidate_submission_is_visible(&store, ctx, harness, submission)
                 });
-            if visible {
-                candidates.push(candidate.clone());
+            if let Some(reference) = CandidateReference::from_submissions(visible_submissions) {
+                candidates.push(CandidateListItem {
+                    candidate: candidate.clone(),
+                    reference,
+                });
             }
         }
         Ok(candidates)
@@ -5056,6 +5093,8 @@ impl AgentTools {
             });
         }
         submissions.sort_by_key(|submission| (submission.created_at, submission.id));
+        let reference = CandidateReference::from_submissions(&submissions)
+            .expect("visible Candidate inspection has at least one submission");
         let mut placements: Vec<_> = store
             .pod_placements
             .values()
@@ -5124,6 +5163,7 @@ impl AgentTools {
         }
         Ok(CandidateInspection {
             candidate,
+            reference,
             submissions,
             placements,
             allowed_actions,
@@ -5291,6 +5331,7 @@ impl AgentTools {
             };
             if status == PodPlacementStatus::Accepted {
                 accept_candidate_placement(&mut store, ctx, &candidate, &placement)?;
+                enrich_accepted_content_item(&mut store, ctx, &candidate)?;
             }
             store
                 .pod_placements
@@ -5381,6 +5422,7 @@ impl AgentTools {
         let placement = placement.clone();
         if status == PodPlacementStatus::Accepted {
             accept_candidate_placement(&mut store, ctx, &candidate, &placement)?;
+            enrich_accepted_content_item(&mut store, ctx, &candidate)?;
         }
         record_harness_write_at(
             &mut store,
@@ -5494,6 +5536,7 @@ impl AgentTools {
         };
         if accepted {
             accept_candidate_placement(&mut store, ctx, &candidate, &placement)?;
+            enrich_accepted_content_item(&mut store, ctx, &candidate)?;
         }
         store
             .pod_placements
@@ -9957,6 +10000,22 @@ fn project_imported_public_event(
                 .submissions
                 .get_mut(&Uuid::from(local_content_item_id))
                 .ok_or_else(|| StoreError::NotFound("synchronized Content Item".into()))?;
+            merge_source_metadata(&mut item.source_metadata, &update.source_metadata);
+            if item.source_metadata.title.is_some() {
+                item.title = item
+                    .source_metadata
+                    .title
+                    .clone()
+                    .expect("checked source title");
+            }
+            if item.description.is_none() {
+                item.description = update.permitted_excerpt;
+            }
+            if item.summary.is_none() {
+                item.summary = update.summary;
+            }
+            extend_unique(&mut item.tags, update.tags);
+            extend_unique(&mut item.provenance, update.provenance);
             item.media_references =
                 resolve_media_for_store(item.media_references.iter().chain(&media_references))?;
         }
@@ -11526,6 +11585,7 @@ fn accept_discovery_result_into_pod(
         updated_at: now,
     };
     accept_candidate_placement(store, ctx, candidate, &placement)?;
+    enrich_accepted_content_item(store, ctx, candidate)?;
     store
         .pod_placements
         .insert((candidate.id, pod_id), placement.clone());
@@ -11549,14 +11609,17 @@ fn ensure_content_item(
     {
         return Ok(ContentItem::from(&existing));
     }
-    let evidence = submissions
+    let authorized_submissions = submissions
         .iter()
-        .find(|submission| authorized_submission_ids.contains(&submission.id))
-        .ok_or_else(|| {
-            StoreError::Validation(
-                "Candidate placement has no explicitly authorized submission evidence".into(),
-            )
-        })?;
+        .filter(|submission| authorized_submission_ids.contains(&submission.id))
+        .collect::<Vec<_>>();
+    let evidence = authorized_submissions.first().copied().ok_or_else(|| {
+        StoreError::Validation(
+            "Candidate placement has no explicitly authorized submission evidence".into(),
+        )
+    })?;
+    let reference = CandidateReference::from_submissions(authorized_submissions.iter().copied())
+        .expect("authorized Candidate placement has submission evidence");
     let domain = Url::parse(&candidate.canonical_url)
         .map_err(|error| AgentToolsError::BadUrl(error.to_string()))?
         .domain()
@@ -11575,28 +11638,55 @@ fn ensure_content_item(
     let item = Submission {
         id: stable_candidate_uuid("content-item", &[&candidate.id.to_string()]),
         tenant_id: candidate.tenant_id,
-        url: evidence.evidence.source_url.clone(),
+        url: reference.source_url,
         canonical_url: candidate.canonical_url.clone(),
-        title: evidence
-            .evidence
+        title: reference
             .source_metadata
             .title
             .clone()
             .unwrap_or_else(|| candidate.canonical_url.clone()),
-        description: evidence.evidence.permitted_excerpt.clone(),
+        source_metadata: reference.source_metadata,
+        description: reference.permitted_excerpt,
         domain,
         submitted_by,
         discovered_by_crawler: false,
         submitter_note: None,
-        summary: evidence.evidence.summary.clone(),
+        summary: reference.summary,
+        provenance: authorized_submissions
+            .into_iter()
+            .map(|submission| submission.evidence.provenance.clone())
+            .collect(),
         media_references,
-        tags: evidence.evidence.tags.clone(),
+        tags: reference.tags,
         embedding: None,
         created_at: now,
         origin_event_id: None,
     };
     store.submissions.insert(item.id, item.clone());
     Ok(ContentItem::from(&item))
+}
+
+fn merge_source_metadata(
+    retained: &mut CandidateSourceMetadata,
+    additional: &CandidateSourceMetadata,
+) {
+    if retained.title.is_none() {
+        retained.title.clone_from(&additional.title);
+    }
+    if retained.author.is_none() {
+        retained.author.clone_from(&additional.author);
+    }
+    if retained.published_at.is_none() {
+        retained.published_at = additional.published_at;
+    }
+}
+
+fn extend_unique<T: PartialEq>(retained: &mut Vec<T>, additional: impl IntoIterator<Item = T>) {
+    for value in additional {
+        if !retained.contains(&value) {
+            retained.push(value);
+        }
+    }
 }
 
 fn enrich_accepted_content_item(
@@ -11614,11 +11704,10 @@ fn enrich_accepted_content_item(
     else {
         return Ok(());
     };
-    let existing_media = store
+    let existing = store
         .submissions
         .get(&item_id)
         .ok_or_else(|| StoreError::NotFound("Content Item".into()))?
-        .media_references
         .clone();
     let content_item_id = ContentItemId::from(item_id);
     let accepted_pod_ids = store
@@ -11627,19 +11716,23 @@ fn enrich_accepted_content_item(
         .filter(|placement| placement.content_item_id == content_item_id)
         .map(|placement| placement.pod_id)
         .collect::<HashSet<_>>();
+    let accepted_submissions = store
+        .candidate_submissions
+        .values()
+        .filter(|submission| {
+            submission.candidate_id == candidate.id
+                && submission
+                    .target
+                    .placements()
+                    .iter()
+                    .any(|placement| accepted_pod_ids.contains(&placement.pod_id))
+        })
+        .collect::<Vec<_>>();
+    let reference = CandidateReference::from_submissions(accepted_submissions.iter().copied());
     let resolved = resolve_media_for_store(
-        existing_media.iter().chain(
-            store
-                .candidate_submissions
-                .values()
-                .filter(|submission| {
-                    submission.candidate_id == candidate.id
-                        && submission
-                            .target
-                            .placements()
-                            .iter()
-                            .any(|placement| accepted_pod_ids.contains(&placement.pod_id))
-                })
+        existing.media_references.iter().chain(
+            accepted_submissions
+                .iter()
                 .flat_map(|submission| &submission.evidence.media_references),
         ),
     )?;
@@ -11647,10 +11740,29 @@ fn enrich_accepted_content_item(
         .submissions
         .get_mut(&item_id)
         .ok_or_else(|| StoreError::NotFound("Content Item".into()))?;
-    if item.media_references == resolved {
-        return Ok(());
+    if let Some(reference) = reference {
+        merge_source_metadata(&mut item.source_metadata, &reference.source_metadata);
+        if let Some(title) = &item.source_metadata.title {
+            item.title.clone_from(title);
+        }
+        if item.description.is_none() {
+            item.description = reference.permitted_excerpt;
+        }
+        if item.summary.is_none() {
+            item.summary = reference.summary;
+        }
+        extend_unique(&mut item.tags, reference.tags);
+        extend_unique(
+            &mut item.provenance,
+            accepted_submissions
+                .iter()
+                .map(|submission| submission.evidence.provenance.clone()),
+        );
     }
     item.media_references = resolved;
+    if *item == existing {
+        return Ok(());
+    }
 
     let node = store.node_for_tenant(ctx.tenant_id)?;
     let mut pods = store
@@ -11662,18 +11774,22 @@ fn enrich_accepted_content_item(
         .filter_map(|placement| store.pods.get(&placement.pod_id).cloned())
         .collect::<Vec<_>>();
     pods.sort_by(|left, right| left.slug.cmp(&right.slug).then(left.id.cmp(&right.id)));
-    let media_references = store
+    let content_item = store
         .submissions
         .get(&item_id)
         .expect("accepted Content Item remains present")
-        .media_references
         .clone();
     let now = Utc::now();
     for pod in pods {
         let payload = ContentItemMetadataUpdatedPayload {
             metadata_update: ContentItemMetadataUpdate {
                 content_item_id,
-                media_references: media_references.clone(),
+                source_metadata: content_item.source_metadata.clone(),
+                permitted_excerpt: content_item.description.clone(),
+                summary: content_item.summary.clone(),
+                tags: content_item.tags.clone(),
+                provenance: content_item.provenance.clone(),
+                media_references: content_item.media_references.clone(),
             },
         };
         let event = sign_public_event(
@@ -13565,12 +13681,14 @@ mod federation_projection_tests {
             url: canonical_url.to_string(),
             canonical_url: canonical_url.to_string(),
             title: "Federated item".to_string(),
+            source_metadata: CandidateSourceMetadata::default(),
             description: None,
             domain: "example.com".to_string(),
             submitted_by: None,
             discovered_by_crawler: false,
             submitter_note: None,
             summary: None,
+            provenance: Vec::new(),
             media_references: Vec::new(),
             tags: Vec::new(),
             embedding: None,

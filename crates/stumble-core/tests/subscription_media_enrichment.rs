@@ -42,6 +42,83 @@ fn enrichment_request(
 }
 
 #[test]
+fn candidate_acceptance_enriches_an_existing_direct_content_reference() {
+    let tools = AgentTools::new(seed_store());
+    let pod = create_public_pod(&tools, "direct-reference-enrichment");
+    let owner = tools.default_auth_context().unwrap();
+    tools
+        .submit_link_to_pod(
+            &owner,
+            &pod.slug,
+            SubmitLinkRequest {
+                url: "https://reference.example/direct-first".into(),
+                title: None,
+                description: None,
+                note: None,
+                tags: vec![],
+                discovered_by_crawler: false,
+            },
+        )
+        .unwrap();
+    let submitter = register_authenticated_harness(
+        &tools,
+        "rich candidate submitter",
+        vec![HarnessCapability::CandidateSubmission],
+    );
+    let curator = register_authenticated_harness(
+        &tools,
+        "direct reference curator",
+        vec![HarnessCapability::PodCuration],
+    );
+    tools
+        .set_pod_curation_policy(&curator, pod.id, CurationPolicy::Manual, Utc::now())
+        .unwrap();
+    let mut request = enrichment_request(pod.id, "direct-reference", vec![]);
+    request.evidence.source_url = "https://reference.example/direct-first".into();
+    request.evidence.source_metadata = CandidateSourceMetadata {
+        title: Some("Retained source title".into()),
+        author: Some("Retained author".into()),
+        published_at: Some("2026-07-21T12:00:00Z".parse().unwrap()),
+    };
+    request.evidence.permitted_excerpt = Some("Retained excerpt".into());
+    request.evidence.summary = Some("Retained summary after deletion".into());
+    request.evidence.tags = vec!["retained".into()];
+    let submitted = tools.submit_candidate(&submitter, request).unwrap();
+    tools
+        .curate_candidate(&curator, submitted.candidate.id, Utc::now())
+        .unwrap();
+    tools
+        .review_candidate_placement(
+            &curator,
+            submitted.candidate.id,
+            pod.id,
+            PlacementReviewDecision::Accept,
+            None,
+            Utc::now(),
+        )
+        .unwrap();
+
+    let content = tools.pod_content_stream(&owner, pod.id).unwrap();
+    let item = content
+        .iter()
+        .find(|entry| {
+            entry
+                .content_item
+                .canonical_url()
+                .ends_with("/direct-first")
+        })
+        .map(|entry| &entry.content_item)
+        .unwrap();
+    assert_eq!(item.summary(), Some("Retained summary after deletion"));
+    assert_eq!(
+        item.source_metadata().author.as_deref(),
+        Some("Retained author")
+    );
+    assert_eq!(item.permitted_description(), Some("Retained excerpt"));
+    assert_eq!(item.provenance().len(), 1);
+}
+
+#[test]
 fn subscribed_home_node_synchronizes_incrementally_and_reads_remote_content_offline() {
     // Arrange: publish accepted content on a reachable Origin Node.
     let origin_dir = TestDataDir::new("origin");
@@ -227,11 +304,11 @@ fn later_canonical_evidence_enriches_accepted_content_and_synchronizes_after_res
             source_url: "HTTPS://REFERENCE.EXAMPLE:443/remote-report#later".into(),
             source_metadata: CandidateSourceMetadata {
                 title: Some("Later corroboration".into()),
-                author: None,
-                published_at: None,
+                author: Some("Later source author".into()),
+                published_at: Some("2026-07-20T12:00:00Z".parse().unwrap()),
             },
-            permitted_excerpt: None,
-            summary: None,
+            permitted_excerpt: Some("A richer permitted excerpt".into()),
+            summary: Some("A richer retained summary".into()),
             content_type: CandidateContentType::Article,
             media_references: vec![
                 media_reference(
@@ -243,7 +320,7 @@ fn later_canonical_evidence_enriches_accepted_content_and_synchronizes_after_res
                     "https://media.reference.example/remote-report/walkthrough.mp4",
                 ),
             ],
-            tags: vec![],
+            tags: vec!["corroborated".into()],
             provenance: CandidateProvenance {
                 discovered_at: Utc::now(),
                 discovery_method: "later_browser_evidence".into(),
@@ -271,6 +348,27 @@ fn later_canonical_evidence_enriches_accepted_content_and_synchronizes_after_res
             .media_references(),
         expected
     );
+    let origin_content = origin.pod_content_stream(&origin_owner, pod.id).unwrap();
+    let origin_item = &origin_content[0].content_item;
+    assert_eq!(
+        origin_item.summary(),
+        Some("An accepted remote Content Reference")
+    );
+    assert_eq!(origin_item.title(), "Remote report");
+    assert_eq!(
+        origin_item.source_metadata().author.as_deref(),
+        Some("Reference author")
+    );
+    assert_eq!(
+        origin_item.source_metadata().published_at,
+        Some("2026-07-20T12:00:00Z".parse().unwrap())
+    );
+    assert_eq!(
+        origin_item.permitted_description(),
+        Some("A permitted excerpt")
+    );
+    assert!(origin_item.tags().iter().any(|tag| tag == "corroborated"));
+    assert_eq!(origin_item.provenance().len(), 2);
     let remote_pod = home.pod_by_slug(&pod.slug, subscriber.tenant_id).unwrap();
 
     drop(origin);
@@ -297,6 +395,21 @@ fn later_canonical_evidence_enriches_accepted_content_and_synchronizes_after_res
             .media_references(),
         expected
     );
+    let home_content = home.pod_content_stream(&subscriber, remote_pod.id).unwrap();
+    let home_item = &home_content[0].content_item;
+    assert_eq!(
+        home_item.summary(),
+        Some("An accepted remote Content Reference")
+    );
+    assert_eq!(
+        home_item.source_metadata().author.as_deref(),
+        Some("Reference author")
+    );
+    assert_eq!(
+        home_item.source_metadata().published_at,
+        Some("2026-07-20T12:00:00Z".parse().unwrap())
+    );
+    assert_eq!(home_item.provenance().len(), 2);
 
     later.evidence.harness_idempotency_key = "conflicting-media-worker".into();
     later.evidence.client_idempotency_key = "conflicting-media-client".into();

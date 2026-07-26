@@ -3244,12 +3244,16 @@ pub struct Submission {
     pub url: String,
     pub canonical_url: String,
     pub title: String,
+    #[serde(default)]
+    pub source_metadata: CandidateSourceMetadata,
     pub description: Option<String>,
     pub domain: String,
     pub submitted_by: Option<UserId>,
     pub discovered_by_crawler: bool,
     pub submitter_note: Option<String>,
     pub summary: Option<String>,
+    #[serde(default)]
+    pub provenance: Vec<CandidateProvenance>,
     #[serde(default)]
     pub media_references: Vec<MediaReference>,
     pub tags: Vec<String>,
@@ -3427,6 +3431,36 @@ impl ContentItem {
         &self.legacy_record.title
     }
 
+    /// Returns the generated understanding retained independently of the source.
+    #[must_use]
+    pub fn summary(&self) -> Option<&str> {
+        self.legacy_record.summary.as_deref()
+    }
+
+    /// Returns the excerpt that source policy permits Stumble to retain.
+    #[must_use]
+    pub fn permitted_description(&self) -> Option<&str> {
+        self.legacy_record.description.as_deref()
+    }
+
+    /// Returns descriptive tags retained with this Content Reference.
+    #[must_use]
+    pub fn tags(&self) -> &[String] {
+        &self.legacy_record.tags
+    }
+
+    /// Returns source title, author, and publication time retained at acceptance.
+    #[must_use]
+    pub const fn source_metadata(&self) -> &CandidateSourceMetadata {
+        &self.legacy_record.source_metadata
+    }
+
+    /// Returns the discovery evidence retained with this Content Reference.
+    #[must_use]
+    pub fn provenance(&self) -> &[CandidateProvenance] {
+        &self.legacy_record.provenance
+    }
+
     /// Returns permitted attached-media URLs without implying byte archival.
     #[must_use]
     pub fn media_references(&self) -> &[MediaReference] {
@@ -3444,9 +3478,13 @@ struct ContentItemWire {
     source_url: String,
     canonical_url: String,
     title: String,
+    #[serde(default)]
+    source_metadata: CandidateSourceMetadata,
     permitted_description: Option<String>,
     domain: String,
     summary: Option<String>,
+    #[serde(default)]
+    provenance: Vec<CandidateProvenance>,
     #[serde(default)]
     media_references: Vec<MediaReference>,
     tags: Vec<String>,
@@ -3464,9 +3502,11 @@ impl Serialize for ContentItem {
             source_url: self.legacy_record.url.clone(),
             canonical_url: self.legacy_record.canonical_url.clone(),
             title: self.legacy_record.title.clone(),
+            source_metadata: self.legacy_record.source_metadata.clone(),
             permitted_description: self.legacy_record.description.clone(),
             domain: self.legacy_record.domain.clone(),
             summary: self.legacy_record.summary.clone(),
+            provenance: self.legacy_record.provenance.clone(),
             media_references: self.legacy_record.media_references.clone(),
             tags: self.legacy_record.tags.clone(),
             created_at: self.legacy_record.created_at,
@@ -3489,12 +3529,14 @@ impl<'de> Deserialize<'de> for ContentItem {
                 url: wire.source_url,
                 canonical_url: wire.canonical_url,
                 title: wire.title,
+                source_metadata: wire.source_metadata,
                 description: wire.permitted_description,
                 domain: wire.domain,
                 submitted_by: None,
                 discovered_by_crawler: false,
                 submitter_note: None,
                 summary: wire.summary,
+                provenance: wire.provenance,
                 media_references: wire.media_references,
                 tags: wire.tags,
                 embedding: None,
@@ -3531,10 +3573,21 @@ pub struct AcceptedPlacementProjection {
     pub accepted_at: DateTime<Utc>,
 }
 
-/// Complete signed replacement for one accepted Content Reference's media evidence.
+/// Cumulative signed metadata retained for one accepted Content Reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ContentItemMetadataUpdate {
     pub(crate) content_item_id: ContentItemId,
+    #[serde(default)]
+    pub(crate) source_metadata: CandidateSourceMetadata,
+    #[serde(default)]
+    pub(crate) permitted_excerpt: Option<String>,
+    #[serde(default)]
+    pub(crate) summary: Option<String>,
+    #[serde(default)]
+    pub(crate) tags: Vec<String>,
+    #[serde(default)]
+    pub(crate) provenance: Vec<CandidateProvenance>,
+    #[serde(default)]
     pub(crate) media_references: Vec<MediaReference>,
 }
 
@@ -3959,7 +4012,7 @@ pub struct Candidate {
 }
 
 /// Source metadata known to the submitting Agent Harness.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct CandidateSourceMetadata {
     /// Known source title, when supplied.
@@ -4148,6 +4201,86 @@ pub struct CandidateSubmission {
     pub created_at: DateTime<Utc>,
 }
 
+/// Summary-rich merged projection used by public Candidate read surfaces.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CandidateReference {
+    /// Exact source location retained by the selected evidence record.
+    pub source_url: String,
+    /// Source-provided title, author, and publication time when known.
+    pub source_metadata: CandidateSourceMetadata,
+    /// Source text that policy permits Stumble to retain.
+    pub permitted_excerpt: Option<String>,
+    /// Harness-generated understanding that survives source deletion.
+    pub summary: Option<String>,
+    /// Coarse source content type.
+    pub content_type: CandidateContentType,
+    /// Reference-first media attachments; bytes are not archived.
+    pub media_references: Vec<MediaReference>,
+    /// Descriptive subject tags.
+    pub tags: Vec<String>,
+    /// Evidence describing how the source was discovered.
+    pub provenance: CandidateProvenance,
+}
+
+impl From<&CandidateSubmission> for CandidateReference {
+    fn from(submission: &CandidateSubmission) -> Self {
+        Self {
+            source_url: submission.evidence.source_url.clone(),
+            source_metadata: submission.evidence.source_metadata.clone(),
+            permitted_excerpt: submission.evidence.permitted_excerpt.clone(),
+            summary: submission.evidence.summary.clone(),
+            content_type: submission.evidence.content_type,
+            media_references: submission.evidence.media_references.clone(),
+            tags: submission.evidence.tags.clone(),
+            provenance: submission.evidence.provenance.clone(),
+        }
+    }
+}
+
+impl CandidateReference {
+    /// Merges visible submissions without allowing sparse later evidence to erase retained facts.
+    #[must_use]
+    pub fn from_submissions<'a>(
+        submissions: impl IntoIterator<Item = &'a CandidateSubmission>,
+    ) -> Option<Self> {
+        let mut submissions = submissions.into_iter().collect::<Vec<_>>();
+        submissions.sort_by_key(|submission| (submission.created_at, submission.id));
+        let latest = *submissions.last()?;
+        let mut reference = Self::from(latest);
+
+        for submission in submissions.iter().rev().copied() {
+            let evidence = &submission.evidence;
+            reference.source_metadata.title = reference
+                .source_metadata
+                .title
+                .or_else(|| evidence.source_metadata.title.clone());
+            reference.source_metadata.author = reference
+                .source_metadata
+                .author
+                .or_else(|| evidence.source_metadata.author.clone());
+            reference.source_metadata.published_at = reference
+                .source_metadata
+                .published_at
+                .or(evidence.source_metadata.published_at);
+            reference.permitted_excerpt = reference
+                .permitted_excerpt
+                .or_else(|| evidence.permitted_excerpt.clone());
+            reference.summary = reference.summary.or_else(|| evidence.summary.clone());
+            for media in &evidence.media_references {
+                if !reference.media_references.contains(media) {
+                    reference.media_references.push(media.clone());
+                }
+            }
+            for tag in &evidence.tags {
+                if !reference.tags.contains(tag) {
+                    reference.tags.push(tag.clone());
+                }
+            }
+        }
+        Some(reference)
+    }
+}
+
 /// Scope governing Candidate Submission authorization and visibility.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -4300,12 +4433,24 @@ pub struct SubmittedCandidate {
 pub struct CandidateInspection {
     /// Canonical private Candidate and review state.
     pub candidate: Candidate,
+    /// Merged visible summary-rich source reference for list and digest rendering.
+    pub reference: CandidateReference,
     /// Independent submissions retained for this canonical identity.
     pub submissions: Vec<CandidateSubmission>,
     /// Independently governed placement states and retained evidence.
     pub placements: Vec<PodPlacement>,
     /// Permission-derived operations the harness can perform next.
     pub allowed_actions: Vec<CandidateAllowedAction>,
+}
+
+/// Compact Candidate list item that retains the merged visible source understanding.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CandidateListItem {
+    /// Canonical private Candidate and review state.
+    #[serde(flatten)]
+    pub candidate: Candidate,
+    /// Merged visible summary-rich source reference.
+    pub reference: CandidateReference,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

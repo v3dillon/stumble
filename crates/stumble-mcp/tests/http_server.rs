@@ -615,13 +615,19 @@ async fn harnesses_can_curate_an_origin_pod_without_bypassing_scope_or_approval(
             "submit_candidate",
             json!({
                 "source_url": "https://example.com/origin-discovery?utm_source=harness",
-                "source_metadata": {"title": "Origin discovery"},
+                "source_metadata": {
+                    "title": "Origin discovery",
+                    "author": "Primary researcher",
+                    "published_at": "2026-07-17T09:30:00Z"
+                },
+                "permitted_excerpt": "A retained source excerpt.",
                 "summary": "One private Candidate routed through authorized curation.",
                 "content_type": "article",
                 "tags": ["federation"],
                 "provenance": {
                     "discovered_at": "2026-07-18T12:00:00Z",
-                    "discovery_method": "interactive_browser"
+                    "discovery_method": "interactive_browser",
+                    "referrer_url": "https://search.example/origin-discovery"
                 },
                 "target": {
                     "kind": "pod_placements",
@@ -637,6 +643,27 @@ async fn harnesses_can_curate_an_origin_pod_without_bypassing_scope_or_approval(
         )
         .await;
     let candidate_id = submitted.submitted_candidate().candidate.id;
+
+    let inspected_candidate = curator_mcp
+        .call_tool(
+            261,
+            "inspect_candidate",
+            json!({"candidate_id": candidate_id}),
+        )
+        .await;
+    let inspected_reference = &inspected_candidate.structured_content()["value"]["reference"];
+    assert_eq!(
+        inspected_reference["summary"],
+        "One private Candidate routed through authorized curation."
+    );
+    assert_eq!(
+        inspected_reference["source_metadata"]["author"],
+        "Primary researcher"
+    );
+    assert_eq!(
+        inspected_reference["provenance"]["discovery_method"],
+        "interactive_browser"
+    );
 
     let scoped_curator = ScopedHarness::register(
         &tools,
@@ -715,6 +742,23 @@ async fn harnesses_can_curate_an_origin_pod_without_bypassing_scope_or_approval(
     assert_eq!(
         items[0].content_item.canonical_url(),
         "https://example.com/origin-discovery"
+    );
+    let content_reference = &content.structured_content()["value"][0]["content_item"];
+    assert_eq!(
+        content_reference["summary"],
+        "One private Candidate routed through authorized curation."
+    );
+    assert_eq!(
+        content_reference["source_metadata"]["author"],
+        "Primary researcher"
+    );
+    assert_eq!(
+        content_reference["source_metadata"]["published_at"],
+        "2026-07-17T09:30:00Z"
+    );
+    assert_eq!(
+        content_reference["provenance"][0]["discovery_method"],
+        "interactive_browser"
     );
 }
 

@@ -307,17 +307,19 @@ fn execute_candidate(
 ) -> CliResult {
     match command {
         CandidateWorkflow::List(args) => {
-            let mut items = tools.list_candidates(actor).map_err(agent_tools_error)?;
-            items.retain(|candidate| match args.status {
+            let mut items = tools
+                .list_candidate_references(actor)
+                .map_err(agent_tools_error)?;
+            items.retain(|item| match args.status {
                 None => true,
                 Some(CandidateStatus::Pending) => {
-                    candidate.review_state == CandidateReviewState::Pending
+                    item.candidate.review_state == CandidateReviewState::Pending
                 }
                 Some(CandidateStatus::Accepted) => {
-                    candidate.review_state == CandidateReviewState::Accepted
+                    item.candidate.review_state == CandidateReviewState::Accepted
                 }
             });
-            items.sort_by_key(|candidate| (candidate.created_at, candidate.id));
+            items.sort_by_key(|item| (item.candidate.created_at, item.candidate.id));
             serde_json::to_value(page(items, &args.page)?).map_err(internal_error)
         }
         CandidateWorkflow::Submit(args) => {

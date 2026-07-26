@@ -223,6 +223,29 @@ fn structured_submission_is_retry_safe_and_candidate_list_is_filtered_and_pagina
     assert_eq!(code, 4);
     assert_eq!(conflict["error"]["code"], "idempotency_conflict");
 
+    let mut sparse_duplicate = request.clone();
+    sparse_duplicate["source_metadata"] = json!({
+        "title": null,
+        "author": null,
+        "published_at": null
+    });
+    sparse_duplicate["permitted_excerpt"] = Value::Null;
+    sparse_duplicate["summary"] = Value::Null;
+    sparse_duplicate["tags"] = json!([]);
+    environment.run_json_as(
+        &credential,
+        &[
+            "discover",
+            "candidate",
+            "submit",
+            "--input",
+            "-",
+            "--idempotency-key",
+            "request-1-sparse",
+        ],
+        &sparse_duplicate,
+    );
+
     let second = environment.submission(
         "https://example.com/candidate-two",
         &[(&pod_id, "Also concerns systems", 0.7)],
@@ -256,6 +279,26 @@ fn structured_submission_is_retry_safe_and_candidate_list_is_filtered_and_pagina
     assert!(first_page["data"]["items"][0]
         .get("allowed_actions")
         .is_none());
+    assert_eq!(
+        first_page["data"]["items"][0]["id"],
+        original["data"]["candidate"]["id"]
+    );
+    assert_eq!(
+        first_page["data"]["items"][0]["reference"]["summary"],
+        "An evidence-backed candidate"
+    );
+    assert_eq!(
+        first_page["data"]["items"][0]["reference"]["source_metadata"]["author"],
+        "Primary source"
+    );
+    assert_eq!(
+        first_page["data"]["items"][0]["reference"]["permitted_excerpt"],
+        "A permitted excerpt"
+    );
+    assert_eq!(
+        first_page["data"]["items"][0]["reference"]["provenance"]["discovery_method"],
+        "interactive_browser"
+    );
     let cursor = first_page["data"]["next_cursor"].as_str().unwrap();
     let second_page = environment.run_as(
         &credential,
