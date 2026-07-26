@@ -207,7 +207,7 @@ the same idempotent Discovery Task identities:
 ```bash
 export STUMBLE_DATA_DIR="$HOME/.stumble/nodes/home"
 export STUMBLE_DISCOVERY_TOKEN='<personal_discovery_execution token>'
-export STUMBLE_CLI="$PWD/target/release/stumble"
+export STUMBLE_CLI="$HOME/.cargo/bin/stumble"
 export STUMBLE_DISCOVERY_HARNESS_COMMAND='/absolute/path/to/harness-command'
 scripts/wake-discovery.sh
 ```
@@ -215,8 +215,11 @@ scripts/wake-discovery.sh
 The adapter calls `stumble discover task list --state ready` and inspects
 schedule backpressure. Listing materializes due work; repeated invocations
 return the same task identities. On macOS, install with
-`scripts/install-discovery-launchd.sh`. Elsewhere use cron (or equivalent) with
-the same environment. The event file is mode-restricted and defaults to
+`scripts/install-discovery-launchd.sh`; it copies the wake script and CLI into
+`~/.local/libexec` so LaunchAgents do not depend on access to a protected
+checkout folder. Install separate jobs (labels, tokens, commands, and event
+paths) for Personal Discovery and Pod workers. Elsewhere use cron (or
+equivalent) with the same environment. The event file is mode-restricted and defaults to
 `<data-dir>/discovery-ready.json`. After a scheduled completion, attempt
 results-ready notification at most once; queue-only mode retains the batch
 silently.

@@ -8,6 +8,8 @@ PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST="$PLIST_DIR/$LABEL.plist"
 LOG_DIR="${STUMBLE_LOG_DIR:-$HOME/.stumble/logs}"
 WAKE_BIN="${STUMBLE_DISCOVERY_WAKE_BIN:-$HOME/.local/libexec/stumble-wake-discovery}"
+STUMBLE_SOURCE="${STUMBLE_CLI:-$ROOT/target/release/stumble}"
+STUMBLE_BIN="${STUMBLE_DISCOVERY_CLI_BIN:-$HOME/.local/libexec/stumble-discovery-cli}"
 
 xml_escape() {
   sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
@@ -25,14 +27,34 @@ if [[ ! "$INTERVAL" =~ ^[1-9][0-9]*$ ]]; then
   printf 'STUMBLE_DISCOVERY_INTERVAL_SECONDS must be a positive integer\n' >&2
   exit 2
 fi
+if [[ ! -x "$STUMBLE_SOURCE" ]]; then
+  printf 'Stumble CLI is not executable: %s\n' "$STUMBLE_SOURCE" >&2
+  exit 2
+fi
+case "$WAKE_BIN" in
+  "$ROOT" | "$ROOT"/*)
+    printf 'STUMBLE_DISCOVERY_WAKE_BIN must be outside the checkout\n' >&2
+    exit 2
+    ;;
+esac
+case "$STUMBLE_BIN" in
+  "$ROOT" | "$ROOT"/*)
+    printf 'STUMBLE_DISCOVERY_CLI_BIN must be outside the checkout\n' >&2
+    exit 2
+    ;;
+esac
 
-mkdir -p "$PLIST_DIR" "$LOG_DIR" "$(dirname "$WAKE_BIN")"
+mkdir -p "$PLIST_DIR" "$LOG_DIR" "$(dirname "$WAKE_BIN")" "$(dirname "$STUMBLE_BIN")"
 cp -Xf "$ROOT/scripts/wake-discovery.sh" "$WAKE_BIN"
 chmod 700 "$WAKE_BIN"
+if [[ "$STUMBLE_SOURCE" != "$STUMBLE_BIN" ]]; then
+  cp -Xf "$STUMBLE_SOURCE" "$STUMBLE_BIN"
+fi
+chmod 700 "$STUMBLE_BIN"
 LABEL_XML="$(escape_value "$LABEL")"
 WAKE_XML="$(escape_value "$WAKE_BIN")"
 DATA_DIR_XML="$(escape_value "${STUMBLE_DATA_DIR:-$HOME/.stumble/nodes/home}")"
-STUMBLE_XML="$(escape_value "${STUMBLE_CLI:-$ROOT/target/release/stumble}")"
+STUMBLE_XML="$(escape_value "$STUMBLE_BIN")"
 TOKEN_XML="$(escape_value "$STUMBLE_DISCOVERY_TOKEN")"
 HARNESS_XML="$(escape_value "${STUMBLE_DISCOVERY_HARNESS_COMMAND:-}")"
 EVENT_PATH_XML="$(escape_value "${STUMBLE_DISCOVERY_EVENT_PATH:-${STUMBLE_DATA_DIR:-$HOME/.stumble/nodes/home}/discovery-ready.json}")"
