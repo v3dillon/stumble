@@ -31,7 +31,7 @@ stumble-api --bind 0.0.0.0:8787          # keep running while friends sync
 stumble pod subscribe https://your-node.example/federation/pods/rust-craft
 stumble feed batch get
 stumble sync pod run rust-craft          # pulls new items from your node
-stumble pod skill install rust-craft     # loads the Pod's SKILL.md into ~/.claude/skills
+stumble pod skill install rust-craft     # loads the Pod's SKILL.md into ~/.agents/skills
 ```
 
 `pod publish` makes the Pod public (as the node owner you approve your own change; an agent harness gets a Pending Proposal for you to approve instead) and issues the discovery announcement when `--base-url` is given. Only history from the moment of publication federates — anything added and removed while the Pod was private stays on your node. The running server picks up `stumble add` and other CLI changes automatically, so you can keep curating while friends stay in sync.

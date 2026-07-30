@@ -132,7 +132,7 @@ pub(super) enum SkillWorkflow {
 #[derive(Args)]
 pub(super) struct SkillInstallArgs {
     pub(super) pod: String,
-    /// Skills directory to install into (default: ~/.claude/skills)
+    /// Skills directory to install into (default: ~/.agents/skills)
     #[arg(long, env = "STUMBLE_SKILLS_DIR", value_hint = ValueHint::DirPath)]
     pub(super) dir: Option<PathBuf>,
 }

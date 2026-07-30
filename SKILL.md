@@ -118,7 +118,7 @@ to work with. The sharer's node must be running `stumble-api` to be reachable.
 To make a Pod's guidance part of your own skill system, install it:
 
 ```bash
-stumble pod skill install <slug>              # writes ~/.claude/skills/stumble-<slug>/
+stumble pod skill install <slug>              # writes ~/.agents/skills/stumble-<slug>/
 stumble pod skill install <slug> --dir <dir>  # any agent-skills directory
 ```
 

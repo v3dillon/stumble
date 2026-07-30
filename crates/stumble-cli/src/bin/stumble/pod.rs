@@ -150,7 +150,7 @@ fn skill_install(args: &SkillInstallArgs, tools: &AgentTools, actor: &AuthContex
                     ExitStatusCategory::ValidationOrConflict,
                 )
             })?;
-            std::path::PathBuf::from(home).join(".claude/skills")
+            std::path::PathBuf::from(home).join(".agents/skills")
         }
     };
     // Folder name doubles as the skill's frontmatter name; keep it filesystem-
