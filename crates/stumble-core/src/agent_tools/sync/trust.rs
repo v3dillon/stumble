@@ -279,5 +279,4 @@ impl AgentTools {
             .cloned()
             .ok_or_else(|| StoreError::UntrustedPeer.into())
     }
-
 }

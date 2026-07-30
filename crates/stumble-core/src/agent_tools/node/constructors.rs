@@ -1,6 +1,6 @@
-use crate::store::read_store_generation;
 use super::super::prelude::*;
 use super::super::*;
+use crate::store::read_store_generation;
 
 impl AgentTools {
     pub fn new(store: InMemoryStore) -> Self {
@@ -16,11 +16,12 @@ impl AgentTools {
     pub fn new_sqlite_persistent(store: InMemoryStore, path: impl Into<PathBuf>) -> Self {
         let path: PathBuf = path.into();
         let generation = read_store_generation(&path).unwrap_or(0);
+        let baseline = store_records(&store).unwrap_or_default();
         Self {
-            store: Arc::new(RwLock::new(store.clone())),
+            store: Arc::new(RwLock::new(store)),
             persistence: Some(Persistence::Sqlite {
                 path: Arc::new(path),
-                baseline: Arc::new(Mutex::new(store)),
+                baseline: Arc::new(Mutex::new(baseline)),
                 generation: Arc::new(std::sync::atomic::AtomicI64::new(generation)),
             }),
             bootstrap: BootstrapCapability::default(),
@@ -118,22 +119,28 @@ impl AgentTools {
             }) => {
                 let mut baseline = baseline.lock().map_err(|_| AgentToolsError::LockPoisoned)?;
                 match persist_sqlite_store_changes(path, &baseline, store) {
-                    Ok(new_generation) => {
+                    Ok((new_generation, current_records)) => {
                         generation.store(new_generation, std::sync::atomic::Ordering::SeqCst);
+                        *baseline = current_records;
                     }
                     Err(error) => {
-                        let authoritative =
-                            load_sqlite_store(path).unwrap_or_else(|_| baseline.clone());
-                        generation.store(
-                            read_store_generation(path).unwrap_or(0),
-                            std::sync::atomic::Ordering::SeqCst,
-                        );
-                        *baseline = authoritative.clone();
-                        *store = authoritative;
+                        // Revert to the authoritative on-disk state; if even
+                        // that fails, rebuild the store from the baseline
+                        // records so the failed mutation never survives in
+                        // memory.
+                        if let Ok(authoritative) =
+                            load_sqlite_store(path).or_else(|_| store_from_records(&baseline))
+                        {
+                            generation.store(
+                                read_store_generation(path).unwrap_or(0),
+                                std::sync::atomic::Ordering::SeqCst,
+                            );
+                            *baseline = store_records(&authoritative).unwrap_or_default();
+                            *store = authoritative;
+                        }
                         return Err(error.into());
                     }
                 }
-                *baseline = store.clone();
             }
             None => {}
         }
@@ -166,7 +173,7 @@ impl AgentTools {
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         let mut baseline = baseline.lock().map_err(|_| AgentToolsError::LockPoisoned)?;
         let authoritative = load_sqlite_store(path)?;
-        *baseline = authoritative.clone();
+        *baseline = store_records(&authoritative)?;
         *store = authoritative;
         generation.store(disk_generation, std::sync::atomic::Ordering::SeqCst);
         Ok(true)
@@ -377,5 +384,4 @@ impl AgentTools {
             supported_protocol_version: CURRENT_PROTOCOL_VERSION.to_string(),
         })
     }
-
 }

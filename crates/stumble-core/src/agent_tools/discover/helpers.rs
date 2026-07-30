@@ -252,7 +252,10 @@ pub(crate) fn retained_or_local_explore_samples(
 }
 
 /// Whether retained Origin-signed explore samples verify for this announcement.
-pub(crate) fn retained_samples_verified(store: &InMemoryStore, announcement: &PodAnnouncement) -> bool {
+pub(crate) fn retained_samples_verified(
+    store: &InMemoryStore,
+    announcement: &PodAnnouncement,
+) -> bool {
     store
         .pod_explore_sample_sets
         .get(&announcement.id)
@@ -435,4 +438,3 @@ pub(crate) fn explore_content_samples(
         .map(feed_content_reference)
         .collect()
 }
-

@@ -212,7 +212,11 @@ pub(crate) fn score_pod_route(
     }
 }
 
-pub(crate) fn candidate_placement_is_visible(store: &InMemoryStore, ctx: &AuthContext, pod_id: PodId) -> bool {
+pub(crate) fn candidate_placement_is_visible(
+    store: &InMemoryStore,
+    ctx: &AuthContext,
+    pod_id: PodId,
+) -> bool {
     authorize_harness(
         store,
         ctx,
@@ -833,4 +837,3 @@ pub(crate) fn merge_source_metadata(
         retained.published_at = additional.published_at;
     }
 }
-

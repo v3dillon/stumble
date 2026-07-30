@@ -315,5 +315,4 @@ impl AgentTools {
             retained_withdrawals,
         })
     }
-
 }

@@ -699,5 +699,4 @@ impl AgentTools {
             taste_profile,
         })
     }
-
 }

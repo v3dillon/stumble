@@ -366,7 +366,10 @@ pub(crate) fn ensure_direct_package_revision_allowed_for_origin(
     Ok(())
 }
 
-pub(crate) fn package_contents_match(package: &PodSkillPack, contents: &PodPackageContents) -> bool {
+pub(crate) fn package_contents_match(
+    package: &PodSkillPack,
+    contents: &PodPackageContents,
+) -> bool {
     package.context_md == contents.context_md
         && package.skill_md == contents.skill_md
         && package.sources_yaml == contents.sources_yaml
@@ -436,7 +439,6 @@ pub(crate) fn validate_creation_package_locked(
         }
     }
 }
-
 
 #[derive(Clone, Copy)]
 pub(crate) enum PodCreationMode {
@@ -658,4 +660,3 @@ pub(crate) fn normalize_pod_ids(mut pod_ids: Vec<PodId>) -> Vec<PodId> {
 pub(crate) fn route_tokens(text: &str) -> Vec<String> {
     discovery_tokens(text)
 }
-

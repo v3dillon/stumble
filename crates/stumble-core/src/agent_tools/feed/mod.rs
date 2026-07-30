@@ -1,4 +1,4 @@
 mod batch;
-mod preferences;
 mod helpers;
+mod preferences;
 pub(crate) use helpers::*;

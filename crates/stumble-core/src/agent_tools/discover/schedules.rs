@@ -477,5 +477,4 @@ impl AgentTools {
         *store = staged;
         Ok(DiscoveryResultsReadyNotificationOutcome::ShouldNotify { event, batch })
     }
-
 }

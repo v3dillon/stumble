@@ -1,7 +1,6 @@
 use super::super::prelude::*;
 use super::super::*;
 
-
 pub(crate) struct FeedItemSelection {
     pub(crate) recurrence_penalty_applied: bool,
     pub(crate) attention_value: f32,
@@ -588,4 +587,3 @@ pub(crate) fn feed_feedback_state(
         }),
     }
 }
-

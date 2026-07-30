@@ -1,8 +1,8 @@
 use super::prelude::*;
 use super::{
-    apply_trust_policy_change, create_pod_lifecycle_locked, curation_actor,
-    feed_content_reference, normalize_pod_ids, origin_placement_identity, pod_roles_value,
-    visibility_exposure, AgentToolsError, PodCreationMode,
+    apply_trust_policy_change, create_pod_lifecycle_locked, curation_actor, feed_content_reference,
+    normalize_pod_ids, origin_placement_identity, pod_roles_value, visibility_exposure,
+    AgentToolsError, PodCreationMode,
 };
 
 /// Cryptographic server entropy used for production peer-advertisement sampling.
@@ -36,7 +36,10 @@ pub(crate) fn parse_public_url(value: &str, field: &str) -> Result<Url, AgentToo
     Ok(url)
 }
 
-pub(crate) fn validate_public_scheme_and_host(url: &Url, field: &str) -> Result<(), AgentToolsError> {
+pub(crate) fn validate_public_scheme_and_host(
+    url: &Url,
+    field: &str,
+) -> Result<(), AgentToolsError> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(StoreError::Validation(format!("{field} must use http or https")).into());
     }
@@ -228,7 +231,10 @@ pub(crate) fn record_harness_write_at(
     }
 }
 
-pub(crate) fn extend_unique<T: PartialEq>(retained: &mut Vec<T>, additional: impl IntoIterator<Item = T>) {
+pub(crate) fn extend_unique<T: PartialEq>(
+    retained: &mut Vec<T>,
+    additional: impl IntoIterator<Item = T>,
+) {
     for value in additional {
         if !retained.contains(&value) {
             retained.push(value);
@@ -236,7 +242,9 @@ pub(crate) fn extend_unique<T: PartialEq>(retained: &mut Vec<T>, additional: imp
     }
 }
 
-pub(crate) fn normalize_capabilities(mut capabilities: Vec<HarnessCapability>) -> Vec<HarnessCapability> {
+pub(crate) fn normalize_capabilities(
+    mut capabilities: Vec<HarnessCapability>,
+) -> Vec<HarnessCapability> {
     capabilities.sort();
     capabilities.dedup();
     capabilities
@@ -436,7 +444,9 @@ pub(crate) fn apply_expand_pod_visibility(
         .get_mut(pod_id)
         .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
     if visibility_exposure(visibility) <= visibility_exposure(&pod.visibility) {
-        return Err(StoreError::Validation("approved visibility must expand exposure".into()).into());
+        return Err(
+            StoreError::Validation("approved visibility must expand exposure".into()).into(),
+        );
     }
     pod.visibility = visibility.clone();
     let pod = pod.clone();
@@ -827,7 +837,10 @@ pub(crate) fn apply_sensitive_change(
     Ok(())
 }
 
-pub(crate) fn grant_scope_expands(current: &Option<Vec<PodId>>, requested: &Option<Vec<PodId>>) -> bool {
+pub(crate) fn grant_scope_expands(
+    current: &Option<Vec<PodId>>,
+    requested: &Option<Vec<PodId>>,
+) -> bool {
     match (current, requested) {
         (None, None) | (Some(_), None) => true,
         (Some(current), Some(requested)) => current.iter().all(|pod_id| requested.contains(pod_id)),
@@ -842,4 +855,3 @@ pub(crate) fn effective_user_id(ctx: &AuthContext, requested: Option<UserId>) ->
         requested.or(ctx.user_id)
     }
 }
-

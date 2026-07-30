@@ -72,8 +72,8 @@ pub(super) use crate::skill_pack::{
 };
 pub(super) use crate::store::{
     load_or_initialize_sqlite_store, load_sqlite_store, persist_sqlite_store_changes,
-    sqlite_home_node_is_initialized, FederatedContentItemKey, InMemoryStore, StoreError,
-    StorePersistenceError,
+    sqlite_home_node_is_initialized, store_from_records, store_records, FederatedContentItemKey,
+    InMemoryStore, StoreError, StorePersistenceError, StoreRecords,
 };
 pub(super) use chrono::{Duration, Utc};
 pub(super) use rand_core::{OsRng, RngCore};

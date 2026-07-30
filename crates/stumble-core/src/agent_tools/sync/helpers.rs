@@ -775,4 +775,3 @@ pub(crate) fn apply_trust_policy_change(
     }
     Ok(())
 }
-

@@ -77,9 +77,7 @@ impl AgentTools {
                     store
                         .known_pod_announcements
                         .get(&(node.id, pod.slug.clone()))
-                        .map(|known| {
-                            (pod.slug.clone(), known.announcement.public_pod_url.clone())
-                        })
+                        .map(|known| (pod.slug.clone(), known.announcement.public_pod_url.clone()))
                 })
                 .collect()
         };
@@ -312,5 +310,4 @@ impl AgentTools {
         self.persist_locked(&mut store)?;
         Ok(known)
     }
-
 }

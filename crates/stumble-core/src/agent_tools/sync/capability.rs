@@ -59,5 +59,4 @@ impl AgentTools {
             .map(|store| peer_service_is_enabled(&store))
             .unwrap_or(false)
     }
-
 }

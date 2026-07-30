@@ -358,5 +358,4 @@ impl AgentTools {
         drop(store);
         self.taste_profile(ctx)
     }
-
 }

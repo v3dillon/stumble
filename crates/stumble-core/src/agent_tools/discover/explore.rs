@@ -854,5 +854,4 @@ impl AgentTools {
             .collect();
         Ok(ExploreResponse { query, results })
     }
-
 }

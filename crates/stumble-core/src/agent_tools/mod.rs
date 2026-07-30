@@ -147,7 +147,9 @@ impl Default for IndexCapability {
 enum Persistence {
     Sqlite {
         path: Arc<PathBuf>,
-        baseline: Arc<Mutex<InMemoryStore>>,
+        /// Record snapshot from the last successful persist or load; the
+        /// change diff runs against this instead of a full store clone.
+        baseline: Arc<Mutex<StoreRecords>>,
         /// Last store generation this process observed on disk.
         generation: Arc<std::sync::atomic::AtomicI64>,
     },

@@ -347,5 +347,4 @@ impl AgentTools {
         let pack = self.get_skill_pack(ctx, pod_slug)?;
         Ok(validate_skill_pack(&pack))
     }
-
 }

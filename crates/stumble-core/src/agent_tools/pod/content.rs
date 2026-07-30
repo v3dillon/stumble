@@ -610,5 +610,4 @@ impl AgentTools {
         self.persist_locked(&mut store)?;
         Ok(source)
     }
-
 }

@@ -534,5 +534,4 @@ impl AgentTools {
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         authorize_taste_profile(&store, ctx)
     }
-
 }

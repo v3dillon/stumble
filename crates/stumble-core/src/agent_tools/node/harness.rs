@@ -274,5 +274,4 @@ impl AgentTools {
             .map_err(|_| AgentToolsError::LockPoisoned)?;
         authorize_harness(&store, ctx, capability, None)
     }
-
 }
