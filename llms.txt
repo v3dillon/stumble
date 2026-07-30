@@ -29,11 +29,16 @@ cargo install --path crates/stumble-cli --locked
 stumble node init
 ```
 
-Install the Stumble skill into your own skills directory so you know the full
-workflows from now on — copy the repository's root `SKILL.md` to
-`~/.agents/skills/stumble/SKILL.md` (or your harness's skills location) and
-load it. It covers saving links, reading the feed, discovery runs, sharing
-Pods, and the trust boundaries. Then connect the friend's network:
+Install the Stumble skill so you know the full workflows from now on:
+
+```bash
+npx skills add v3dillon/stumble
+```
+
+(`npx skills update` refreshes it later; if npx is unavailable, copy the
+repository's root `SKILL.md` to `~/.agents/skills/stumble/SKILL.md`.) It
+covers saving links, reading the feed, discovery runs, sharing Pods, and the
+trust boundaries. Then connect the friend's network:
 
 ```bash
 stumble sync bootstrap add --label friend --base-url $BOOTSTRAP_URL

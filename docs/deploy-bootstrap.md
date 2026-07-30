@@ -52,9 +52,16 @@ The node serves the onboarding script with its own URL pre-filled:
 https://bootstrap.example.com/llms.txt
 ```
 
-Send that link; a friend pastes it (or its contents) into their AI harness
-and the harness walks them through install, taste, and their first discovery
-run against your Bootstrap.
+A bare pasted URL usually gets you a fetch-and-summary, not action — and
+good harnesses are rightly wary of executing instructions fetched from the
+web without a human ask. So send it with one explicit line, e.g.:
+
+> Paste this to your AI and tell it: "follow the onboarding steps in
+> https://bootstrap.example.com/llms.txt"
+
+With that human instruction attached, the harness fetches the script and
+walks your friend through install, taste, and their first discovery run
+against your Bootstrap.
 
 ## Point nodes at it
 
