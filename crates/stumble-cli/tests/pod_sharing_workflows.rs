@@ -177,26 +177,14 @@ async fn publish_share_subscribe_and_origin_resync_deliver_the_package_and_conte
     ]);
     assert_eq!(reinstalled["package_version"], 1);
 
-    // Alice's own generated cover is served over federation for the public
-    // Pod; Bob's harness can fetch it when the source page has nothing usable.
-    let cover_url = format!("{base_url}/federation/pods/rust-craft/content/{essay_item_id}/cover");
-    let response = http_get(&cover_url).await;
-    assert!(
-        response.0.starts_with("HTTP/1.1 200"),
-        "{}\nbody: {}",
-        response.0,
-        String::from_utf8_lossy(&response.1)
-    );
-    assert_eq!(response.1, b"alice-generated-cover");
-    let missing = http_get(&format!(
-        "{base_url}/federation/pods/rust-craft/content/{}/cover",
-        uuid::Uuid::nil()
+    // Covers stay strictly local: no federation route serves image bytes.
+    let no_cover = http_get(&format!(
+        "{base_url}/federation/pods/rust-craft/content/{essay_item_id}/cover"
     ))
     .await;
-    assert!(missing.0.starts_with("HTTP/1.1 404"), "{}", missing.0);
+    assert!(no_cover.0.starts_with("HTTP/1.1 404"), "{}", no_cover.0);
 
-    // Bob's status output carries the origin URL his harness needs to build
-    // cover URLs later.
+    // Bob's status output still carries the origin URL for re-sync tooling.
     let status = bob.run(&["sync", "pod", "status", "rust-craft"]);
     assert_eq!(
         status["public_pod_url"].as_str().unwrap(),
