@@ -255,3 +255,25 @@ async fn subscribing_over_a_local_slug_collision_explains_the_conflict() {
     server.abort();
     let _ = server.await;
 }
+
+#[test]
+fn harnesses_cannot_install_pod_skills_for_themselves() {
+    let owner = Environment::new("skill-gate");
+    owner.run(&[
+        "pod", "create", "--name", "Gated", "--slug", "gated", "--visibility", "private",
+    ]);
+    let issued = owner.run(&[
+        "node", "harness", "register", "--label", "curator", "--kind", "interactive",
+        "--capability", "pod_curation", "--capability", "feed_read",
+    ]);
+    let credential = issued["credential"].as_str().unwrap();
+    let output = owner
+        .command()
+        .args(["pod", "skill", "install", "gated", "--dir", "/tmp/unused"])
+        .env("STUMBLE_HARNESS_CREDENTIAL", credential)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "owner_required");
+}

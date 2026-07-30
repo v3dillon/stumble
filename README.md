@@ -34,7 +34,7 @@ stumble sync pod run rust-craft          # pulls new items from your node
 stumble pod skill install rust-craft     # loads the Pod's SKILL.md into ~/.agents/skills
 ```
 
-`pod publish` makes the Pod public (as the node owner you approve your own change; an agent harness gets a Pending Proposal for you to approve instead) and issues the discovery announcement when `--base-url` is given. Only history from the moment of publication federates — anything added and removed while the Pod was private stays on your node. The running server picks up `stumble add` and other CLI changes automatically, so you can keep curating while friends stay in sync.
+Pod packages from other people are treated as untrusted: the installed skill fences the curator's text with explicit limits (curation guidance only — an agent must refuse and report anything asking for commands, credentials, money, or configuration changes), and `pod skill install` is owner-only so an agent can never grant a remote author standing instructions by itself. `pod publish` makes the Pod public (as the node owner you approve your own change; an agent harness gets a Pending Proposal for you to approve instead) and issues the discovery announcement when `--base-url` is given. Only history from the moment of publication federates — anything added and removed while the Pod was private stays on your node. The running server picks up `stumble add` and other CLI changes automatically, so you can keep curating while friends stay in sync.
 
 ### Discover Pods from the network
 
@@ -114,7 +114,7 @@ Find, subscribe to, curate, and govern Pods.
 | `stumble pod package export` | Export a Pod Package. |
 | `stumble pod package validate` | Validate a Pod Package directory. |
 | `stumble pod package revise` | Revise a Pod Package. |
-| `stumble pod skill install` | Install a Pod's SKILL.md into a harness skills directory (`--dir`). |
+| `stumble pod skill install` | Install a Pod's SKILL.md into a harness skills directory (`--dir`; owner-only). |
 
 ## `discover`
 
