@@ -45,7 +45,11 @@ stumble pod explore --query "distributed systems"   # ranked against your privat
 stumble pod subscribe <public_pod_url>              # from the explore result
 ```
 
-Pods can vouch for each other: `stumble pod endorse <slug> --from <your-pod> --reason "..."` signs a recommendation that travels through Bootstrap nodes and shows up as inspectable evidence in other users' local ranking — never as global reputation. Ranking happens entirely on your node — queries and taste never leave it. To help the network, run a Bootstrap or Index role: `stumble-api --bootstrap` (open announcement admission + streams) or `stumble-api --index` (public search over admitted announcements). Point your own node at an Index with `stumble sync discovery index add --label <name> --base-url <url>` — explore then fans explicit queries out to it and still ranks everything locally.
+Pods can vouch for each other: `stumble pod endorse <slug> --from <your-pod> --reason "..."` signs a recommendation that travels through Bootstrap nodes and shows up as inspectable evidence in other users' local ranking — never as global reputation. Ranking happens entirely on your node — queries and taste never leave it. To help the network, run a Bootstrap or Index role: `stumble-api --bootstrap` (open announcement admission + streams) or `stumble-api --index` (public search over admitted announcements). Deploying one on a VPS is one script — see [docs/deploy-bootstrap.md](docs/deploy-bootstrap.md):
+
+```bash
+sudo ./scripts/deploy-bootstrap-vps.sh bootstrap.example.com
+``` Point your own node at an Index with `stumble sync discovery index add --label <name> --base-url <url>` — explore then fans explicit queries out to it and still ranks everything locally.
 
 ### Use it from an AI harness
 
