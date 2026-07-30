@@ -931,6 +931,8 @@ const SQLITE_STORE_SCHEMA: &str =
     include_str!("../../../migrations/sqlite/0002_authoritative_store.sql");
 const SQLITE_DROP_LEGACY_HUB: &str =
     include_str!("../../../migrations/sqlite/0003_drop_legacy_hub.sql");
+const SQLITE_SEARCH_INDEX_SCHEMA: &str =
+    include_str!("../../../migrations/sqlite/0004_search_index.sql");
 const STORE_COLLECTIONS: &[&str] = &[
     "tenants",
     "users",
@@ -1107,14 +1109,25 @@ pub fn read_store_generation(database_path: &Path) -> Result<i64, StorePersisten
     Ok(generation.unwrap_or(0))
 }
 
-fn open_sqlite_store(path: &Path) -> Result<rusqlite::Connection, StorePersistenceError> {
+pub(crate) fn open_sqlite_store(
+    path: &Path,
+) -> Result<rusqlite::Connection, StorePersistenceError> {
     let connection = rusqlite::Connection::open(path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
+    apply_sqlite_schema(&connection)?;
+    Ok(connection)
+}
+
+/// Applies the full idempotent schema, including forward migrations, so every
+/// connection — file-backed or in-memory — sees the same database shape.
+pub(crate) fn apply_sqlite_schema(
+    connection: &rusqlite::Connection,
+) -> Result<(), rusqlite::Error> {
     connection.execute_batch(SQLITE_STORE_SCHEMA)?;
     // Forward migration: drop non-authoritative legacy Hub caches without
     // transforming their contents. Idempotent for new and existing databases.
     connection.execute_batch(SQLITE_DROP_LEGACY_HUB)?;
-    Ok(connection)
+    connection.execute_batch(SQLITE_SEARCH_INDEX_SCHEMA)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1741,10 +1754,8 @@ mod tests {
         let dir = temp_store_dir("sqlite-restart");
         let database_path = dir.join("stumble.sqlite3");
 
-        let first = load_or_initialize_sqlite_store(&database_path, || {
-            crate::seeds::seed_store()
-        })
-        .unwrap();
+        let first =
+            load_or_initialize_sqlite_store(&database_path, || crate::seeds::seed_store()).unwrap();
         let first_node_id = first
             .node_identities
             .values()
@@ -1752,8 +1763,7 @@ mod tests {
             .unwrap()
             .id;
         let restarted =
-            load_or_initialize_sqlite_store(&database_path, InMemoryStore::default)
-                .unwrap();
+            load_or_initialize_sqlite_store(&database_path, InMemoryStore::default).unwrap();
 
         assert!(database_path.exists());
         assert_eq!(
@@ -1774,8 +1784,7 @@ mod tests {
         let dir = temp_store_dir("sqlite-concurrent-writes");
         let database_path = dir.join("stumble.sqlite3");
         let first_store =
-            load_or_initialize_sqlite_store(&database_path, crate::seeds::seed_store)
-                .unwrap();
+            load_or_initialize_sqlite_store(&database_path, crate::seeds::seed_store).unwrap();
         let second_store = load_sqlite_store(&database_path).unwrap();
         let first = crate::AgentTools::new_sqlite_persistent(first_store, &database_path);
         let second = crate::AgentTools::new_sqlite_persistent(second_store, &database_path);
@@ -1831,8 +1840,7 @@ mod tests {
         let dir = temp_store_dir("sqlite-conflicting-writes");
         let database_path = dir.join("stumble.sqlite3");
         let first_store =
-            load_or_initialize_sqlite_store(&database_path, crate::seeds::seed_store)
-                .unwrap();
+            load_or_initialize_sqlite_store(&database_path, crate::seeds::seed_store).unwrap();
         let user_id = *first_store.users.keys().next().unwrap();
         let local_node_id = first_store.default_node().unwrap().id;
         let second_store = load_sqlite_store(&database_path).unwrap();
@@ -2076,7 +2084,6 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(dir);
     }
-
 
     #[test]
     fn refuses_a_populated_database_without_migration_metadata() {

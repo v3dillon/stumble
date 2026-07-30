@@ -104,6 +104,19 @@ fn dispatch(
             result["assets"] = serde_json::to_value(assets).map_err(internal_error)?;
             Ok(result)
         }
+        Some(Workflow::Search(args)) => {
+            let (_, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
+            let results = tools
+                .search_saved(
+                    &actor,
+                    stumble_core::SearchRequest {
+                        query: args.query,
+                        limit: args.limit,
+                    },
+                )
+                .map_err(agent_tools_error)?;
+            serde_json::to_value(results).map_err(internal_error)
+        }
         Some(Workflow::Node { command }) => {
             node_workflow::execute(command, selected_data_dir, owner_authority)
         }
@@ -143,9 +156,7 @@ fn open_home_node(
     }
     let tools = AgentTools::open_initialized_home_node(&data_dir)
         .map_err(agent_tools_error)?
-        .with_discovery_peer_probe(std::sync::Arc::new(
-            stumble_api::ReqwestDiscoveryPeerProbe,
-        ));
+        .with_discovery_peer_probe(std::sync::Arc::new(stumble_api::ReqwestDiscoveryPeerProbe));
     let actor = authenticate_actor(&tools, &data_dir, owner_authority)?;
     Ok((data_dir, tools, actor))
 }

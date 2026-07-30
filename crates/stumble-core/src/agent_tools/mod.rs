@@ -7,18 +7,20 @@ mod discover;
 mod feed;
 mod node;
 mod pod;
+mod search;
 mod sync;
 
 #[cfg(test)]
 mod tests;
 
-pub(crate) use shared::*;
 pub(crate) use discover::*;
 pub(crate) use feed::*;
 pub(crate) use pod::*;
-pub(crate) use sync::*;
+pub use search::{SearchHit, SearchRequest, SearchResults, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT};
 pub use shared::canonicalize_url;
+pub(crate) use shared::*;
 pub use sync::canonical_public_pod_url;
+pub(crate) use sync::*;
 
 use prelude::*;
 
@@ -98,7 +100,6 @@ pub enum AgentToolsError {
     },
 }
 
-
 pub(crate) const MAX_DISCOVERY_TASK_ATTEMPTS: usize = 3;
 pub(crate) const DEFAULT_PENDING_PROPOSAL_SECONDS: u64 = 3_600;
 
@@ -151,4 +152,3 @@ enum Persistence {
         generation: Arc<std::sync::atomic::AtomicI64>,
     },
 }
-

@@ -39,7 +39,7 @@ fn json(bytes: &[u8]) -> Value {
 }
 
 #[test]
-fn exposes_only_add_and_the_five_workflow_families() {
+fn exposes_only_add_search_and_the_five_workflow_families() {
     let output = stumble().arg("--help").output().expect("run stumble");
 
     assert!(output.status.success());
@@ -54,7 +54,10 @@ fn exposes_only_add_and_the_five_workflow_families() {
         .lines()
         .map(|line| line.split_whitespace().next().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(commands, ["add", "node", "pod", "discover", "feed", "sync"]);
+    assert_eq!(
+        commands,
+        ["add", "search", "node", "pod", "discover", "feed", "sync"]
+    );
     for retired in [
         "serve",
         "mcp",

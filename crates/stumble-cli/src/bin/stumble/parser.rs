@@ -26,6 +26,8 @@ pub(super) struct Cli {
 pub(super) enum Workflow {
     /// Add a shared link to a Pod and your Feed in one step
     Add(AddArgs),
+    /// Search everything saved on this node (titles, summaries, tags, notes, snapshots)
+    Search(SearchArgs),
     Node {
         #[command(subcommand)]
         command: NodeWorkflow,
@@ -500,6 +502,15 @@ pub(super) struct AddArgs {
     /// Where the snapshot text came from
     #[arg(long, value_enum, default_value_t = SnapshotSource::PageText, requires = "snapshot")]
     pub(super) snapshot_source: SnapshotSource,
+}
+
+#[derive(Args)]
+pub(super) struct SearchArgs {
+    /// What to look for; terms are BM25-ranked and combined with implicit AND
+    pub(super) query: String,
+    /// Maximum number of hits (1-50, default 10)
+    #[arg(long)]
+    pub(super) limit: Option<usize>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]

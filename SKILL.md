@@ -166,6 +166,25 @@ stumble feed batch complete <batch_id>
 Don't fetch another batch unless the user asks — "caught up" is a feature, not
 an empty state.
 
+## Searching the collection
+
+`stumble search` is BM25 full-text search over everything saved on the node —
+titles, URLs, summaries, tags, notes, and archived Readable Snapshot text.
+Reach for it whenever the user half-remembers something ("that article about
+attention I saved a while back"), and as your own recall: before researching a
+topic, check whether the user already collected something relevant and
+reference it.
+
+```bash
+stumble search "attention economics"            # top 10 hits, ranked
+stumble search "backpressure" --limit 5
+```
+
+Hits come back ranked with the item's `url`, its `pods`, and a `snippet` of
+the matched passage (matches wrapped in brackets). The index is local, derived
+from the store, and rebuilds itself automatically — nothing to maintain.
+Terms are combined with AND, so fewer words cast a wider net.
+
 ## Pods
 
 Pods are themed collections the user can curate and (later) share.
