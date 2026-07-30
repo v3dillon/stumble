@@ -1283,86 +1283,70 @@ async fn browser_candidates_remain_in_result_batches_not_feed() {
             authorization: format!("Bearer {}", issued.token.expose()),
         }
     };
-    let app = router(home.clone());
+    // The Personal Discovery workflow is a Harness surface (CLI/MCP); drive it
+    // in-process while the HTTP app stays network-only.
+    let created = home
+        .request_personal_discovery(
+            &manager.ctx,
+            serde_json::from_value(json!({
+                "idempotency_key": "sponsored-browser",
+                "result_count": 4
+            }))
+            .unwrap(),
+            Utc::now(),
+        )
+        .unwrap();
+    let task_id = created.task.id;
 
-    let (status, created) = http_json(
-        &app,
-        "POST",
-        "/personal-discovery",
-        Some(&manager.authorization),
-        Some(json!({"idempotency_key": "sponsored-browser", "result_count": 4})),
+    home.claim_discovery_task(
+        &worker.ctx,
+        task_id,
+        Utc::now(),
+        DiscoveryLeaseSeconds::new(300).unwrap(),
     )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let task_id = created["task"]["id"].as_str().unwrap().to_string();
+    .unwrap();
 
-    let (status, _) = http_json(
-        &app,
-        "POST",
-        &format!("/discovery-tasks/{task_id}/claim"),
-        Some(&worker.authorization),
-        Some(json!({"lease_seconds": 300})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
+    let submitted = home
+        .submit_candidate(
+            &worker.ctx,
+            serde_json::from_value(json!({
+                "source_url": "https://browser.example/unreviewed-find",
+                "target": {
+                    "kind": "personal_discovery",
+                    "task_id": task_id,
+                    "allocation_role": "proven"
+                },
+                "source_metadata": { "title": "Unreviewed browser find" },
+                "content_type": "article",
+                "tags": ["browser"],
+                "provenance": {
+                    "discovered_at": "2026-11-01T12:00:00Z",
+                    "discovery_method": "browser_search"
+                },
+                "harness_idempotency_key": "browser-worker-1",
+                "client_idempotency_key": "browser-client-1"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let submission_id = submitted.submission.id;
 
-    let (status, submitted) = http_json(
-        &app,
-        "POST",
-        "/candidates",
-        Some(&worker.authorization),
-        Some(json!({
-            "source_url": "https://browser.example/unreviewed-find",
-            "target": {
-                "kind": "personal_discovery",
+    let batch = home
+        .complete_discovery_result_batch(
+            &worker.ctx,
+            serde_json::from_value(json!({
                 "task_id": task_id,
-                "allocation_role": "proven"
-            },
-            "source_metadata": { "title": "Unreviewed browser find" },
-            "content_type": "article",
-            "tags": ["browser"],
-            "provenance": {
-                "discovered_at": "2026-11-01T12:00:00Z",
-                "discovery_method": "browser_search"
-            },
-            "harness_idempotency_key": "browser-worker-1",
-            "client_idempotency_key": "browser-client-1"
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "submit: {submitted}");
-    let submission_id = submitted["submission"]["id"].as_str().unwrap().to_string();
-
-    let (status, batch) = http_json(
-        &app,
-        "POST",
-        "/discovery-result-batches",
-        Some(&worker.authorization),
-        Some(json!({
-            "task_id": task_id,
-            "submission_ids": [submission_id]
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "batch: {batch}");
-    assert_eq!(batch["state"], "ready");
-    let batch_id = batch["id"].as_str().unwrap().to_string();
+                "submission_ids": [submission_id]
+            }))
+            .unwrap(),
+            Utc::now(),
+        )
+        .unwrap();
+    let batch_id = batch.id;
 
     // Candidate lives in the Discovery Result Batch.
-    let (status, listed) = http_json(
-        &app,
-        "GET",
-        "/discovery-result-batches",
-        Some(&manager.authorization),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(listed
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|b| b["id"] == batch_id));
+    let listed = home.list_discovery_result_batches(&manager.ctx).unwrap();
+    assert!(listed.iter().any(|batch| batch.id == batch_id));
 
     // Feed must not surface the unreviewed browser Candidate without explicit User action.
     let feed = home

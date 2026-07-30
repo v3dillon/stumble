@@ -1,7 +1,7 @@
 use axum::{body::Body, http::Request};
 use serde_json::{json, Value};
 use std::process::Command;
-use stumble_api::{router, router_with_options, RouterOptions};
+use stumble_api::{router_with_options, RouterOptions};
 use stumble_core::*;
 use stumble_mcp::{McpToolCall, McpToolRouter};
 use tower::ServiceExt;
@@ -93,7 +93,7 @@ fn accepted_item(tools: &AgentTools, ctx: &AuthContext) -> (PodId, ContentItemId
 }
 
 #[tokio::test]
-async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
+async fn mcp_and_cli_return_the_same_stable_feed_batch() {
     let data_dir = TestDataDir::new();
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
     let issued = tools
@@ -192,32 +192,6 @@ async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
         mcp_batch["items"][0]["allowed_actions"]
     );
 
-    let response = router(tools)
-        .oneshot(
-            Request::get("/feed?high_value_percent=70&exploration_percent=20&old_gem_percent=10&per_pod_cap=4&per_source_cap=3&focus=adapters&avoid=politics")
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let status = response.status();
-    let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    assert_eq!(
-        status,
-        axum::http::StatusCode::OK,
-        "{}",
-        String::from_utf8_lossy(&response_body)
-    );
-    let http_batch: Value = serde_json::from_slice(&response_body).unwrap();
-    assert_eq!(http_batch["id"], cli_batch["id"]);
-    assert_eq!(http_batch["state"], cli_batch["state"]);
-    assert_eq!(
-        http_batch["items"][0]["content_reference"]["content_item_id"],
-        cli_batch["items"][0]["content_reference"]["content_item_id"]
-    );
     assert_eq!(cli_batch["feed_mix"]["high_value_percent"], 70);
     assert_eq!(
         cli_batch["batch_intent"]["focus_topics"],
@@ -250,17 +224,10 @@ async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
     tools
         .set_priority_subscription(&actor, pod_id, false)
         .unwrap();
-    let response = router(tools)
-        .oneshot(
-            Request::post(format!("/subscriptions/{pod_id}/priority"))
-                .header("authorization", format!("Bearer {token}"))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"is_priority":true}"#))
-                .unwrap(),
-        )
-        .await
+    tools
+        .set_priority_subscription(&actor, pod_id, true)
         .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
+    drop(tools);
 
     let content_item_id = content_item_id.to_string();
     let cli_feedback = Command::new(env!("CARGO_BIN_EXE_stumble"))
@@ -297,28 +264,10 @@ async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
     assert_eq!(cli_feedback["content_item_id"], content_item_id);
     assert!(cli_feedback["allowed_actions"].is_array());
 
-    let response = router(tools)
-        .oneshot(
-            Request::post(format!("/feed/items/{content_item_id}/feedback"))
-                .header("authorization", format!("Bearer {token}"))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"kind":"more_like_this"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
-    let http_feedback: Value = serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(http_feedback, cli_feedback["feedback_state"]);
 }
 
 #[tokio::test]
-async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
+async fn mcp_and_cli_inspect_the_same_private_taste_profile() {
     let data_dir = TestDataDir::new();
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
     let issued = tools
@@ -368,28 +317,6 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
     let cli_update = cli_update["data"].clone();
 
     assert_eq!(cli_update["allowed_actions"], json!(["set", "reset"]));
-    let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
-    let response = router(tools.clone())
-        .oneshot(
-            Request::patch("/taste-profile")
-                .header("authorization", format!("Bearer {token}"))
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"interests":["systems"],"blocked_source_affinities":[{"kind":"publisher","value":"Systems Weekly"}],"recurrence_penalty_days":21}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let http_update: Value = serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(http_update["user_id"], cli_update["user_id"]);
-    assert_eq!(http_update["explicit"], cli_update["explicit"]);
-    drop(tools);
 
     let cli = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args([
@@ -424,26 +351,6 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
     assert_eq!(mcp_profile["learned"], cli_profile["learned"]);
     assert_eq!(cli_profile["allowed_actions"], json!(["set", "reset"]));
 
-    let response = router(tools)
-        .oneshot(
-            Request::get("/taste-profile")
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
-    let http_profile: Value = serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(http_profile["user_id"], cli_profile["user_id"]);
-    assert_eq!(http_profile["explicit"], cli_profile["explicit"]);
-    assert_eq!(http_profile["learned"], cli_profile["learned"]);
-
     let cli_reset = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args([
             "--data-dir",
@@ -460,25 +367,6 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
     assert_eq!(cli_reset["version"], 2);
     let cli_reset = cli_reset["data"].clone();
     assert_eq!(cli_reset["allowed_actions"], json!(["set", "reset"]));
-    let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
-    let response = router(tools)
-        .oneshot(
-            Request::post("/taste-profile/learned/reset")
-                .header("authorization", format!("Bearer {token}"))
-                .header("content-type", "application/json")
-                .body(Body::from("{}"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let http_reset: Value = serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(http_reset["user_id"], cli_reset["user_id"]);
-    assert_eq!(http_reset["learned"], cli_reset["learned"]);
 }
 
 #[tokio::test]
@@ -552,7 +440,6 @@ async fn unauthenticated_public_http_responses_never_expose_taste_profile_data()
             tools.clone(),
             "https://public.example",
             RouterOptions {
-                dev_tokens_allowed: false,
                 owner_access_allowed: false,
             },
         )
@@ -578,13 +465,7 @@ async fn unauthenticated_public_http_responses_never_expose_taste_profile_data()
         "/taste-profile/interest-seeds/{}/retract",
         private_candidate.candidate.id
     );
-    for (method, path) in [
-        ("GET", "/taste-profile"),
-        ("PATCH", "/taste-profile"),
-        ("POST", "/taste-profile/learned/reset"),
-        ("POST", retraction_path.as_str()),
-        ("GET", "/home/discover-public-pods?topics=design"),
-    ] {
+    for (method, path) in [("GET", "/home/discover-public-pods?topics=design")] {
         let request = Request::builder()
             .method(method)
             .uri(path)
@@ -594,13 +475,18 @@ async fn unauthenticated_public_http_responses_never_expose_taste_profile_data()
         let response = public_router().oneshot(request).await.unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
     }
-    // Retired Hub and hub-era discovery routes are absent (no redirect/alias).
+    // Retired Hub routes and the removed private User surface are absent (no redirect/alias).
     for (method, path) in [
         ("GET", "/hub/search-pods?q=design"),
         ("POST", "/hub/register-node"),
         ("POST", "/hub/register-pod"),
         ("POST", "/hub/refresh"),
         ("GET", "/discovery/pods?q=design"),
+        ("GET", "/taste-profile"),
+        ("PATCH", "/taste-profile"),
+        ("POST", "/taste-profile/learned/reset"),
+        ("POST", retraction_path.as_str()),
+        ("GET", "/feed"),
     ] {
         let request = Request::builder()
             .method(method)

@@ -34,15 +34,21 @@ async fn first_release_catalogs_do_not_advertise_retired_or_placeholder_operatio
         );
     }
     for canonical in [
-        "/candidates",
-        "/taste-profile/interest-seeds/:candidate_id/retract",
-        "/discovery-tasks/:id/claim",
-        "/pods/:slug/package/export",
         "/federation/pods/:slug/events",
+        "/federation/sync/:peer_id/:pod_slug",
+        "/bootstrap/announcements/stream",
+        "/discovery/peer/announcements/stream",
     ] {
         assert!(
             serialized_routes.contains(canonical),
             "{canonical} was missing"
+        );
+    }
+    // The private User and Harness surface lives in the CLI and MCP, not HTTP.
+    for user_surface in ["/feed", "/candidates", "/taste-profile", "/pods/:slug/package"] {
+        assert!(
+            !serialized_routes.contains(user_surface),
+            "{user_surface} was advertised on the network API"
         );
     }
     for retired in [
@@ -90,11 +96,7 @@ async fn retired_crawler_contract_remains_versioned_only_on_compatible_transport
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::GONE);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let http_error: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
 
     let cli = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args(["crawl", "beautiful-interfaces"])
@@ -103,15 +105,11 @@ async fn retired_crawler_contract_remains_versioned_only_on_compatible_transport
     assert!(!cli.status.success());
     let cli_error: Value = serde_json::from_slice(&cli.stderr).unwrap();
 
-    assert_eq!(http_error, mcp_error);
     assert_eq!(cli_error["version"], 2);
     assert_eq!(cli_error["error"]["code"], "usage_error");
-    assert_eq!(http_error["code"], "legacy_contract_retired");
-    assert_eq!(http_error["protocol_version"], CURRENT_PROTOCOL_VERSION);
-    assert_eq!(
-        http_error["replacement"],
-        "discovery_tasks+submit_candidate"
-    );
+    assert_eq!(mcp_error["code"], "legacy_contract_retired");
+    assert_eq!(mcp_error["protocol_version"], CURRENT_PROTOCOL_VERSION);
+    assert_eq!(mcp_error["replacement"], "discovery_tasks+submit_candidate");
 }
 
 #[tokio::test]
@@ -137,18 +135,13 @@ async fn retired_submission_and_feedback_errors_are_transport_equivalent() {
         )
         .await
         .unwrap();
-    let http_submission: Value = serde_json::from_slice(
-        &axum::body::to_bytes(http_submission.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    assert_eq!(http_submission.status(), axum::http::StatusCode::NOT_FOUND);
     let cli_submission = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args(["submit", "--pod", "example", "--url", "https://example.com"])
         .output()
         .unwrap();
     let cli_submission: Value = serde_json::from_slice(&cli_submission.stderr).unwrap();
-    assert_eq!(http_submission, mcp_submission);
+    assert_eq!(mcp_submission["code"], "legacy_contract_retired");
     assert_eq!(cli_submission["version"], 2);
     assert_eq!(cli_submission["error"]["code"], "usage_error");
 
@@ -169,18 +162,13 @@ async fn retired_submission_and_feedback_errors_are_transport_equivalent() {
         )
         .await
         .unwrap();
-    let http_feedback: Value = serde_json::from_slice(
-        &axum::body::to_bytes(http_feedback.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    assert_eq!(http_feedback.status(), axum::http::StatusCode::NOT_FOUND);
     let cli_feedback = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args(["block-source", "example.com"])
         .output()
         .unwrap();
     let cli_feedback: Value = serde_json::from_slice(&cli_feedback.stderr).unwrap();
-    assert_eq!(http_feedback, mcp_feedback);
+    assert_eq!(mcp_feedback["code"], "legacy_contract_retired");
     assert_eq!(cli_feedback["version"], 2);
     assert_eq!(cli_feedback["error"]["code"], "usage_error");
 }

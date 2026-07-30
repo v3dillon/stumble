@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, get, patch, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -16,14 +16,12 @@ use uuid::Uuid;
 pub struct ApiState {
     pub tools: AgentTools,
     pub base_url: String,
-    pub dev_tokens_allowed: bool,
     /// Whether missing bearer tokens may use the loopback owner context.
     pub owner_access_allowed: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct RouterOptions {
-    pub dev_tokens_allowed: bool,
     /// Whether missing bearer tokens may use the loopback owner context.
     pub owner_access_allowed: bool,
 }
@@ -31,7 +29,6 @@ pub struct RouterOptions {
 impl Default for RouterOptions {
     fn default() -> Self {
         Self {
-            dev_tokens_allowed: true,
             owner_access_allowed: true,
         }
     }
@@ -179,87 +176,12 @@ pub fn router_with_options(
     let state = ApiState {
         tools,
         base_url: base_url.into(),
-        dev_tokens_allowed: options.dev_tokens_allowed,
         owner_access_allowed: options.owner_access_allowed,
     };
     Router::new()
         .route("/health", get(health))
         .route("/.well-known/stumble-node", get(well_known_node))
         .route("/openapi-lite", get(openapi_lite))
-        .route("/route-link", post(retired_submission_contract))
-        .route("/intake-link", post(retired_submission_contract))
-        .route("/pods", get(list_pods).post(create_pod))
-        .route("/pod-packages", post(create_private_pod_with_package))
-        .route("/pods/:slug/join", post(join_pod))
-        .route("/pods/:slug/submit", post(retired_submission_contract))
-        .route("/pods/:slug/intake-link", post(retired_submission_contract))
-        .route(
-            "/pods/:slug/submissions/:id",
-            delete(retired_submission_contract),
-        )
-        .route(
-            "/pods/:slug/package",
-            get(get_skill_pack).patch(patch_skill_pack_handler),
-        )
-        .route(
-            "/pods/:slug/package/export",
-            post(export_skill_pack_handler),
-        )
-        .route(
-            "/pods/:slug/package/import",
-            post(import_skill_pack_handler),
-        )
-        .route("/pods/:slug/package/fork", post(fork_skill_pack_handler))
-        .route(
-            "/pods/:slug/package/validate",
-            post(validate_skill_pack_handler),
-        )
-        .route(
-            "/pods/:slug/skill-pack",
-            get(retired_package_contract).patch(retired_package_contract),
-        )
-        .route(
-            "/pods/:slug/skill-pack/export",
-            post(retired_package_contract),
-        )
-        .route(
-            "/pods/:slug/skill-pack/import",
-            post(retired_package_contract),
-        )
-        .route(
-            "/pods/:slug/skill-pack/fork",
-            post(retired_package_contract),
-        )
-        .route(
-            "/pods/:slug/skill-pack/validate",
-            post(retired_package_contract),
-        )
-        .route("/pods/:slug/sources", post(retired_crawler_contract))
-        .route("/pods/:slug/crawl", post(retired_crawler_contract))
-        .route("/pods/:slug/discover", post(retired_presentation_contract))
-        .route("/pods/:slug/stumble", post(retired_presentation_contract))
-        .route("/briefs", get(retired_presentation_contract))
-        .route("/briefs/generate", post(retired_presentation_contract))
-        .route("/feed", get(get_feed_batch))
-        .route("/feed/:id/complete", post(complete_feed_batch))
-        .route("/feed/items/:id/feedback", post(record_feed_feedback))
-        .route(
-            "/subscriptions/:pod_id/priority",
-            post(set_priority_subscription),
-        )
-        .route(
-            "/taste-profile",
-            get(get_taste_profile).patch(update_taste_profile),
-        )
-        .route("/taste-profile/learned/reset", post(reset_learned_taste))
-        .route(
-            "/taste-profile/interest-seeds/:candidate_id/retract",
-            post(retract_interest_seed),
-        )
-        .route("/links/:id/assets", get(retired_submission_contract))
-        .route("/links/:id/save", post(retired_feedback_contract))
-        .route("/links/:id/rate", post(retired_feedback_contract))
-        .route("/me/preferences", patch(update_preferences))
         .route(
             "/discovery/announcements",
             post(index_pod_announcement).get(search_pod_announcements),
@@ -326,91 +248,6 @@ pub fn router_with_options(
         .route("/home/bootstrap/status", get(bootstrap_status))
         .route("/home/bootstrap/sync", post(sync_bootstrap_endpoints))
         .route("/home/discover-public-pods", get(home_discover_public_pods))
-        .route("/auth/dev-token", post(dev_token))
-        .route("/me", get(me))
-        .route("/tenants", get(list_tenants).post(create_tenant))
-        .route("/api-tokens", post(create_api_token))
-        .route("/api-tokens/:id", delete(retired_api_token_contract))
-        .route("/harnesses", post(register_agent_harness))
-        .route("/harnesses/:id", delete(revoke_agent_harness))
-        .route("/pending-proposals", post(create_pending_proposal))
-        .route("/pending-proposals/:id", get(get_pending_proposal))
-        .route(
-            "/pending-proposals/:id/approve",
-            post(approve_pending_proposal),
-        )
-        .route(
-            "/pending-proposals/:id/reject",
-            post(reject_pending_proposal),
-        )
-        .route("/candidates", post(submit_candidate))
-        .route("/candidates/:id", get(inspect_candidate))
-        .route(
-            "/discovery-tasks",
-            get(list_discovery_tasks).post(materialize_discovery_tasks),
-        )
-        .route(
-            "/discovery-tasks/immediate",
-            post(create_immediate_discovery_task),
-        )
-        .route(
-            "/personal-discovery/readiness",
-            get(personal_discovery_readiness),
-        )
-        .route("/personal-discovery", post(request_personal_discovery))
-        .route(
-            "/personal-discovery/schedules",
-            get(list_personal_discovery_schedules).post(create_personal_discovery_schedule),
-        )
-        .route(
-            "/personal-discovery/schedules/:id",
-            get(personal_discovery_schedule)
-                .patch(update_personal_discovery_schedule)
-                .delete(remove_personal_discovery_schedule),
-        )
-        .route(
-            "/personal-discovery/schedules/:id/disable",
-            post(disable_personal_discovery_schedule),
-        )
-        .route(
-            "/discovery-result-batches/:id/notify",
-            post(attempt_discovery_results_ready_notification),
-        )
-        .route(
-            "/discovery-result-batches",
-            get(list_discovery_result_batches).post(complete_discovery_result_batch),
-        )
-        .route(
-            "/discovery-tasks/:id/source-availability",
-            get(discovery_task_source_availability).post(report_discovery_source_availability),
-        )
-        .route(
-            "/personal-discovery/authentication-needed-notices",
-            get(list_authentication_needed_notices),
-        )
-        .route("/discovery-result-batches/:id", get(discovery_result_batch))
-        .route(
-            "/discovery-result-batches/:id/dismiss",
-            post(dismiss_discovery_result_batch),
-        )
-        .route(
-            "/discovery-result-batches/:id/reviewed",
-            post(mark_discovery_result_batch_reviewed),
-        )
-        .route(
-            "/discovery-result-batches/:id/items/:candidate_id/review",
-            post(review_discovery_result_item),
-        )
-        .route("/discovery-plans/:id", get(discovery_plan))
-        .route("/discovery-tasks/ready", get(list_ready_discovery_tasks))
-        .route("/discovery-tasks/:id", get(discovery_task_status))
-        .route("/discovery-tasks/:id/claim", post(claim_discovery_task))
-        .route("/discovery-tasks/:id/renew", post(renew_discovery_task))
-        .route(
-            "/discovery-tasks/:id/complete",
-            post(complete_discovery_task),
-        )
-        .route("/discovery-tasks/:id/fail", post(fail_discovery_task))
         .route("/federation/node", get(federation_node))
         .route("/federation/pods", get(federation_pods))
         .route("/federation/pods/:slug/manifest", get(federation_manifest))
@@ -422,17 +259,9 @@ pub fn router_with_options(
             "/federation/sync/:peer_id/:pod_slug",
             post(federation_sync_pod),
         )
-        .route(
-            "/federation/sync/:peer_id",
-            post(retired_peer_sync_contract),
-        )
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
-}
-
-pub fn dev_tokens_allowed_for_bind(bind: SocketAddr, explicit_allow: bool) -> bool {
-    explicit_allow || bind.ip().is_loopback()
 }
 
 pub fn bind_with_port(bind: SocketAddr, port: Option<u16>) -> SocketAddr {
@@ -451,146 +280,6 @@ fn route_docs() -> Vec<ApiRouteDoc> {
             method: "GET",
             path: "/.well-known/stumble-node",
             description: "custom Stumble node metadata and endpoint discovery",
-        },
-        ApiRouteDoc {
-            method: "GET",
-            path: "/pods",
-            description: "list local or hosted pods visible to the auth context",
-        },
-        ApiRouteDoc {
-            method: "GET",
-            path: "/feed",
-            description: "retrieve the current stable finite Feed Batch",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/feed/:id/complete",
-            description: "complete a Feed Batch before deliberately requesting another",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/feed/items/:id/feedback",
-            description: "record a private explicit Feedback Signal for a Feed item",
-        },
-        ApiRouteDoc {
-            method: "GET",
-            path: "/taste-profile",
-            description: "inspect the authenticated User's private Taste Profile",
-        },
-        ApiRouteDoc {
-            method: "PATCH",
-            path: "/taste-profile",
-            description: "edit explicit private Taste Profile preferences",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/taste-profile/learned/reset",
-            description: "reset one or all private learned Taste Profile weights",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/taste-profile/interest-seeds/:candidate_id/retract",
-            description: "retract one private Interest Seed without deleting its reference",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/pods",
-            description: "create a pod and default skill pack",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/candidates",
-            description: "submit an authenticated provenance-bearing Candidate",
-        },
-        ApiRouteDoc {
-            method: "GET",
-            path: "/pods/:slug/package",
-            description: "read the current versioned Pod Package",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/pods/:slug/package/validate",
-            description: "validate the current Pod Package",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/pods/:slug/package/export",
-            description: "export a portable Pod Package",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/pods/:slug/package/import",
-            description: "import a validated portable Pod Package",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/pods/:slug/package/fork",
-            description: "fork a Pod Package into a new Pod",
-        },
-        ApiRouteDoc {
-            method: "GET",
-            path: "/discovery-tasks",
-            description: "list visible Discovery Tasks",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/discovery-tasks",
-            description: "materialize due Discovery Tasks",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/discovery-tasks/immediate",
-            description: "create conversational discovery through the task contract",
-        },
-        ApiRouteDoc {
-            method: "GET",
-            path: "/discovery-tasks/ready",
-            description: "list claimable Discovery Tasks",
-        },
-        ApiRouteDoc {
-            method: "GET",
-            path: "/personal-discovery/readiness",
-            description: "inspect whether private User evidence can support Personal Discovery",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/personal-discovery",
-            description: "request an immutable private Discovery Plan and User-scoped task",
-        },
-        ApiRouteDoc {
-            method: "GET",
-            path: "/discovery-plans/:id",
-            description: "read an authorized minimized Discovery Plan",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/discovery-tasks/:id/claim",
-            description: "claim a Discovery Task lease",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/discovery-tasks/:id/renew",
-            description: "renew a Discovery Task lease",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/discovery-tasks/:id/complete",
-            description: "complete a Discovery Task",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/discovery-tasks/:id/fail",
-            description: "record a failed Discovery Task attempt",
-        },
-        ApiRouteDoc {
-            method: "GET",
-            path: "/candidates/:id",
-            description: "inspect a private Candidate and its independent evidence",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/auth/dev-token",
-            description: "hosted-mode simple token issue endpoint",
         },
         ApiRouteDoc {
             method: "GET",
@@ -641,6 +330,31 @@ fn route_docs() -> Vec<ApiRouteDoc> {
             method: "DELETE",
             path: "/home/discovery-peer",
             description: "disable Discovery Peer serving without affecting outbound discovery",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/bootstrap/announcements",
+            description: "open Bootstrap admission of a signed public Pod Announcement",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/bootstrap/announcements/stream",
+            description: "cursor-paginated Announcement Stream of Bootstrap-admitted public Pods",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/bootstrap/withdrawals",
+            description: "open Bootstrap admission of an Origin-signed Pod Withdrawal",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/federation/pods",
+            description: "list this Origin Node's public Pods",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/federation/pods/:slug/manifest",
+            description: "public Pod manifest with latest event hash and package version",
         },
         ApiRouteDoc {
             method: "POST",
@@ -756,671 +470,6 @@ async fn well_known_node(
     Ok(Json(state.tools.well_known_node(&ctx, &state.base_url)?))
 }
 
-async fn list_pods(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<Pod>>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.list_pods_for_harness(&ctx)?))
-}
-
-async fn create_pod(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<CreatePodRequest>,
-) -> Result<Json<CreatePodOutcome>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.request_create_pod(
-        &ctx,
-        request,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn create_private_pod_with_package(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<CreatePrivatePodWithPackageRequest>,
-) -> Result<Json<CreatedPodPackage>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(
-        state.tools.create_private_pod_with_package(&ctx, request)?,
-    ))
-}
-
-async fn join_pod(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(slug): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    state.tools.join_pod(&ctx, &slug)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn get_skill_pack(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(slug): Path<String>,
-) -> Result<Json<PodSkillPack>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.get_skill_pack(&ctx, &slug)?))
-}
-
-async fn patch_skill_pack_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(slug): Path<String>,
-    Json(patch): Json<SkillPackPatch>,
-) -> Result<Json<PodSkillPack>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.patch_skill_pack(&ctx, &slug, patch)?))
-}
-
-async fn export_skill_pack_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(slug): Path<String>,
-) -> Result<Json<ExportedSkillPack>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.export_skill_pack(&ctx, &slug)?))
-}
-
-async fn import_skill_pack_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(slug): Path<String>,
-    Json(files): Json<std::collections::BTreeMap<String, String>>,
-) -> Result<Json<PodSkillPack>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.import_skill_pack(&ctx, &slug, files)?))
-}
-
-async fn fork_skill_pack_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(slug): Path<String>,
-    Json(request): Json<CreatePodRequest>,
-) -> Result<Json<PodSkillPack>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.fork_skill_pack(&ctx, &slug, request)?))
-}
-
-async fn validate_skill_pack_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(slug): Path<String>,
-) -> Result<Json<ValidationReport>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.validate_pod_skill_pack(&ctx, &slug)?))
-}
-
-#[derive(Debug, Deserialize)]
-struct DiscoveryTaskLeaseRequest {
-    lease_seconds: DiscoveryLeaseSeconds,
-}
-
-#[derive(Debug, Deserialize)]
-struct FailDiscoveryTaskRequest {
-    reason: String,
-}
-
-async fn materialize_discovery_tasks(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<DiscoveryTask>>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.materialize_due_discovery_tasks(
-        &ctx,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn list_discovery_tasks(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<DiscoveryTask>>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(
-        state.tools.list_discovery_tasks(&ctx, chrono::Utc::now())?,
-    ))
-}
-
-async fn list_ready_discovery_tasks(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<DiscoveryTask>>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(
-        state
-            .tools
-            .list_ready_discovery_tasks(&ctx, chrono::Utc::now())?,
-    ))
-}
-
-async fn create_immediate_discovery_task(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<CreateImmediateDiscoveryTaskRequest>,
-) -> Result<Json<DiscoveryTask>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.create_immediate_discovery_task(
-        &ctx,
-        request,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn personal_discovery_readiness(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<PersonalDiscoveryReadiness>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.personal_discovery_readiness(&ctx)?))
-}
-
-async fn request_personal_discovery(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<RequestPersonalDiscovery>,
-) -> Result<Json<RequestedPersonalDiscovery>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.request_personal_discovery(
-        &ctx,
-        request,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn list_personal_discovery_schedules(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<PersonalDiscoveryScheduleStatus>>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.list_personal_discovery_schedules(
-        &ctx,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn create_personal_discovery_schedule(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<CreatePersonalDiscoveryScheduleRequest>,
-) -> Result<Json<PersonalDiscoveryScheduleStatus>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.create_personal_discovery_schedule(
-        &ctx,
-        request,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn personal_discovery_schedule(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<PersonalDiscoveryScheduleId>,
-) -> Result<Json<PersonalDiscoveryScheduleStatus>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.personal_discovery_schedule(
-        &ctx,
-        id,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn update_personal_discovery_schedule(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<PersonalDiscoveryScheduleId>,
-    Json(request): Json<UpdatePersonalDiscoveryScheduleRequest>,
-) -> Result<Json<PersonalDiscoveryScheduleStatus>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.update_personal_discovery_schedule(
-        &ctx,
-        id,
-        request,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn disable_personal_discovery_schedule(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<PersonalDiscoveryScheduleId>,
-) -> Result<Json<PersonalDiscoveryScheduleStatus>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.disable_personal_discovery_schedule(
-        &ctx,
-        id,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn remove_personal_discovery_schedule(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<PersonalDiscoveryScheduleId>,
-) -> Result<Json<PersonalDiscoverySchedule>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(
-        state.tools.remove_personal_discovery_schedule(&ctx, id)?,
-    ))
-}
-
-async fn attempt_discovery_results_ready_notification(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<DiscoveryResultBatchId>,
-) -> Result<Json<DiscoveryResultsReadyNotificationOutcome>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(
-        state
-            .tools
-            .attempt_discovery_results_ready_notification(&ctx, id, chrono::Utc::now())?,
-    ))
-}
-
-async fn list_discovery_result_batches(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<DiscoveryResultBatch>>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.list_discovery_result_batches(&ctx)?))
-}
-
-async fn complete_discovery_result_batch(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<CompleteDiscoveryResultBatchRequest>,
-) -> Result<Json<DiscoveryResultBatch>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.complete_discovery_result_batch(
-        &ctx,
-        request,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn report_discovery_source_availability(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(task_id): Path<DiscoveryTaskId>,
-    Json(mut request): Json<ReportDiscoverySourceAvailabilityRequest>,
-) -> Result<Json<ReportedDiscoverySourceAvailability>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    request.task_id = task_id;
-    Ok(Json(state.tools.report_discovery_source_availability(
-        &ctx,
-        request,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn discovery_task_source_availability(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(task_id): Path<DiscoveryTaskId>,
-) -> Result<Json<DiscoveryTaskSourceAvailability>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(
-        state
-            .tools
-            .discovery_task_source_availability(&ctx, task_id)?,
-    ))
-}
-
-async fn list_authentication_needed_notices(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<AuthenticationNeededNotice>>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.list_authentication_needed_notices(&ctx)?))
-}
-
-async fn discovery_result_batch(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<DiscoveryResultBatchId>,
-) -> Result<Json<DiscoveryResultBatch>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.discovery_result_batch(&ctx, id)?))
-}
-
-async fn dismiss_discovery_result_batch(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<DiscoveryResultBatchId>,
-) -> Result<Json<DiscoveryResultBatch>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.dismiss_discovery_result_batch(
-        &ctx,
-        id,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn mark_discovery_result_batch_reviewed(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<DiscoveryResultBatchId>,
-) -> Result<Json<DiscoveryResultBatch>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.mark_discovery_result_batch_reviewed(
-        &ctx,
-        id,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn review_discovery_result_item(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path((batch_id, candidate_id)): Path<(DiscoveryResultBatchId, CandidateId)>,
-    Json(action): Json<DiscoveryResultItemActionRequest>,
-) -> Result<Json<DiscoveryResultItemReviewOutcome>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.review_discovery_result_item(
-        &ctx,
-        ReviewDiscoveryResultItemRequest {
-            batch_id,
-            candidate_id,
-            action,
-        },
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn discovery_plan(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<DiscoveryPlanId>,
-) -> Result<Json<DiscoveryPlan>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.discovery_plan(&ctx, id)?))
-}
-
-async fn discovery_task_status(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<DiscoveryTaskId>,
-) -> Result<Json<DiscoveryTask>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.discovery_task_status(
-        &ctx,
-        id,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn claim_discovery_task(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<DiscoveryTaskId>,
-    Json(request): Json<DiscoveryTaskLeaseRequest>,
-) -> Result<Json<DiscoveryTask>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.claim_discovery_task(
-        &ctx,
-        id,
-        chrono::Utc::now(),
-        request.lease_seconds,
-    )?))
-}
-
-async fn renew_discovery_task(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<DiscoveryTaskId>,
-    Json(request): Json<DiscoveryTaskLeaseRequest>,
-) -> Result<Json<DiscoveryTask>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.renew_discovery_task_lease(
-        &ctx,
-        id,
-        chrono::Utc::now(),
-        request.lease_seconds,
-    )?))
-}
-
-async fn complete_discovery_task(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<DiscoveryTaskId>,
-) -> Result<Json<DiscoveryTask>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.complete_discovery_task(
-        &ctx,
-        id,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn fail_discovery_task(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<DiscoveryTaskId>,
-    Json(request): Json<FailDiscoveryTaskRequest>,
-) -> Result<Json<DiscoveryTask>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.fail_discovery_task(
-        &ctx,
-        id,
-        chrono::Utc::now(),
-        request.reason,
-    )?))
-}
-
-async fn submit_candidate(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<CandidateSubmissionRequest>,
-) -> Result<Json<SubmittedCandidate>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.submit_candidate(&ctx, request)?))
-}
-
-async fn inspect_candidate(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<CandidateId>,
-) -> Result<Json<CandidateInspection>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.inspect_candidate(&ctx, id)?))
-}
-
-async fn retired_submission_contract() -> impl IntoResponse {
-    (
-        StatusCode::GONE,
-        Json(LegacyContract::LegacySubmission.error()),
-    )
-}
-
-async fn retired_crawler_contract() -> impl IntoResponse {
-    (
-        StatusCode::GONE,
-        Json(LegacyContract::CrawlerSourceConnector.error()),
-    )
-}
-
-async fn retired_presentation_contract() -> impl IntoResponse {
-    (
-        StatusCode::GONE,
-        Json(LegacyContract::LegacyFeedPresentation.error()),
-    )
-}
-
-async fn retired_package_contract() -> impl IntoResponse {
-    (
-        StatusCode::GONE,
-        Json(LegacyContract::LegacySkillPack.error()),
-    )
-}
-
-async fn retired_feedback_contract() -> impl IntoResponse {
-    (
-        StatusCode::GONE,
-        Json(LegacyContract::LegacyFeedback.error()),
-    )
-}
-
-async fn retired_peer_sync_contract() -> impl IntoResponse {
-    (
-        StatusCode::GONE,
-        Json(LegacyContract::LegacyPeerSync.error()),
-    )
-}
-
-#[derive(Debug, Deserialize)]
-struct FeedQuery {
-    size: Option<usize>,
-    recurrence_penalty_days: Option<RecurrencePenaltyDays>,
-    #[serde(flatten)]
-    feed_mix: FeedMixOverrides,
-    focus: Option<String>,
-    avoid: Option<String>,
-}
-
-async fn get_feed_batch(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Query(query): Query<FeedQuery>,
-) -> Result<Json<FeedBatch>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    let mut request = FeedBatchRequest::new(query.size.unwrap_or(7))
-        .map_err(|error| AgentToolsError::Store(StoreError::Validation(error.to_string())))?;
-    if let Some(days) = query.recurrence_penalty_days {
-        request.recurrence_penalty_days = Some(days);
-    }
-    request.feed_mix = query
-        .feed_mix
-        .resolve(FeedMix::default())
-        .map_err(|error| AgentToolsError::Store(StoreError::Validation(error.to_string())))?;
-    request.batch_intent = BatchIntent::new(
-        query
-            .focus
-            .map(|topics| split_query_topics(&topics))
-            .unwrap_or_default(),
-        query
-            .avoid
-            .map(|topics| split_query_topics(&topics))
-            .unwrap_or_default(),
-    );
-    Ok(Json(state.tools.get_feed_batch(
-        &ctx,
-        request,
-        chrono::Utc::now(),
-    )?))
-}
-
-fn split_query_topics(topics: &str) -> Vec<String> {
-    topics
-        .split(',')
-        .map(str::trim)
-        .filter(|topic| !topic.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-#[derive(Debug, Deserialize)]
-struct PrioritySubscriptionUpdate {
-    is_priority: bool,
-}
-
-async fn set_priority_subscription(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(pod_id): Path<PodId>,
-    Json(update): Json<PrioritySubscriptionUpdate>,
-) -> Result<StatusCode, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    state
-        .tools
-        .set_priority_subscription(&ctx, pod_id, update.is_priority)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn complete_feed_batch(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<Uuid>,
-) -> Result<Json<FeedBatch>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.complete_feed_batch(
-        &ctx,
-        id,
-        chrono::Utc::now(),
-    )?))
-}
-
-#[derive(Debug, Deserialize)]
-struct FeedFeedbackBody {
-    kind: FeedbackKind,
-    topic: Option<String>,
-    reason: Option<String>,
-}
-
-async fn record_feed_feedback(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<ContentItemId>,
-    Json(body): Json<FeedFeedbackBody>,
-) -> Result<Json<FeedFeedbackState>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.record_feed_feedback(
-        &ctx,
-        id,
-        body.kind,
-        body.topic,
-        body.reason,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn get_taste_profile(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<TasteProfile>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.taste_profile(&ctx)?))
-}
-
-async fn update_taste_profile(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<UpdateTasteProfileRequest>,
-) -> Result<Json<TasteProfile>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.update_taste_profile(&ctx, request)?))
-}
-
-async fn reset_learned_taste(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<ResetLearnedTasteRequest>,
-) -> Result<Json<TasteProfile>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.reset_learned_taste(&ctx, request)?))
-}
-
-async fn retract_interest_seed(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(candidate_id): Path<CandidateId>,
-) -> Result<Json<TasteProfile>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.retract_interest_seed(&ctx, candidate_id)?))
-}
-
-async fn update_preferences(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<UpdatePreferencesRequest>,
-) -> Result<Json<UserPreferences>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.update_preferences(&ctx, request)?))
-}
-
 #[derive(Debug, Deserialize)]
 struct PublicPodDiscoveryQuery {
     /// Explicit Explore query; `topics` is accepted as a comma-joined alias.
@@ -1453,142 +502,6 @@ async fn home_discover_public_pods(
     )
     .map_err(AgentToolsError::from)?;
     Ok(Json(state.tools.explore_public_pods(&ctx, request)?))
-}
-
-async fn dev_token(
-    State(state): State<ApiState>,
-    Json(request): Json<DevTokenRequest>,
-) -> Result<Json<DevTokenResponse>, ApiError> {
-    ensure_dev_tokens_allowed(&state)?;
-    Ok(Json(state.tools.create_dev_token(request)?))
-}
-
-async fn me(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<AuthContext>, ApiError> {
-    Ok(Json(auth_or_default(&state, &headers)?))
-}
-
-async fn list_tenants(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<Tenant>>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    state.tools.list_agent_harnesses(&ctx)?;
-    let store = state.tools.store();
-    let store = store.read().map_err(|_| ApiError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        code: "internal_error",
-        message: "lock poisoned".to_string(),
-    })?;
-    Ok(Json(
-        store
-            .tenants
-            .values()
-            .filter(|tenant| ctx.tenant_id.is_none_or(|tenant_id| tenant.id == tenant_id))
-            .cloned()
-            .collect(),
-    ))
-}
-
-async fn create_tenant(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<CreateTenantRequest>,
-) -> Result<Json<Tenant>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.create_tenant_as(&ctx, request)?))
-}
-
-async fn create_api_token(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<DevTokenRequest>,
-) -> Result<Json<DevTokenResponse>, ApiError> {
-    ensure_dev_tokens_allowed(&state)?;
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.create_dev_token_as(&ctx, request)?))
-}
-
-async fn retired_api_token_contract() -> impl IntoResponse {
-    (
-        StatusCode::GONE,
-        Json(LegacyContract::LegacyApiToken.error()),
-    )
-}
-
-async fn register_agent_harness(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<RegisterAgentHarnessRequest>,
-) -> Result<Json<RegisterAgentHarnessResponse>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.register_agent_harness(&ctx, request)?))
-}
-
-async fn revoke_agent_harness(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<AgentHarnessId>,
-) -> Result<StatusCode, ApiError> {
-    let ctx = auth_required(&state.tools, &headers)?;
-    state.tools.revoke_agent_harness(&ctx, id)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn create_pending_proposal(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<CreatePendingProposalRequest>,
-) -> Result<Json<PendingProposal>, ApiError> {
-    let ctx = auth_required(&state.tools, &headers)?;
-    Ok(Json(state.tools.create_pending_proposal_from_request(
-        &ctx,
-        request,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn get_pending_proposal(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<PendingProposalId>,
-) -> Result<Json<PendingProposal>, ApiError> {
-    let ctx = auth_required(&state.tools, &headers)?;
-    Ok(Json(state.tools.pending_proposal(
-        &ctx,
-        id,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn approve_pending_proposal(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<PendingProposalId>,
-) -> Result<Json<PendingProposal>, ApiError> {
-    let ctx = auth_required(&state.tools, &headers)?;
-    Ok(Json(state.tools.approve_pending_proposal(
-        &ctx,
-        id,
-        chrono::Utc::now(),
-    )?))
-}
-
-async fn reject_pending_proposal(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<PendingProposalId>,
-    Json(request): Json<RejectPendingProposalRequest>,
-) -> Result<Json<PendingProposal>, ApiError> {
-    let ctx = auth_required(&state.tools, &headers)?;
-    Ok(Json(state.tools.reject_pending_proposal(
-        &ctx,
-        id,
-        chrono::Utc::now(),
-        request.reason,
-    )?))
 }
 
 async fn federation_node(
@@ -2379,36 +1292,6 @@ fn auth_or_default(state: &ApiState, headers: &HeaderMap) -> Result<AuthContext,
     })
 }
 
-fn auth_required(tools: &AgentTools, headers: &HeaderMap) -> Result<AuthContext, ApiError> {
-    let Some(token) = headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-    else {
-        return Err(ApiError {
-            status: StatusCode::UNAUTHORIZED,
-            code: "unauthorized",
-            message: "bearer token required".to_string(),
-        });
-    };
-    tools.authenticate_token(token)?.ok_or_else(|| ApiError {
-        status: StatusCode::UNAUTHORIZED,
-        code: "unauthorized",
-        message: "invalid token".to_string(),
-    })
-}
-
-fn ensure_dev_tokens_allowed(state: &ApiState) -> Result<(), ApiError> {
-    if state.dev_tokens_allowed {
-        return Ok(());
-    }
-    Err(ApiError {
-        status: StatusCode::FORBIDDEN,
-        code: "forbidden",
-        message: "dev token minting is disabled for this bind address; use a loopback bind or explicitly allow public dev tokens".to_string(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2422,70 +1305,33 @@ mod tests {
         assert_eq!(updated.to_string(), "127.0.0.1:9000");
     }
 
-    #[test]
-    fn dev_tokens_are_public_bind_opt_in() {
-        let loopback: SocketAddr = "127.0.0.1:8787".parse().unwrap();
-        let public: SocketAddr = "0.0.0.0:8787".parse().unwrap();
-        assert!(dev_tokens_allowed_for_bind(loopback, false));
-        assert!(!dev_tokens_allowed_for_bind(public, false));
-        assert!(dev_tokens_allowed_for_bind(public, true));
-    }
-
     #[tokio::test]
-    async fn harness_capability_denial_is_http_forbidden() {
-        let tools = AgentTools::new(seed_store());
-        let owner = tools.default_auth_context().unwrap();
-        let issued = tools
-            .register_agent_harness(
-                &owner,
-                RegisterAgentHarnessRequest {
-                    label: "submitter".into(),
-                    kind: AgentHarnessKind::Unattended,
-                    capabilities: vec![HarnessCapability::CandidateSubmission],
-                    pod_ids: None,
-                },
-            )
-            .unwrap();
-        let response = router(tools)
-            .oneshot(
-                Request::post(format!("/feed/items/{}/feedback", Uuid::nil()))
-                    .header("authorization", format!("Bearer {}", issued.token.expose()))
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"kind":"save"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn public_bind_rejects_unauthenticated_harness_registration() {
-        let response = router_with_options(
-            AgentTools::new(seed_store()),
-            "https://pods.example.com",
-            RouterOptions {
-                dev_tokens_allowed: false,
-                owner_access_allowed: false,
-            },
-        )
-        .oneshot(
-            Request::post("/harnesses")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&RegisterAgentHarnessRequest {
-                        label: "attacker".into(),
-                        kind: AgentHarnessKind::Unattended,
-                        capabilities: vec![HarnessCapability::FeedRead],
-                        pod_ids: None,
-                    })
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    async fn user_and_harness_surfaces_are_absent_from_the_network_api() {
+        let app = router(AgentTools::new(seed_store()));
+        for (method, path) in [
+            ("GET", "/feed"),
+            ("GET", "/pods"),
+            ("POST", "/candidates"),
+            ("GET", "/taste-profile"),
+            ("POST", "/harnesses"),
+            ("POST", "/personal-discovery"),
+            ("GET", "/discovery-tasks/ready"),
+            ("POST", "/auth/dev-token"),
+            ("GET", "/tenants"),
+            ("GET", "/me"),
+        ] {
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "user-facing route must be absent from the network API: {method} {path}"
+            );
+        }
     }
 
     #[test]
@@ -2551,7 +1397,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unscoped_peer_sync_returns_the_versioned_retirement_contract() {
+    async fn unscoped_peer_sync_is_absent_without_redirect() {
         let response = router(AgentTools::new(seed_store()))
             .oneshot(
                 Request::post(format!("/federation/sync/{}", Uuid::nil()))
@@ -2560,13 +1406,6 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::GONE);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(error["code"], "legacy_contract_retired");
-        assert_eq!(error["protocol_version"], CURRENT_PROTOCOL_VERSION);
-        assert_eq!(error["replacement"], "sync_pod");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

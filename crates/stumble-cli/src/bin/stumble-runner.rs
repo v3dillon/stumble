@@ -213,7 +213,6 @@ async fn serve_all_mcp(config: &RunnerConfig) -> anyhow::Result<()> {
         tools.clone(),
         format!("http://{}", config.bind),
         stumble_api::RouterOptions {
-            dev_tokens_allowed: false,
             owner_access_allowed: false,
         },
     )

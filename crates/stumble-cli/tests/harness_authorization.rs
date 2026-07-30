@@ -1,10 +1,7 @@
-use axum::{body::Body, http::Request};
 use serde_json::json;
 use std::process::Command;
-use stumble_api::router;
 use stumble_core::*;
 use stumble_mcp::{McpToolCall, McpToolRouter};
-use tower::ServiceExt;
 use uuid::Uuid;
 
 struct TestDataDir(std::path::PathBuf);
@@ -74,21 +71,6 @@ async fn representative_adapters_return_equivalent_authorization_denials() {
         .unwrap_err();
     assert!(mcp_error.to_string().contains(expected));
 
-    let response = router(tools)
-        .oneshot(
-            Request::post(format!("/feed/items/{}/feedback", Uuid::nil()))
-                .header("authorization", format!("Bearer {token}"))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"kind":"save"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    assert!(String::from_utf8_lossy(&body).contains(expected));
 }
 
 #[tokio::test]
@@ -142,20 +124,6 @@ async fn discovery_task_adapters_return_equivalent_authorization_denials() {
         .to_string()
         .contains(expected));
 
-    let response = router(tools)
-        .oneshot(
-            Request::get("/discovery-tasks")
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    assert!(String::from_utf8_lossy(&body).contains(expected));
 }
 
 fn package_contents() -> PodPackageContents {
@@ -243,30 +211,13 @@ async fn discovery_task_adapters_return_the_same_typed_target() {
         .unwrap()[0]
         .clone();
 
-    let response = router(tools)
-        .oneshot(
-            Request::get("/discovery-tasks")
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let http: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let http_task = http[0].clone();
-
-    // CLI list and HTTP list return the full task inventory; MCP exposes ready tasks only.
-    assert_eq!(cli_task, http_task);
-    assert_eq!(mcp_task["id"], http_task["id"]);
-    assert_eq!(http_task["target"]["kind"], "pod");
-    assert_eq!(http_task["target"]["pod_id"], pod.id.to_string());
-    assert_eq!(http_task["target"]["package_version"], 1);
-    assert_eq!(http_task["pod_id"], pod.id.to_string());
-    assert_eq!(http_task["package_version"], 1);
+    // CLI list returns the full task inventory; MCP exposes ready tasks only.
+    assert_eq!(mcp_task["id"], cli_task["id"]);
+    assert_eq!(cli_task["target"]["kind"], "pod");
+    assert_eq!(cli_task["target"]["pod_id"], pod.id.to_string());
+    assert_eq!(cli_task["target"]["package_version"], 1);
+    assert_eq!(cli_task["pod_id"], pod.id.to_string());
+    assert_eq!(cli_task["package_version"], 1);
 }
 
 fn package_fixture() -> (TestDataDir, AgentTools, String) {
@@ -319,87 +270,6 @@ fn core_and_mcp_read_created_pod_packages() {
         .import_skill_pack(&actor, "mcp-package", exported.files)
         .unwrap();
     assert_eq!(imported.version, 2);
-}
-
-#[tokio::test]
-async fn http_creates_reads_validates_exports_and_imports_pod_packages() {
-    let (_data_dir, tools, token) = package_fixture();
-    let response = router(tools.clone())
-        .oneshot(
-            Request::post("/pod-packages")
-                .header("authorization", format!("Bearer {token}"))
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&create_request("http-package")).unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
-    let http_created: serde_json::Value = serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(http_created["pod"]["visibility"], "private");
-    assert_eq!(http_created["package"]["version"], 1);
-    let http_read = router(tools.clone())
-        .oneshot(
-            Request::get("/pods/http-package/package")
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(http_read.status(), axum::http::StatusCode::OK);
-    let http_validation = router(tools.clone())
-        .oneshot(
-            Request::post("/pods/http-package/package/validate")
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(http_validation.status(), axum::http::StatusCode::OK);
-    let http_export = router(tools.clone())
-        .oneshot(
-            Request::post("/pods/http-package/package/export")
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let http_export: serde_json::Value = serde_json::from_slice(
-        &axum::body::to_bytes(http_export.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    let http_import = router(tools.clone())
-        .oneshot(
-            Request::post("/pods/http-package/package/import")
-                .header("authorization", format!("Bearer {token}"))
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&http_export["files"]).unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(http_import.status(), axum::http::StatusCode::OK);
-    let http_import: serde_json::Value = serde_json::from_slice(
-        &axum::body::to_bytes(http_import.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(http_import["version"], 2);
 }
 
 #[test]

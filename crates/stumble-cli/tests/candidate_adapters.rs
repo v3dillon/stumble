@@ -1,11 +1,8 @@
-use axum::{body::Body, http::Request};
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::process::Command;
-use stumble_api::router;
 use stumble_core::*;
 use stumble_mcp::{McpToolCall, McpToolRouter};
-use tower::ServiceExt;
 
 struct TestDataDir(std::path::PathBuf);
 
@@ -56,7 +53,7 @@ fn request() -> CandidateSubmissionRequest {
 }
 
 #[tokio::test]
-async fn http_mcp_and_cli_submit_and_inspect_equivalent_candidates() {
+async fn mcp_and_cli_submit_and_inspect_equivalent_candidates() {
     let data_dir = TestDataDir::new();
     let request_path = data_dir.0.join("candidate.json");
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
@@ -123,43 +120,6 @@ async fn http_mcp_and_cli_submit_and_inspect_equivalent_candidates() {
         })
         .unwrap();
 
-    let http_submission = router(tools.clone())
-        .oneshot(
-            Request::post("/candidates")
-                .header("authorization", format!("Bearer {token}"))
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&candidate_request).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(http_submission.status(), axum::http::StatusCode::OK);
-    let http_submission: Value = serde_json::from_slice(
-        &axum::body::to_bytes(http_submission.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(http_submission["candidate"]["id"], candidate_id);
-
-    let http_inspection = router(tools)
-        .oneshot(
-            Request::get(format!("/candidates/{candidate_id}"))
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(http_inspection.status(), axum::http::StatusCode::OK);
-    let http_inspection: Value = serde_json::from_slice(
-        &axum::body::to_bytes(http_inspection.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(http_inspection, mcp_inspection);
-
     let cli_inspection = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args([
             "--data-dir",
@@ -184,7 +144,6 @@ async fn http_mcp_and_cli_submit_and_inspect_equivalent_candidates() {
         cli_inspection["data"]["allowed_actions"],
         mcp_inspection["allowed_actions"]
     );
-    assert_eq!(http_inspection["candidate"]["id"], candidate_id);
 
     let cli_retraction = Command::new(env!("CARGO_BIN_EXE_stumble"))
         .args([
@@ -210,7 +169,7 @@ async fn http_mcp_and_cli_submit_and_inspect_equivalent_candidates() {
     );
 
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
-    let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
+    let mcp = McpToolRouter::authenticated(tools, &token).unwrap();
     let mcp_profile = mcp
         .call(McpToolCall {
             tool: "retract_interest_seed".into(),
@@ -222,26 +181,4 @@ async fn http_mcp_and_cli_submit_and_inspect_equivalent_candidates() {
         cli_profile["data"]["interest_seed_evidence"]
     );
 
-    let response = router(tools)
-        .oneshot(
-            Request::post(format!(
-                "/taste-profile/interest-seeds/{candidate_id}/retract"
-            ))
-            .header("authorization", format!("Bearer {token}"))
-            .body(Body::empty())
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
-    let http_profile: Value = serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        http_profile["interest_seed_evidence"],
-        mcp_profile["interest_seed_evidence"]
-    );
 }

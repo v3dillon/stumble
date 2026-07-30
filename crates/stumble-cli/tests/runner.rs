@@ -94,12 +94,12 @@ fn unified_http_daemon_requires_the_callers_harness_token() {
 
     let unauthorized = initialize_request(address, None);
     assert!(unauthorized.starts_with("HTTP/1.1 401 Unauthorized"));
-    let tenant_metadata = get_request(address, "/tenants", None);
-    assert!(tenant_metadata.starts_with("HTTP/1.1 401 Unauthorized"));
+    let node_ops = get_request(address, "/home/bootstrap/status", None);
+    assert!(node_ops.starts_with("HTTP/1.1 401 Unauthorized"));
     let authorized = initialize_request(address, Some(&token));
     assert!(authorized.starts_with("HTTP/1.1 200 OK"));
-    let unauthorized_tenant_scope = get_request(address, "/tenants", Some(&token));
-    assert!(unauthorized_tenant_scope.starts_with("HTTP/1.1 403 Forbidden"));
+    let unauthorized_node_scope = get_request(address, "/home/bootstrap/status", Some(&token));
+    assert!(unauthorized_node_scope.starts_with("HTTP/1.1 403 Forbidden"));
 
     let _ = std::fs::remove_dir_all(root);
 }

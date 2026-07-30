@@ -290,9 +290,8 @@ mutations.
   `authentication_skipped_scheduled`. Failure of one source never discards
   valid task-bound results already collected from other sources.
 
-Report availability with `report_discovery_source_availability` (MCP) or
-`POST /discovery-tasks/:id/source-availability` (HTTP) while holding the task
-lease. Inspect private notices with `list_authentication_needed_notices`.
+Report availability with `report_discovery_source_availability` (MCP) while
+holding the task lease. Inspect private notices with `list_authentication_needed_notices`.
 
 ## Scheduling fallback (Pod and Personal Discovery)
 

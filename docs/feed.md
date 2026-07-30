@@ -32,10 +32,9 @@ Profile. Previously Delivered Items become Old Gems after the recurrence window
 decays, after a new independent Pod Placement appears, or after the User both saves
 the item and requests More like this.
 
-HTTP Feed queries, MCP `FeedBatchRequest` arguments, and CLI `feed` flags expose the
-same Feed Mix and Batch Intent fields. Priority Subscription updates are available at
-`POST /subscriptions/:pod_id/priority`, MCP `set_priority_subscription`, and CLI
-`priority-subscription`.
+MCP `FeedBatchRequest` arguments and CLI `feed` flags expose the same Feed Mix
+and Batch Intent fields. Priority Subscription updates are available through MCP
+`set_priority_subscription` and CLI `stumble pod subscription set`.
 
 Each item carries its Content Reference, all contributing Accepted Placement
 evidence, discovery provenance, Attention Value evidence, exploration label, current
@@ -60,17 +59,16 @@ or other federation surfaces.
 
 Harness adapters expose the same contract:
 
-- HTTP: `GET /feed`, `POST /feed/:id/complete`, and
-  `POST /feed/items/:id/feedback`.
 - MCP: `get_feed_batch`, `complete_feed_batch`, and `record_feed_feedback`.
 - CLI: `stumble feed batch get`, `stumble feed batch complete`, and
   `stumble feed feedback record`.
 
+The HTTP API serves only the node-to-node network surface (federation,
+Bootstrap, and Discovery Peer routes); the Feed is a local Harness surface.
+
 Taste Profile inspection, explicit updates, and selective/all learned reset are
-available through HTTP (`GET/PATCH /taste-profile` and
-`POST /taste-profile/learned/reset`), MCP (`get_taste_profile`,
-`update_taste_profile`, and `reset_learned_taste`), and CLI
-(`stumble feed taste show`, `stumble feed taste set`, and
-`stumble feed taste reset`). Whole-profile operations require an unscoped
+available through MCP (`get_taste_profile`, `update_taste_profile`, and
+`reset_learned_taste`) and CLI (`stumble feed taste show`,
+`stumble feed taste set`, and `stumble feed taste reset`). Whole-profile operations require an unscoped
 Feedback grant; Pod-scoped harnesses continue to use item-scoped feedback without
 receiving access to the User's complete private profile.

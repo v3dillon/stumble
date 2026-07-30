@@ -2,7 +2,7 @@ use axum::{body::Body, http::Request};
 use chrono::{Duration, TimeZone, Utc};
 use serde_json::{json, Value};
 use std::process::Command;
-use stumble_api::{router, router_with_base_url, router_with_options, RouterOptions};
+use stumble_api::{router_with_base_url, router_with_options, RouterOptions};
 use stumble_core::*;
 use stumble_mcp::{streamable_http_router, McpToolCall, McpToolRouter};
 use tower::ServiceExt;
@@ -562,28 +562,6 @@ async fn assert_adapter_parity(home_dir: &TestDataDir, user_token: &str, expecte
         canonical_feed(response["result"]["structuredContent"]["value"].clone()),
         *expected
     );
-    let http_tools = AgentTools::open_home_node(&home_dir.0, seed_store).unwrap();
-    let response = router(http_tools)
-        .oneshot(
-            Request::get(format!("/feed?size={size}"))
-                .header("authorization", format!("Bearer {user_token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
-    assert_eq!(
-        canonical_feed(
-            serde_json::from_slice::<Value>(
-                &axum::body::to_bytes(response.into_body(), usize::MAX)
-                    .await
-                    .unwrap()
-            )
-            .unwrap()
-        ),
-        *expected
-    );
 }
 
 async fn assert_home_public_exports_are_private(home: &AgentTools, private_values: &[&str]) {
@@ -593,7 +571,6 @@ async fn assert_home_public_exports_are_private(home: &AgentTools, private_value
             home.clone(),
             "https://home.example",
             RouterOptions {
-                dev_tokens_allowed: false,
                 owner_access_allowed: false,
             },
         )

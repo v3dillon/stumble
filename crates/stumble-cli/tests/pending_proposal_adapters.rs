@@ -1,10 +1,7 @@
-use axum::{body::Body, http::Request};
 use serde_json::{json, Value};
 use std::process::Command;
-use stumble_api::router;
 use stumble_core::*;
 use stumble_mcp::{McpToolCall, McpToolRouter};
-use tower::ServiceExt;
 
 struct TestDataDir(std::path::PathBuf);
 
@@ -26,7 +23,7 @@ impl Drop for TestDataDir {
 }
 
 #[tokio::test]
-async fn http_mcp_and_cli_share_pending_proposal_behavior() {
+async fn mcp_and_cli_share_pending_proposal_behavior() {
     // Arrange
     let data_dir = TestDataDir::new();
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
@@ -127,30 +124,17 @@ async fn http_mcp_and_cli_share_pending_proposal_behavior() {
         json!(["approve", "reject"])
     );
 
-    // Act: approve through HTTP.
+    // Act: approve through MCP as the separately authorized interactive harness.
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
-    let response = router(tools.clone())
-        .oneshot(
-            Request::post(format!("/pending-proposals/{proposal_id}/approve"))
-                .header("authorization", format!("Bearer {approver_token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
+    let approver_mcp = McpToolRouter::authenticated(tools.clone(), &approver_token).unwrap();
+    let accepted = approver_mcp
+        .call(McpToolCall {
+            tool: "approve_pending_proposal".into(),
+            arguments: json!({"proposal_id": proposal_id}),
+        })
         .unwrap();
 
     // Assert
-    let status = response.status();
-    let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    assert_eq!(
-        status,
-        axum::http::StatusCode::OK,
-        "{}",
-        String::from_utf8_lossy(&response_body)
-    );
-    let accepted: Value = serde_json::from_slice(&response_body).unwrap();
     assert_eq!(accepted["status"], "accepted");
     assert_eq!(
         tools
