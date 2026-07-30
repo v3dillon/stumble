@@ -8,16 +8,19 @@ This runbook covers operators who run open Bootstrap admission, Announcement Str
 
 Admission verifies, in order relevant to failures:
 
-1. Payload size bounds
-2. Origin identity consistency
-3. Ed25519 signature and Announcement Lease integrity
+1. Bootstrap capability enabled on this process (`bootstrap_disabled` otherwise)
+2. Payload size bounds
+3. Origin identity consistency
 4. Protocol compatibility (`stumble/1.0`)
-5. Canonical public Pod URL shape (`/federation/pods/<slug>`; HTTPS, or loopback HTTP for lab use)
+5. Idempotent replay of an already-admitted announcement (short-circuits before any limits)
 6. Per-network and per-Origin submission rate limits
-7. Origin reachability and current public manifest (via the injectable `OriginProbe` port)
+7. Origin reachability and current public manifest (via the injectable `OriginProbe` port), including manifest agreement with the signed announcement
 8. Per-Origin active-admission quota (bounds material duplicates; not a quality score)
+9. Ed25519 signature, Announcement Lease integrity, canonical public Pod URL shape (`/federation/pods/<slug>`; HTTPS, or loopback HTTP for lab use), and covering-withdrawal checks—the single retain/verification primitive runs **last**
 
-Idempotent resubmissions of the same announcement identity return `idempotent` without a second stream effect. Preferable renewals append a `renewed` stream entry.
+Because signature, lease, and URL-shape verification run last, an unsigned, expired, or malformed payload from a rate-limited, over-quota, or unreachable Origin surfaces as `rate_limited`, `origin_quota_exceeded`, or `unreachable_origin`—not `invalid_signature`, `stale_lease`, or `malformed`.
+
+Idempotent resubmission requires full canonical equality with the already-admitted announcement—not merely the same announcement identity—and returns `idempotent` without a second stream effect. A same-identity payload with any changed field falls through to renewal or rejection. Preferable renewals append a `renewed` stream entry.
 
 Open withdrawal admission: `POST /bootstrap/withdrawals`.  
 Open Discovery Peer Advertisement admission: `POST /bootstrap/peer-advertisements`.
@@ -120,7 +123,7 @@ let tools = AgentTools::open_initialized_home_node(data_dir)?
 
 Well-known metadata (`GET /.well-known/stumble-node`) advertises only enabled endpoints:
 
-- Bootstrap: `bootstrap_announcements`, `bootstrap_announcement_stream`, `bootstrap_withdrawals`, `bootstrap_peer_advertisements`
+- Bootstrap: `bootstrap_announcements`, `bootstrap_announcement_stream`, `bootstrap_withdrawals`, `bootstrap_peer_advertisements`, `bootstrap_peer_advertisement_sample`
 - Index: `index_search_announcements`
 - Discovery Peer serving (opt-in on that node): `discovery_peer_announcement_stream`, `discovery_peer_advertisement_sample`
 

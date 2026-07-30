@@ -22,12 +22,15 @@ Public HTTP contracts (typed machine-readable `code` on failures):
 | `POST` | `/bootstrap/announcements` | Open Bootstrap admission (no User account or Trusted Peer) |
 | `GET`  | `/bootstrap/announcements/stream` | Topic-neutral cursor-paginated Announcement Stream |
 | `POST` | `/bootstrap/withdrawals` | Open Bootstrap withdrawal admission |
+| `POST` | `/bootstrap/endorsements` | Open Bootstrap admission of signed Pod Endorsements |
+| `GET`  | `/bootstrap/endorsements` | List admitted endorsements for one endorsed Origin + Pod slug |
 | `POST` | `/bootstrap/peer-advertisements` | Open Bootstrap admission of Discovery Peer Advertisements |
 | `GET`  | `/bootstrap/peer-advertisements` | Bootstrap-open unranked sample of admitted peer advertisements |
 | `GET`  | `/discovery/peer/announcements/stream` | Opt-in Discovery Peer Announcement Stream pages |
 | `GET`  | `/discovery/peer/advertisements` | Opt-in randomized unranked peer-advertisement samples |
+| `POST` | `/federation/pods/:slug/explore-samples` | Origin produces a bounded signed `PodExploreSamples` artifact for the exact current announcement |
 
-Node operations live in the CLI: `stumble sync discovery serve show|enable|disable` (inbound serving), `stumble sync discovery peers|gossip|run` (outbound peer set), and `stumble sync discovery status` (readiness including Bootstrap-outage degraded mode).
+Node operations live in the CLI: `stumble sync discovery serve show|enable|disable` (inbound serving), `stumble sync discovery peers|gossip|run` (outbound peer set), `stumble sync discovery index list|add|remove` (replaceable Index Nodes in the local Trust Policy), and `stumble sync discovery status` (readiness including Bootstrap-outage degraded mode).
 
 Failure codes include `invalid_signature`, `announcement_expired`, `announcement_withdrawn`, `announcement_stale`, `withdrawal_stale`, and `validation_error`. Bootstrap open admission additionally returns stable codes: `malformed`, `invalid_identity`, `invalid_signature`, `unreachable_origin`, `incompatible_protocol`, `stale_lease`, `rate_limited`, `payload_too_large`, `manifest_mismatch`, `origin_quota_exceeded`, and `bootstrap_disabled`. Public Index search returns stable codes: `malformed`, `query_too_large`, `rate_limited`, `incompatible_protocol`, `index_disabled`, `transport`, and `protocol`.
 
@@ -70,7 +73,9 @@ Query bounds: max UTF-8 length `MAX_INDEX_QUERY_BYTES` (256); limit `1..=MAX_IND
 
 A Home Node may call configured Trust Policy Index Nodes **only** from an explicit User-authored Explore action (`explore_public_pods_with_indexes` / `import_explicit_index_search`). Outbound requests use the injectable `IndexSearchClient` port and carry only `IndexSearchRequest` fields (`query` + `limit`)—never Taste Profile, Subscriptions, feedback, Source Affinity, or Discovery Plan inference. Empty Explore queries stay local and do not fan out. Personal Discovery planning has no Index client parameter.
 
-Import verifies each announcement, records multi-source `received_from_index_urls` provenance (accumulating Index base URLs across retains of the same signed announcement), discards remote ordering/scores, and recomputes eligibility and order locally via Trust Policy and `explore_public_pods` Pod Similarity. Delivery stays active when any recorded Index URL remains in Trust Policy. Multiple Indexes are supported in configuration order with fallthrough on transport failure. Removing an Index excludes sole-source results while independent copies (other Index, Bootstrap, peer, or local retain) remain eligible. Provenance and rate-limit timestamps survive SQLite restart. Short intentional Index query tokens (`ai`, `go`, `web`, …) are searchable; Index search does not apply Personal Discovery stop/short-token filtering.
+One press-path clarification: when the Feed is caught up, the bare `stumble` press runs an empty-query `explore_public_pods` over already-synchronized announcements and best-effort Origin explore-sample fetches against up to 5 unsubscribed Origins. That path is index-free by design — it calls `explore_public_pods`, never the Index variant — so configured Index Nodes are still contacted only from explicit User-authored Explore.
+
+Import verifies each announcement, records multi-source `received_from_index_urls` provenance (accumulating Index base URLs across retains of the same signed announcement), discards remote ordering/scores, and recomputes eligibility and order locally via Trust Policy and `explore_public_pods` Pod Similarity. Delivery stays active when any recorded Index URL remains in Trust Policy. Multiple Indexes are supported in configuration order with fallthrough on transport failure; the configured list is managed with `stumble sync discovery index list|add|remove`. Removing an Index excludes sole-source results while independent copies (other Index, Bootstrap, peer, or local retain) remain eligible. Provenance and rate-limit timestamps survive SQLite restart. Short intentional Index query tokens (`ai`, `go`, `web`, …) are searchable; Index search does not apply Personal Discovery stop/short-token filtering.
 
 Domain contract: `ExploreRequest` / `ExploreResponse` for intentional Explore (CLI `stumble pod explore` and Agent Harness tools share the same Core types). Focused coverage: unit tests in `crates/stumble-core/src/index/`, temporary-SQLite acceptance in `crates/stumble-core/tests/index_search.rs`, and Index aggregation in `crates/stumble-core/tests/discovery_substrate.rs`.
 
@@ -129,7 +134,7 @@ When every configured Bootstrap is unavailable, an established Home Node continu
 | `GET /bootstrap/peer-advertisements` | Bootstrap-open unranked sample of admitted peer advertisements |
 | `stumble sync discovery peers` | Outbound set with cursor, health, last-success |
 | `stumble sync discovery gossip --enabled <bool>` | Enable/disable automatic peer gossip (audit retained) |
-| `stumble sync discovery run [--learn] [--no-sync]` | Learn samples and/or sync outbound peer streams |
+| `stumble sync discovery run [--learn [--no-sync]]` | Sync outbound peer streams, optionally learning samples first (`--no-sync` requires `--learn` and learns only) |
 | `stumble sync discovery status` | Degraded discovery readiness (Bootstrap outage messaging) |
 
 Domain module: `crates/stumble-core/src/discovery_peer/client.rs`. Focused coverage: unit tests in that module and temporary-SQLite acceptance in `crates/stumble-core/tests/discovery_peer_rotation.rs`.
@@ -187,8 +192,12 @@ emit a one-shot authentication-needed notice while continuing accessible work.
 
 ### Operator surfaces
 
-HTTP, MCP, and `stumble discover personal …` expose equivalent domain contracts
-for readiness, request, plans, batches, reviews, schedules, availability, and
-notifications. See `docs/first-release.md` for the Agent Harness skill loop,
+Personal Discovery is a local Harness surface: the HTTP router serves only the
+node-to-node network routes and exposes none of it (a test asserts
+`POST /personal-discovery` returns 404). Source availability reporting and
+inspection and authentication-needed notices are MCP-only tools; readiness,
+requests, plans, batches, reviews, schedules, and results-ready notification
+are available through both MCP and `stumble discover personal …`. See
+`docs/first-release.md` for the Agent Harness skill loop,
 grants, schedules, privacy, and recovery after restart. Authoritative decisions:
 ADR-0035, ADR-0036, ADR-0017, ADR-0025, ADR-0012.

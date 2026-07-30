@@ -22,7 +22,9 @@ sudo ./scripts/deploy-bootstrap-vps.sh bootstrap.example.com
 
 Pass `--no-index` as the second argument to serve only the Bootstrap role.
 
-The script is idempotent — to upgrade, `git pull` and re-run it. It:
+The script is idempotent — to upgrade, `git pull` and re-run it. Note that it
+owns the entire `/etc/caddy/Caddyfile`: every run overwrites the file with its
+single domain block, clobbering any other site served from the box. It:
 
 - installs Rust and [Caddy](https://caddyserver.com) if missing, and builds
   release binaries into `/usr/local/bin`;
@@ -100,4 +102,6 @@ sudo rm /etc/systemd/system/stumble-bootstrap.service /usr/local/bin/stumble /us
 sudo rm -r /var/lib/stumble
 ```
 
-Remove the domain block from `/etc/caddy/Caddyfile` and reload Caddy.
+The script wrote `/etc/caddy/Caddyfile` wholesale, so the domain block is all
+it contains: replace the file with your own Caddy config (or remove it and
+uninstall Caddy) and reload Caddy.

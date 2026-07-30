@@ -119,8 +119,9 @@ Set expectations honestly: the Pod is private and local. *Discovering others*
 works today — `stumble pod explore --query "..."` already searches the
 friend's network, with signed content previews, and subscribing is one
 command. *Being discovered* needs their node reachable from the internet
-(`stumble pod publish` + serving `stumble-api`) — offer to set that up another
-day rather than now.
+(`stumble pod publish` + serving `stumble-api`, installed separately with
+`cargo install --path crates/stumble-api --locked`) — offer to set that up
+another day rather than now.
 
 ## Stage 6 — Offer the morning brief
 
@@ -139,4 +140,4 @@ them.
 
 ## Operational notes
 
-The core loop is `stumble add <url>` to save a link (one step, Feed-eligible immediately) and a bare `stumble` press to get one new item back — from the Feed, or from the network once caught up (`stumble feed batch get` reads the Feed as a batch instead). `stumble search "<terms>"` is local BM25 full-text search over everything saved — titles, summaries, tags, notes, and archived page snapshots — for reaching back into a grown collection. Start the HTTP API (`stumble-api --data-dir ~/.stumble/nodes/home --bind 127.0.0.1:8787`) only when the user wants their node reachable by other Stumble nodes — it serves the node-to-node network surface (federation, Bootstrap, Discovery Peer), not the personal Feed. Keep the default loopback binding unless the user explicitly requests and understands public exposure. MCP clients launch `stumble-mcp` with either `--transport stdio` or `--transport http`; the one-shot `stumble` executable never launches a server. Use `stumble --help` and `stumble <family> --help` for the five workflow families.
+The core loop is `stumble add <url>` to save a link (one step, Feed-eligible immediately) and a bare `stumble` press to get one new item back — from the Feed, or from the network once caught up (`stumble feed batch get` reads the Feed as a batch instead). `stumble search "<terms>"` is local BM25 full-text search over everything saved — titles, summaries, tags, notes, and archived page snapshots — for reaching back into a grown collection. Start the HTTP API (`stumble-api --data-dir ~/.stumble/nodes/home --bind 127.0.0.1:8787`) only when the user wants their node reachable by other Stumble nodes — it serves the node-to-node network surface (federation, Bootstrap, Discovery Peer), not the personal Feed. Keep the default loopback binding unless the user explicitly requests and understands public exposure. MCP clients launch `stumble-mcp` (installed separately: `cargo install --path crates/stumble-mcp --locked`) with `--data-dir` (or `STUMBLE_DATA_DIR` set) plus either `--transport stdio` or `--transport http`; the one-shot `stumble` executable never launches a server. Use `stumble --help` and `stumble <family> --help` for the five workflow families.

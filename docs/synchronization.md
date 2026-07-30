@@ -20,8 +20,10 @@ complete update before projection. Retrying an already applied signed segment
 is an idempotent no-op. Package versions must be positive, monotonic, and
 immutable; the complete segment is preflighted and projected atomically.
 
-The Node Agent uses that high-level Origin workflow for normal automatic
-Subscription refreshes. Operators may recover one stalled Subscription with
+Subscription refreshes are always explicitly requested, never automatic: the
+normal Origin refresh is `stumble sync pod run <pod>` (or the MCP
+`synchronize_subscription` tool), which uses that high-level Origin workflow.
+Operators may recover one stalled Subscription from a Trusted Peer with
 `stumble sync pod run <pod> --peer <peer-id>`. The selected peer must match the
 Subscription's pinned canonical Origin Node ID and public key before any event
 fetch is applied. `stumble sync pod status <pod>` exposes the stored cursor,

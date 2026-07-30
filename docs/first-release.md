@@ -59,74 +59,67 @@ An Agent Harness follows this portable loop:
 HTTP, MCP, and `stumble` expose the same domain contracts. Do not query or edit
 SQLite to complete any workflow.
 
-For a local MCP client on the same machine, configure it to launch the stdio
-adapter with a narrowly scoped Harness token in the child process environment:
+MCP clients reach the node through the unified runner. Create its config once
+per node and declare one `mcp` profile per Harness Grant; each profile names a
+credential command that prints one scoped Harness token, so tokens live in the
+Keychain (or another store), never in the YAML or a client config:
 
 ```bash
-STUMBLE_MCP_TOKEN="$TOKEN" target/release/stumble-mcp \
-  --data-dir ~/.stumble/nodes/home --transport stdio
+mkdir -p "$HOME/.config/stumble"
+cp config/runner.example.yaml "$HOME/.config/stumble/runner.yaml"
+# Edit data_dir, credential commands, and the `mcp:` profile map.
 ```
 
-The process reads and writes one JSON-RPC message per line and reserves standard
+For a local MCP client on the same machine, configure it to launch one stdio
+process per profile:
+
+```bash
+stumble-runner --config "$HOME/.config/stumble/runner.yaml" mcp manager
+```
+
+The process resolves that profile's Harness token through its credential
+command, reads and writes one JSON-RPC message per line, and reserves standard
 error for diagnostics. Invalid and revoked Harness tokens fail before protocol
 output. No port, background job, HTTPS, or OAuth is needed for stdio.
 
-Remote clients use the separate Streamable HTTP bridge:
+HTTP clients use the same runner's single loopback listener,
+`stumble-runner ... serve`, which binds `127.0.0.1:8790` by default and serves
+every configured profile at `/mcp`. Every request carries the profile's
+Harness token as a bearer token; unexpected browser `Origin` headers are
+rejected. Give an unattended harness an isolated MCP config containing only
+`http://127.0.0.1:8790/mcp` and its worker token.
 
-```bash
-target/release/stumble-mcp --data-dir ~/.stumble/nodes/home \
-  --transport http --bind 127.0.0.1:8790
-```
+(The standalone `stumble-mcp` binary still exists for manual, advanced use —
+stdio with `STUMBLE_MCP_TOKEN`, or its own HTTP bridge — but the launchd
+installer removes any installed copy as a legacy artifact; prefer the runner.)
 
-Its endpoint is `/mcp`. Every request carries a bearer token; unexpected
-browser `Origin` headers are rejected, and direct non-loopback binds are
-refused. Put TLS and standards-compliant OAuth in front of it before connecting
-a remote ChatGPT app.
-
-For a two-node federation workflow, keep two named adapter families,
-`stumble-origin` and `stumble-subscriber`, rather than sharing one adapter or
-credential across nodes. Because one stdio process has one fixed Harness token,
-configure a grant-specific instance for every independent authority used at the
-same node:
+For a two-node federation workflow, run one runner config per node and keep
+two named profile families, `stumble-origin` and `stumble-subscriber`, rather
+than sharing one profile or credential across nodes. Because each profile is
+bound to one fixed Harness token, declare a grant-specific profile for every
+independent authority used at the same node — for example
+`stumble-origin-curator`, `stumble-origin-approver`,
+`stumble-origin-discovery`, and `stumble-origin-reader` against the Origin
+Node's config, plus `stumble-subscriber-manager` and
+`stumble-subscriber-reader` against the Home Node's config. A stdio client
+then addresses each grant by profile:
 
 ```json
 {
   "mcpServers": {
     "stumble-origin-curator": {
-      "command": "/absolute/path/to/stumble-mcp",
-      "args": ["--data-dir", "/absolute/path/to/nodes/origin", "--transport", "stdio"],
-      "env": {"STUMBLE_MCP_TOKEN": "<origin-curation-token>"}
-    },
-    "stumble-origin-approver": {
-      "command": "/absolute/path/to/stumble-mcp",
-      "args": ["--data-dir", "/absolute/path/to/nodes/origin", "--transport", "stdio"],
-      "env": {"STUMBLE_MCP_TOKEN": "<independent-origin-approval-token>"}
-    },
-    "stumble-origin-discovery": {
-      "command": "/absolute/path/to/stumble-mcp",
-      "args": ["--data-dir", "/absolute/path/to/nodes/origin", "--transport", "stdio"],
-      "env": {"STUMBLE_MCP_TOKEN": "<origin-discovery-token>"}
-    },
-    "stumble-origin-reader": {
-      "command": "/absolute/path/to/stumble-mcp",
-      "args": ["--data-dir", "/absolute/path/to/nodes/origin", "--transport", "stdio"],
-      "env": {"STUMBLE_MCP_TOKEN": "<origin-feed-read-token>"}
+      "command": "/absolute/path/to/stumble-runner",
+      "args": ["--config", "/absolute/path/to/origin-runner.yaml", "mcp", "stumble-origin-curator"]
     },
     "stumble-subscriber-manager": {
-      "command": "/absolute/path/to/stumble-mcp",
-      "args": ["--data-dir", "/absolute/path/to/nodes/home", "--transport", "stdio"],
-      "env": {"STUMBLE_MCP_TOKEN": "<subscriber-management-token>"}
-    },
-    "stumble-subscriber-reader": {
-      "command": "/absolute/path/to/stumble-mcp",
-      "args": ["--data-dir", "/absolute/path/to/nodes/home", "--transport", "stdio"],
-      "env": {"STUMBLE_MCP_TOKEN": "<subscriber-feed-read-token>"}
+      "command": "/absolute/path/to/stumble-runner",
+      "args": ["--config", "/absolute/path/to/home-runner.yaml", "mcp", "stumble-subscriber-manager"]
     }
   }
 }
 ```
 
-Use an adapter in the `stumble-origin-*` family for public Pod proposals,
+Use a profile in the `stumble-origin-*` family for public Pod proposals,
 Candidate submission, routing, Placement review, and Origin content reads. Send
 proposal inspection and approval only to `stumble-origin-approver`, backed by an
 independent Approval grant; give discovery workers only Candidate Submission
@@ -203,9 +196,8 @@ scheduler. One loopback process serves bearer-authenticated MCP requests and
 runs the configured discovery and curation schedules:
 
 ```bash
-mkdir -p "$HOME/.config/stumble"
-cp config/runner.example.yaml "$HOME/.config/stumble/runner.yaml"
-# Edit absolute paths, Keychain service/account names, prompts, and agent commands.
+# In the runner.yaml created under "Harness grants and tools", also edit the
+# worker prompts, agent commands, and schedule blocks.
 # Copy/edit worker.example.sb (and claude-worker.example.sb for Claude) inside
 # each configured working_directory, replacing WORKER and /Users/you.
 # Copy the matching codex-, claude-, or grok-worker example into that worker's
@@ -224,9 +216,7 @@ scheduled workflows. Agent commands are generic argv templates containing
 `{prompt}` and optionally `{working_directory}`; Codex, Claude, Grok, and other
 CLI harnesses use the same interface. Credentials remain separate by profile,
 and HTTP clients must send their assigned Harness token as a bearer token.
-Configure unattended harnesses with an isolated MCP config containing only
-`http://127.0.0.1:8790/mcp` and their worker token; do not expose the manager
-profile to an unattended process. `agent_env` supports `{credential}` and
+Never expose the manager profile to an unattended process. `agent_env` supports `{credential}` and
 `{bearer_credential}` placeholders without placing tokens in runner YAML.
 The runner writes mode-restricted Discovery-ready events, materializes the same
 idempotent task identities on retries, and exits scheduled work silently when
@@ -349,7 +339,7 @@ The equivalent MCP flow calls `subscribe_public_pod` with that canonical URL
 through `stumble-subscriber-manager`, then calls `synchronize_subscription`
 there with the returned Subscription identity for incremental refreshes.
 Continue to use `stumble-origin-curator` for later Candidate routing and
-acceptance. Addressing the adapters this way keeps node selection in operator
+acceptance. Addressing the profiles this way keeps node selection in operator
 configuration rather than in caller-supplied tool arguments.
 
 Only public Pod metadata, signed Package versions, Accepted Placements, and

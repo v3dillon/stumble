@@ -928,11 +928,11 @@ pub fn load_store_snapshot(path: &Path) -> Result<InMemoryStore, StorePersistenc
 }
 
 const SQLITE_STORE_SCHEMA: &str =
-    include_str!("../../../migrations/sqlite/0002_authoritative_store.sql");
+    include_str!("../migrations/sqlite/0002_authoritative_store.sql");
 const SQLITE_DROP_LEGACY_HUB: &str =
-    include_str!("../../../migrations/sqlite/0003_drop_legacy_hub.sql");
+    include_str!("../migrations/sqlite/0003_drop_legacy_hub.sql");
 const SQLITE_SEARCH_INDEX_SCHEMA: &str =
-    include_str!("../../../migrations/sqlite/0004_search_index.sql");
+    include_str!("../migrations/sqlite/0004_search_index.sql");
 const STORE_COLLECTIONS: &[&str] = &[
     "tenants",
     "users",

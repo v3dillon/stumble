@@ -32,16 +32,21 @@ Profile. Previously Delivered Items become Old Gems after the recurrence window
 decays, after a new independent Pod Placement appears, or after the User both saves
 the item and requests More like this.
 
-MCP `FeedBatchRequest` arguments and CLI `feed` flags expose the same Feed Mix
-and Batch Intent fields. Priority Subscription updates are available through MCP
-`set_priority_subscription` and CLI `stumble pod subscription set`.
+MCP `get_feed_batch` arguments expose the Feed Mix and Batch Intent fields
+directly; the CLI accepts the same `FeedBatchRequest` only as JSON via
+`stumble feed batch get --input <file>` (omitting `--input` requests a default
+batch of 7). Priority Subscription updates are a Core operation surfaced only
+through CLI `stumble pod subscription set`; there is no MCP tool for them.
 
 Each item carries its Content Reference, all contributing Accepted Placement
 evidence, discovery provenance, Attention Value evidence, exploration label, current
 feedback state, and permission-derived next actions. Feedback supports Save, More
 like this, Less like this, Dismiss, source block, and topic block; the existing Add to
 Pod operation creates an Accepted Placement while preserving provenance. Stumble
-does not collect dwell time or session duration.
+does not collect dwell time or session duration. On the bare `stumble` press,
+each shown item additionally carries its locally stored assets — the generated
+cover and readable snapshot, when present — resolved at presentation time; this
+is press-only, and `stumble feed batch get` returns items without assets.
 
 ## Private Taste Profile
 
@@ -59,9 +64,10 @@ or other federation surfaces.
 
 Harness adapters expose the same contract:
 
-- MCP: `get_feed_batch`, `complete_feed_batch`, and `record_feed_feedback`.
-- CLI: `stumble feed batch get`, `stumble feed batch complete`, and
-  `stumble feed feedback record`.
+- MCP: `get_feed_batch`, `complete_feed_batch`, `record_feed_feedback`, and
+  `retract_interest_seed`.
+- CLI: `stumble feed batch get`, `stumble feed batch complete`,
+  `stumble feed feedback record`, and `stumble feed taste retract`.
 
 The bare `stumble` press is a CLI presentation surface composed from these
 same operations: each press shows the next not-yet-shown item of the current
@@ -75,9 +81,9 @@ still giving the button a network answer.
 The HTTP API serves only the node-to-node network surface (federation,
 Bootstrap, and Discovery Peer routes); the Feed is a local Harness surface.
 
-Taste Profile inspection, explicit updates, and selective/all learned reset are
-available through MCP (`get_taste_profile`, `update_taste_profile`, and
-`reset_learned_taste`) and CLI (`stumble feed taste show`,
-`stumble feed taste set`, and `stumble feed taste reset`). Whole-profile operations require an unscoped
+Taste Profile inspection is available through MCP (`get_taste_profile`) and CLI
+(`stumble feed taste show`); explicit updates and selective/all learned reset
+are CLI-only (`stumble feed taste set` and
+`stumble feed taste reset`). Whole-profile operations require an unscoped
 Feedback grant; Pod-scoped harnesses continue to use item-scoped feedback without
 receiving access to the User's complete private profile.

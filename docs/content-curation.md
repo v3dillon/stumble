@@ -8,7 +8,7 @@ Attached media evidence crosses a validated Content Reference boundary: only can
 
 On upgrade, deserialization normalizes older canonical-equivalent media spellings at the same boundary; invalid legacy references reject the store instead of entering domain state. Canonical-equivalent spelling changes do not emit metadata events because they do not change media identity or evidence, and upgraded subscribers apply the same normalization independently. The next successful atomic store write persists the canonical spelling.
 
-The public domain API uses `ContentItem` and `ContentItemId`; legacy `Submission` records remain a private persistence compatibility layer behind the canonical type. Routing reasons and curation notes use a validated non-empty rationale type, so invalid values are rejected during both direct construction and deserialization.
+The public domain API uses `ContentItem` and `ContentItemId`; the legacy `Submission` and `SubmissionId` types remain public and re-exported, but `ContentItem` holds its backing `Submission` in a private field, so the canonical type is the only path to that record. Routing reasons and curation notes use a validated non-empty rationale type, so invalid values are rejected during both direct construction and deserialization.
 
 Federation emits a synchronization-safe Accepted Placement projection containing the Content Item identity, public Pod-fit reason, curation path, Origin Node, and acceptance time. Candidate IDs, Candidate Submission IDs, local actor identities, audit notes, and legacy private fields never enter that event. Subscribers persist the projection for Feed attribution alongside the accepted Content Item.
 

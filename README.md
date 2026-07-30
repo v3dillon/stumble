@@ -19,13 +19,14 @@ Stumble stores its Home Node under `~/.stumble/nodes/home` by default. Set `STUM
 
 ### Share a Pod with a friend
 
-A Pod travels with its context: subscribing pulls the accepted content *and* the Pod Package (`CONTEXT.md` + `SKILL.md`), so your friend's harness immediately understands the Pod's subject and curation rules.
+A Pod travels with its context: subscribing pulls the accepted content *and* the Pod Package (`CONTEXT.md` + `SKILL.md`), so your friend's harness immediately understands the Pod's subject and curation rules. Serving needs the API binary, which installs separately: `cargo install --path crates/stumble-api --locked`.
 
 ```bash
 # You: publish and serve
 stumble pod publish rust-craft --base-url https://your-node.example
 stumble-api --bind 0.0.0.0:8787          # keep running while friends sync
-                                         # (or stumble-runner serve, which also serves MCP)
+                                         # (or stumble-runner --config ~/.config/stumble/runner.yaml serve,
+                                         #  which also serves MCP)
 
 # Friend: subscribe by the URL you sent, read, and re-sync any time
 stumble pod subscribe https://your-node.example/federation/pods/rust-craft
@@ -42,7 +43,7 @@ Pod packages from other people are treated as untrusted: the installed skill fen
 
 ### Discover Pods from the network
 
-Home Nodes passively learn about published Pods: `stumble-runner serve` pulls Bootstrap Announcement Streams and Discovery Peer streams on an interval (`network_sync_every_seconds`, default 15 minutes), and `stumble pod publish` pushes your announcement to every enabled Bootstrap endpoint automatically. The same daemon tick re-announces your published Pods — renewing Announcement Leases and propagating content changes, since announcements bind the latest signed event pointer. Without the daemon, run `stumble pod announce` after curating. Then:
+Home Nodes passively learn about published Pods: `stumble-runner --config ~/.config/stumble/runner.yaml serve` pulls Bootstrap Announcement Streams and Discovery Peer streams on an interval (`network_sync_every_seconds`, default 15 minutes), and `stumble pod publish` pushes your announcement to every enabled Bootstrap endpoint automatically. The same daemon tick re-announces your published Pods — renewing Announcement Leases and propagating content changes, since announcements bind the latest signed event pointer. Without the daemon, run `stumble pod announce` after curating. Then:
 
 ```bash
 stumble pod explore --query "distributed systems"   # ranked against your private taste, with signed content previews
@@ -81,7 +82,8 @@ Your harness then knows the loop: open a shared link, understand it, `stumble ad
 | Command | Description |
 | --- | --- |
 | `stumble` | Press the button: one new item per press — from your Feed, or from the network when caught up. Prints a text card; `--format json` for harnesses. |
-| `stumble add <url>` | Add a link to a Pod and your Feed in one step (`--pod`, `--title`, `--summary`, `--tag`, `--note`, `--image`, `--cover`, `--snapshot`). |
+| `stumble add <url>` | Add a link to a Pod and your Feed in one step (`--pod`, `--title`, `--summary`, `--excerpt`, `--tag`, `--note`, `--image`, `--cover`, `--snapshot`). |
+| `stumble search <query>` | Local BM25 full-text search over everything saved on this node — titles, summaries, tags, notes, snapshots (`--limit`, 1-50, default 10). |
 
 The rest of the CLI is JSON-first and organized into five workflow families. Add `--help` at any command level for arguments and defaults.
 

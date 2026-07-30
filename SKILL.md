@@ -53,7 +53,8 @@ commentary, don't ask what to do — open it, react with one line of what it is
 and why it's interesting, and save it. Route it to a matching Pod when one
 obviously fits (mention which); otherwise the default `saved` Pod. Re-adding
 dedupes, and if they wanted something else ("just summarize this") they'll
-say so — offer to remove it (`stumble pod content remove`) and move on.
+say so — offer to remove it (`stumble pod content remove <pod>
+<content_item_id> --reason <reason>`) and move on.
 
 1. Open the URL with your own browser tools. If it needs a login (an X post,
    a members-only newsletter), use the user's existing browser session — never
@@ -236,7 +237,9 @@ stumble sync pod run <slug>
 
 After subscribing, the Pod's items flow into `feed batch get` automatically,
 and `stumble pod package show <slug>` gives you the friend's curation context
-to work with. The sharer's node must be running `stumble-api` to be reachable.
+to work with. The sharer's node must be running `stumble-api` to be reachable
+(a separate binary, not part of the `stumble-cli` install:
+`cargo install --path crates/stumble-api --locked`).
 
 To make a Pod's guidance part of your own skill system, install it:
 

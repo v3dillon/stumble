@@ -116,6 +116,10 @@ _Avoid_: Dopamine score, infinite feed
 The explicit Feed state reached when the current Feed Batch has been consumed, before the User deliberately requests another batch.
 _Avoid_: Empty state, end of page
 
+**Press**:
+One press of the bare `stumble` one-press discovery button, yielding exactly one outcome: the next unseen Feed Batch item, a clearly labeled sample from an unsubscribed public Pod on the network, or a Caught Up report when nothing new exists anywhere.
+_Avoid_: Refresh, next page, random button
+
 **Delivered Item**:
 A Content Item included in a Feed Batch returned to an Agent Harness; delivery suppresses near-term repetition but does not permanently exclude the item.
 _Avoid_: Seen item, read item
@@ -198,7 +202,11 @@ _Avoid_: Engagement, dwell time, retention
 
 **Explore**:
 The intentional discovery surface for public Pods and their Content Items beyond the User's current Subscriptions.
-_Avoid_: Search, trending page
+_Avoid_: Trending page. Not Search: Explore discovers unfamiliar Pods on the network; Search looks up what is already in the User's own collection.
+
+**Search**:
+Local BM25 full-text search over everything saved on this node, returning ranked hits with source URL, holding Pods, and a matching snippet; it never queries the network.
+_Avoid_: Explore, web search, remote index query
 
 **Exploration Item**:
 A clearly labeled Content Item selected from an unsubscribed public Pod to introduce controlled discovery into a Feed Batch.
@@ -223,6 +231,10 @@ _Avoid_: Personal list, local-only channel
 The durable source URL, permitted metadata, generated understanding, and provenance through which Stumble represents third-party content without necessarily mirroring it.
 _Avoid_: Archived copy, repost
 
+**Readable Snapshot**:
+A local archive of what a saved page actually said, sourced from the page's own text or provided by the User—deliberately never AI-generated—so a Content Item remains readable after link rot.
+_Avoid_: AI summary, cached render, mirror
+
 **Node Agent**:
 The local automation process that runs synchronization, routing, enrichment, and Feed preparation on behalf of a node's Users and Pods.
 _Avoid_: Pod agent, crawler daemon
@@ -246,6 +258,10 @@ _Avoid_: Crawl job, scheduled prompt
 **Personal Discovery**:
 User-scoped discovery governed by a private Discovery Plan that produces a Discovery Result Batch without requiring or modifying a Pod.
 _Avoid_: For You Pod, personal Pod, global recommendations
+
+**Inbox**:
+The User's private Pod that receives an Accepted Placement whenever they take the save review action—surfaced to Users as "save (private inbox)"—and never participates in federation.
+_Avoid_: Bookmarks, read-later queue, saved folder
 
 **Scheduler Adapter**:
 A mechanism that wakes discovery workers, supplied either by an Agent Harness or by Stumble's local platform integration without changing Discovery Task semantics.
