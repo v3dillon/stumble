@@ -21,10 +21,8 @@ target/release/stumble-api --data-dir ~/.stumble/nodes/origin \
 `stumble.sqlite3` is authoritative. Back up the complete node directory while
 the node is stopped. Restore that directory as a unit and restart with the same
 `--data-dir`; signed identity, package history, synchronization cursors, tasks,
-Feed history, and private projections then resume together. If an older node has
-only `store.json`, first boot transactionally imports it only into an empty
-database and preserves `store.json.migrated.bak`. Never copy a legacy JSON file
-over a populated SQLite node.
+Feed history, and private projections then resume together. `node init` creates
+an empty Home Node by default; pass `--demo` only when you want seed fixtures.
 
 ## Harness grants and tools
 

@@ -11,8 +11,9 @@ use stumble_cli::{
     ExitStatusCategory, OwnerAuthorityStore, ResourceDetail, SuccessEnvelope,
 };
 use stumble_core::{
-    seed_store, AgentTools, AgentToolsError, AuthContext, DiscoveryLeaseSeconds, DiscoveryTask,
-    DiscoveryTaskState, FeedBatch, Pod, StoreError, TasteProfile, PORTABLE_PACKAGE_FILES,
+    empty_home_node_store, seed_store, AgentTools, AgentToolsError, AuthContext,
+    DiscoveryLeaseSeconds, DiscoveryTask, DiscoveryTaskState, FeedBatch, Pod, StoreError,
+    TasteProfile, PORTABLE_PACKAGE_FILES,
 };
 
 #[path = "stumble/discover.rs"]
@@ -343,6 +344,7 @@ fn page<T>(
 fn initialize_node(
     selected_data_dir: &std::path::Path,
     owner_authority: &dyn OwnerAuthorityStore,
+    demo: bool,
 ) -> Result<Value, (ErrorBody, ExitStatusCategory)> {
     let data_dir = resolve_initialized_data_dir(selected_data_dir)
         .map_err(|error| (error, ExitStatusCategory::ValidationOrConflict))?;
@@ -364,7 +366,12 @@ fn initialize_node(
             .register(&data_dir)
             .map_err(credential_error)?;
     }
-    let tools = match AgentTools::initialize_home_node(&data_dir, seed_store) {
+    let seed = if demo {
+        seed_store
+    } else {
+        empty_home_node_store
+    };
+    let tools = match AgentTools::initialize_home_node(&data_dir, seed) {
         Ok(tools) => tools,
         Err(error) => {
             if !authority_was_registered {
@@ -516,7 +523,7 @@ mod owner_authority_initialization_tests {
         std::fs::create_dir_all(&data_dir).unwrap();
         std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
 
-        let (error, _) = initialize_node(&data_dir, &RemovalFailureStore).unwrap_err();
+        let (error, _) = initialize_node(&data_dir, &RemovalFailureStore, false).unwrap_err();
 
         std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         let _ = std::fs::remove_dir_all(data_dir);

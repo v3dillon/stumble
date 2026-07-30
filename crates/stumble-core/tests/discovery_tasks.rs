@@ -513,7 +513,11 @@ fn pre_feature_tasks_migrate_identity_provenance_history_and_idempotency() {
     )
     .unwrap();
 
-    let reopened = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
+    // Reopen from the pre-feature snapshot as the initial seed (JSON import path removed).
+    let reopened = AgentTools::open_home_node(&data_dir.0, || {
+        load_store_snapshot(&snapshot_path).expect("load pre-feature snapshot")
+    })
+    .unwrap();
     let restored = reopened
         .discovery_task_status(&worker, scheduled.id, at)
         .unwrap();

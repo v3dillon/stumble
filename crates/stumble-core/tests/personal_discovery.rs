@@ -1721,43 +1721,6 @@ fn private_discovery_lead_types_remain_absent_from_federation_and_outbound_artif
     let explored = home
         .explore_public_pods(&manager, ExploreRequest::new("systems", 10, 5).unwrap())
         .unwrap();
-    let relayed = {
-        // Relay surface requires a trusted peer; create a disposable peer node.
-        let peer_dir = TestDataDir::new("privacy-peer");
-        let peer = AgentTools::open_home_node(&peer_dir.0, seed_store).unwrap();
-        let peer_info = peer
-            .node_info(&peer.default_auth_context().unwrap())
-            .unwrap();
-        let proposer = admin_harness(
-            &home,
-            "privacy peer proposer",
-            vec![HarnessCapability::Administration],
-        );
-        let approver = admin_harness(
-            &home,
-            "privacy peer approver",
-            vec![HarnessCapability::Approval],
-        );
-        let now = Utc::now();
-        let proposal = home
-            .request_add_trusted_peer(
-                &proposer,
-                peer_info.display_name.clone(),
-                "https://privacy-peer.example".into(),
-                peer_info.public_key.clone(),
-                now,
-            )
-            .unwrap();
-        home.approve_pending_proposal(&approver, proposal.id, now)
-            .unwrap();
-        let trusted = home
-            .trusted_peers(&proposer)
-            .unwrap()
-            .into_iter()
-            .find(|trusted| trusted.public_key == peer_info.public_key)
-            .unwrap();
-        home.relay_pod_announcements(&proposer, trusted.id).unwrap()
-    };
 
     let outbound = serde_json::to_string(&serde_json::json!({
         "node": home.node_info(&federation).unwrap(),
@@ -1770,7 +1733,6 @@ fn private_discovery_lead_types_remain_absent_from_federation_and_outbound_artif
         "endorsements": endorsements,
         "index_search": index_search,
         "explore": explored,
-        "relayed": relayed,
     }))
     .unwrap();
     for forbidden in [

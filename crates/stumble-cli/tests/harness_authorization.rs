@@ -131,8 +131,12 @@ async fn discovery_task_adapters_return_equivalent_authorization_denials() {
     let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
     assert!(mcp
         .call(McpToolCall {
-            tool: "list_discovery_tasks".into(),
-            arguments: json!({}),
+            tool: "create_immediate_discovery_task".into(),
+            arguments: json!({
+                "pod_id": Uuid::nil(),
+                "instructions": "should be denied",
+                "idempotency_key": "denied"
+            }),
         })
         .unwrap_err()
         .to_string()
@@ -233,7 +237,7 @@ async fn discovery_task_adapters_return_the_same_typed_target() {
     let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
     let mcp_task = mcp
         .call(McpToolCall {
-            tool: "list_discovery_tasks".into(),
+            tool: "list_ready_discovery_tasks".into(),
             arguments: json!({}),
         })
         .unwrap()[0]
@@ -255,8 +259,9 @@ async fn discovery_task_adapters_return_the_same_typed_target() {
     let http: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let http_task = http[0].clone();
 
-    assert_eq!(cli_task, mcp_task);
-    assert_eq!(mcp_task, http_task);
+    // CLI list and HTTP list return the full task inventory; MCP exposes ready tasks only.
+    assert_eq!(cli_task, http_task);
+    assert_eq!(mcp_task["id"], http_task["id"]);
     assert_eq!(http_task["target"]["kind"], "pod");
     assert_eq!(http_task["target"]["pod_id"], pod.id.to_string());
     assert_eq!(http_task["target"]["package_version"], 1);
@@ -286,17 +291,18 @@ fn package_fixture() -> (TestDataDir, AgentTools, String) {
 }
 
 #[test]
-fn mcp_creates_reads_validates_exports_and_imports_pod_packages() {
+fn core_and_mcp_read_created_pod_packages() {
     let (_data_dir, tools, token) = package_fixture();
-    let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
-    let mcp_created = mcp
-        .call(McpToolCall {
-            tool: "create_private_pod_with_package".into(),
-            arguments: serde_json::to_value(create_request("mcp-package")).unwrap(),
-        })
+    let actor = tools.authenticate_token(&token).unwrap().unwrap();
+    let created = tools
+        .create_private_pod_with_package(&actor, create_request("mcp-package"))
         .unwrap();
-    assert_eq!(mcp_created["pod"]["visibility"], "private");
-    assert_eq!(mcp_created["package"]["version"], 1);
+    assert_eq!(
+        serde_json::to_value(&created.pod.visibility).unwrap(),
+        json!("private")
+    );
+    assert_eq!(created.package.version, 1);
+    let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
     let mcp_read = mcp
         .call(McpToolCall {
             tool: "get_pod_package".into(),
@@ -304,26 +310,15 @@ fn mcp_creates_reads_validates_exports_and_imports_pod_packages() {
         })
         .unwrap();
     assert_eq!(mcp_read["version"], 1);
-    let mcp_validation = mcp
-        .call(McpToolCall {
-            tool: "validate_pod_package".into(),
-            arguments: json!({"pod_slug": "mcp-package"}),
-        })
+    let validation = tools
+        .validate_pod_skill_pack(&actor, "mcp-package")
         .unwrap();
-    assert_eq!(mcp_validation["valid"], true);
-    let mcp_export = mcp
-        .call(McpToolCall {
-            tool: "export_pod_package".into(),
-            arguments: json!({"pod_slug": "mcp-package"}),
-        })
+    assert!(validation.valid);
+    let exported = tools.export_skill_pack(&actor, "mcp-package").unwrap();
+    let imported = tools
+        .import_skill_pack(&actor, "mcp-package", exported.files)
         .unwrap();
-    let mcp_import = mcp
-        .call(McpToolCall {
-            tool: "import_pod_package".into(),
-            arguments: json!({"pod_slug": "mcp-package", "files": mcp_export["files"]}),
-        })
-        .unwrap();
-    assert_eq!(mcp_import["version"], 2);
+    assert_eq!(imported.version, 2);
 }
 
 #[tokio::test]

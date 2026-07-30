@@ -1,8 +1,9 @@
 mod support;
 
+use chrono::Utc;
 use serde_json::json;
 use stumble_core::{
-    CreatePodOutcome, DiscoveryTask, DiscoveryTaskState, HarnessCapability, MediaReference,
+    CreatePodOutcome, DiscoveryTaskId, DiscoveryTaskState, HarnessCapability, MediaReference,
     MediaReferenceType, PodContentItem, PodId, PodPlacementStatus, ProposalStatus, Visibility,
 };
 use stumble_mcp::{McpToolCall, McpToolRouter};
@@ -304,15 +305,23 @@ impl TwoNodeScenario {
         assert!(denied_route
             .to_string()
             .contains("harness grant lacks pod_curation"));
-        let completed_task = direct_discovery_router
-            .call(McpToolCall {
-                tool: "discovery_task_status".into(),
-                arguments: json!({"task_id": discoveries.task_id}),
-            })
+        let discovery_ctx = self
+            .origin
+            .tools
+            .authenticate_token(harnesses.discovery.token())
+            .expect("authenticate discovery harness")
+            .expect("discovery harness token current");
+        let task_id: DiscoveryTaskId = discoveries
+            .task_id
+            .parse()
+            .expect("Discovery Task id is a UUID");
+        let completed_task = self
+            .origin
+            .tools
+            .discovery_task_status(&discovery_ctx, task_id, Utc::now())
             .expect("Origin retains its completed Discovery Task");
-        let completed_task: DiscoveryTask =
-            serde_json::from_value(completed_task).expect("completed Discovery Task result");
         assert_eq!(completed_task.state, DiscoveryTaskState::Completed);
+        let _ = direct_discovery_router;
     }
 
     async fn curate_six_posts(
@@ -487,16 +496,26 @@ impl TwoNodeScenario {
             home_harnesses.private_state_reader.token(),
         )
         .expect("authenticate direct Home private-state router");
-        let missing_completed_task = home_private_router
-            .call(McpToolCall {
-                tool: "discovery_task_status".into(),
-                arguments: json!({"task_id": discoveries.task_id}),
-            })
+        let home_ctx = self
+            .home
+            .tools
+            .authenticate_token(home_harnesses.private_state_reader.token())
+            .expect("authenticate home private reader")
+            .expect("home private reader token current");
+        let task_id: DiscoveryTaskId = discoveries
+            .task_id
+            .parse()
+            .expect("Discovery Task id is a UUID");
+        let missing_completed_task = self
+            .home
+            .tools
+            .discovery_task_status(&home_ctx, task_id, Utc::now())
             .expect_err("Origin Discovery Task must not exist on Home Node");
         assert!(missing_completed_task
             .to_string()
             .contains("Discovery Task"));
         assert!(missing_completed_task.to_string().contains("not found"));
+        let _ = home_private_router;
 
         let home_ready_tasks = private_reader
             .call_tool(80, "list_ready_discovery_tasks", json!({}))

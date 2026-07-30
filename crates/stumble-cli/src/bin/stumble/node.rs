@@ -15,7 +15,7 @@ pub(super) fn execute(
     owner_authority: &dyn OwnerAuthorityStore,
 ) -> CliResult {
     match command {
-        NodeWorkflow::Init => initialize_node(selected_data_dir, owner_authority),
+        NodeWorkflow::Init { demo } => initialize_node(selected_data_dir, owner_authority, demo),
         NodeWorkflow::Show => {
             let (data_dir, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
             let node = tools.node_info(&actor).map_err(agent_tools_error)?;

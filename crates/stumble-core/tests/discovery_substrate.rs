@@ -307,9 +307,6 @@ fn trusted_peers_relay_origin_signed_announcements_without_gaining_authority() {
     let relay_info = relay
         .node_info(&relay.default_auth_context().unwrap())
         .unwrap();
-    let home_info = home
-        .node_info(&home.default_auth_context().unwrap())
-        .unwrap();
     let announcement = origin
         .pod_announcement(
             &origin.default_auth_context().unwrap(),
@@ -326,13 +323,18 @@ fn trusted_peers_relay_origin_signed_announcements_without_gaining_authority() {
     relay
         .receive_pod_announcement(&relay_admin, relay_peer.id, announcement.clone())
         .unwrap();
-    let relay_home_peer = trust_peer(&relay, &home_info, "https://home.example");
-    let relayed_announcement = relay
-        .relay_pod_announcements(&relay_admin, relay_home_peer.id)
-        .unwrap()
-        .into_iter()
-        .find(|candidate| candidate.pod_slug == announcement.pod_slug)
-        .unwrap();
+    // Peer delivery reuses Origin-signed bytes from the relay's retained store;
+    // the relay never re-signs or becomes the Origin.
+    let relayed_announcement = {
+        let store = relay.store();
+        let store = store.read().unwrap();
+        store
+            .known_pod_announcements
+            .values()
+            .find(|known| known.announcement.pod_slug == announcement.pod_slug)
+            .map(|known| known.announcement.clone())
+            .expect("relay retained Origin announcement")
+    };
 
     let home_peer = trust_peer(&home, &relay_info, "https://relay.example");
     let home_admin = harness(
@@ -1308,10 +1310,11 @@ fn expiry_and_withdrawal_remove_discovery_while_preserving_subscriptions() {
             .len(),
         1
     );
-    assert_eq!(
-        home.relay_pod_announcements(&admin, peer.id).unwrap().len(),
-        1
-    );
+    {
+        let store = home.store();
+        let store = store.read().unwrap();
+        assert!(announcement_is_discovery_eligible(&store, &announcement, t0));
+    }
 
     // Expiry-driven exclusion (advanced clock) without mutating subscriptions.
     let expired_now = t0 + announcement_lease_duration() + Duration::seconds(1);
@@ -1373,10 +1376,15 @@ fn expiry_and_withdrawal_remove_discovery_while_preserving_subscriptions() {
         .unwrap()
         .results
         .is_empty());
-    assert!(home
-        .relay_pod_announcements(&admin, peer.id)
-        .unwrap()
-        .is_empty());
+    {
+        let store = home.store();
+        let store = store.read().unwrap();
+        assert!(!announcement_is_discovery_eligible(
+            &store,
+            &live_announcement,
+            live_now + chrono::Duration::hours(1)
+        ));
+    }
 
     // Subscription and synchronized content remain.
     let store = home.store();

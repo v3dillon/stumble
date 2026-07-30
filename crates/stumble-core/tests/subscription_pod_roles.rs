@@ -264,7 +264,10 @@ fn legacy_memberships_migrate_losslessly_and_idempotently_across_restart() {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(first_ids, second_ids);
 
-    let migrated = AgentTools::open_home_node(&data_dir.0, InMemoryStore::default).unwrap();
+    let migrated = AgentTools::open_home_node(&data_dir.0, || {
+        load_store_snapshot(&legacy_path).expect("load legacy membership snapshot")
+    })
+    .unwrap();
     assert_migrated_relationships(
         &migrated,
         owner.user_id.unwrap(),

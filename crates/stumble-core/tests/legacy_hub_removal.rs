@@ -252,12 +252,13 @@ fn explore_surface_uses_substrate_types_without_hub_fields() {
 }
 
 #[test]
-fn hosted_init_schema_source_contains_no_hub_tables() {
-    let sqlite_init = include_str!("../../../migrations/sqlite/0001_init.sql");
-    let postgres_init = include_str!("../../../migrations/postgres/0001_init.sql");
-    for source in [sqlite_init, postgres_init] {
-        assert!(!source.contains("hub_registered_nodes"));
-        assert!(!source.contains("hub_registered_pods"));
-        assert!(!source.to_lowercase().contains("hub_"));
-    }
+fn authoritative_store_schema_source_contains_no_hub_tables() {
+    let schema = include_str!("../../../migrations/sqlite/0002_authoritative_store.sql");
+    assert!(!schema.contains("hub_registered_nodes"));
+    assert!(!schema.contains("hub_registered_pods"));
+    assert!(!schema.to_lowercase().contains("hub_"));
+    // Forward cleanup may name hub tables only as DROP targets.
+    let drop_legacy = include_str!("../../../migrations/sqlite/0003_drop_legacy_hub.sql");
+    assert!(drop_legacy.contains("DROP TABLE IF EXISTS hub_registered_nodes"));
+    assert!(drop_legacy.contains("DROP TABLE IF EXISTS hub_registered_pods"));
 }

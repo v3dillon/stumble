@@ -935,19 +935,6 @@ pub fn load_store_snapshot(path: &Path) -> Result<InMemoryStore, StorePersistenc
     Ok(store)
 }
 
-pub fn load_or_seed_store_snapshot(
-    path: &Path,
-    seed: impl FnOnce() -> InMemoryStore,
-) -> Result<InMemoryStore, StorePersistenceError> {
-    if path.exists() {
-        load_store_snapshot(path)
-    } else {
-        let store = seed();
-        save_store_snapshot(&store, path)?;
-        Ok(store)
-    }
-}
-
 const SQLITE_STORE_SCHEMA: &str =
     include_str!("../../../migrations/sqlite/0002_authoritative_store.sql");
 const SQLITE_DROP_LEGACY_HUB: &str =
@@ -1021,11 +1008,9 @@ const STORE_COLLECTIONS: &[&str] = &[
 
 type StoreRecords = BTreeMap<(String, String), String>;
 
-/// Opens the authoritative SQLite store, importing a legacy JSON snapshot only
-/// when the database has never been initialized.
+/// Opens the authoritative SQLite store, seeding only when the database is empty.
 pub fn load_or_initialize_sqlite_store(
     database_path: &Path,
-    legacy_path: &Path,
     seed: impl FnOnce() -> InMemoryStore,
 ) -> Result<InMemoryStore, StorePersistenceError> {
     if let Some(parent) = database_path.parent() {
@@ -1040,15 +1025,7 @@ pub fn load_or_initialize_sqlite_store(
         SqliteStoreState::Empty => {}
     }
 
-    let store = if legacy_path.exists() {
-        let backup_path = legacy_path.with_extension("json.migrated.bak");
-        if !backup_path.exists() {
-            std::fs::copy(legacy_path, backup_path)?;
-        }
-        load_store_snapshot(legacy_path)?
-    } else {
-        seed()
-    };
+    let store = seed();
     initialize_sqlite_store(&mut connection, &store)?;
     Ok(store)
 }
@@ -1731,9 +1708,8 @@ mod tests {
     fn sqlite_home_node_initializes_and_restarts() {
         let dir = temp_store_dir("sqlite-restart");
         let database_path = dir.join("stumble.sqlite3");
-        let legacy_path = dir.join("store.json");
 
-        let first = load_or_initialize_sqlite_store(&database_path, &legacy_path, || {
+        let first = load_or_initialize_sqlite_store(&database_path, || {
             crate::seeds::seed_store()
         })
         .unwrap();
@@ -1744,7 +1720,7 @@ mod tests {
             .unwrap()
             .id;
         let restarted =
-            load_or_initialize_sqlite_store(&database_path, &legacy_path, InMemoryStore::default)
+            load_or_initialize_sqlite_store(&database_path, InMemoryStore::default)
                 .unwrap();
 
         assert!(database_path.exists());
@@ -1765,9 +1741,8 @@ mod tests {
     fn sqlite_transactions_preserve_writes_from_separate_home_node_instances() {
         let dir = temp_store_dir("sqlite-concurrent-writes");
         let database_path = dir.join("stumble.sqlite3");
-        let legacy_path = dir.join("store.json");
         let first_store =
-            load_or_initialize_sqlite_store(&database_path, &legacy_path, crate::seeds::seed_store)
+            load_or_initialize_sqlite_store(&database_path, crate::seeds::seed_store)
                 .unwrap();
         let second_store = load_sqlite_store(&database_path).unwrap();
         let first = crate::AgentTools::new_sqlite_persistent(first_store, &database_path);
@@ -1823,9 +1798,8 @@ mod tests {
     fn sqlite_rejects_a_stale_write_to_the_same_record() {
         let dir = temp_store_dir("sqlite-conflicting-writes");
         let database_path = dir.join("stumble.sqlite3");
-        let legacy_path = dir.join("store.json");
         let first_store =
-            load_or_initialize_sqlite_store(&database_path, &legacy_path, crate::seeds::seed_store)
+            load_or_initialize_sqlite_store(&database_path, crate::seeds::seed_store)
                 .unwrap();
         let user_id = *first_store.users.keys().next().unwrap();
         let local_node_id = first_store.default_node().unwrap().id;
@@ -1910,7 +1884,6 @@ mod tests {
     fn two_connections_prevent_stale_discovery_task_migration_overwrite() {
         let dir = temp_store_dir("sqlite-discovery-task-migration-race");
         let database_path = dir.join("stumble.sqlite3");
-        let legacy_path = dir.join("store.json");
         let mut store = crate::seeds::seed_store();
         let pod_id = Uuid::now_v7();
         let now = chrono::Utc::now();
@@ -1929,7 +1902,7 @@ mod tests {
             created_at: now,
         };
         store.discovery_tasks.insert(task.id, task.clone());
-        load_or_initialize_sqlite_store(&database_path, &legacy_path, || store.clone()).unwrap();
+        load_or_initialize_sqlite_store(&database_path, || store.clone()).unwrap();
 
         let records = store_records(&store).unwrap();
         let ((_, record_key), canonical_json) = records
@@ -1998,47 +1971,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(persisted, lifecycle_json);
-
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn legacy_json_imports_once_with_a_recoverable_backup() {
-        let dir = temp_store_dir("sqlite-legacy-import");
-        let database_path = dir.join("stumble.sqlite3");
-        let legacy_path = dir.join("store.json");
-        let original = populated_legacy_store();
-        save_store_snapshot(&original, &legacy_path).unwrap();
-        let mut legacy_snapshot: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&legacy_path).unwrap()).unwrap();
-        legacy_snapshot["user_preferences"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("blocked_source_affinities");
-        let legacy_bytes = serde_json::to_vec_pretty(&legacy_snapshot).unwrap();
-        std::fs::write(&legacy_path, &legacy_bytes).unwrap();
-
-        let imported =
-            load_or_initialize_sqlite_store(&database_path, &legacy_path, InMemoryStore::default)
-                .unwrap();
-        assert_eq!(
-            store_records(&imported).unwrap(),
-            store_records(&original).unwrap()
-        );
-        let backup_path = legacy_path.with_extension("json.migrated.bak");
-        assert_eq!(std::fs::read(&backup_path).unwrap(), legacy_bytes);
-        let canonical: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&legacy_path).unwrap()).unwrap();
-        assert!(canonical["user_preferences"][0]["blocked_source_affinities"].is_array());
-
-        save_store_snapshot(&InMemoryStore::default(), &legacy_path).unwrap();
-        let restarted =
-            load_or_initialize_sqlite_store(&database_path, &legacy_path, InMemoryStore::default)
-                .unwrap();
-        assert_eq!(
-            store_records(&restarted).unwrap(),
-            store_records(&original).unwrap()
-        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2113,42 +2045,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn malformed_legacy_json_leaves_sqlite_empty_and_can_be_retried() {
-        let dir = temp_store_dir("sqlite-malformed-legacy");
-        let database_path = dir.join("stumble.sqlite3");
-        let legacy_path = dir.join("store.json");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&legacy_path, b"{ not valid json").unwrap();
-
-        assert!(matches!(
-            load_or_initialize_sqlite_store(&database_path, &legacy_path, InMemoryStore::default),
-            Err(StorePersistenceError::Json(_))
-        ));
-        assert!(store_records(&load_sqlite_store(&database_path).unwrap())
-            .unwrap()
-            .is_empty());
-
-        let recoverable = populated_legacy_store();
-        save_store_snapshot(&recoverable, &legacy_path).unwrap();
-        let imported =
-            load_or_initialize_sqlite_store(&database_path, &legacy_path, InMemoryStore::default)
-                .unwrap();
-        assert_eq!(
-            store_records(&imported).unwrap(),
-            store_records(&recoverable).unwrap()
-        );
-
-        let _ = std::fs::remove_dir_all(dir);
-    }
 
     #[test]
-    fn legacy_import_refuses_a_populated_database_without_migration_metadata() {
+    fn refuses_a_populated_database_without_migration_metadata() {
         let dir = temp_store_dir("sqlite-uninitialized-populated");
         let database_path = dir.join("stumble.sqlite3");
-        let legacy_path = dir.join("store.json");
         std::fs::create_dir_all(&dir).unwrap();
-        save_store_snapshot(&populated_legacy_store(), &legacy_path).unwrap();
         let connection = open_sqlite_store(&database_path).unwrap();
         connection
             .execute(
@@ -2159,7 +2061,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            load_or_initialize_sqlite_store(&database_path, &legacy_path, InMemoryStore::default),
+            load_or_initialize_sqlite_store(&database_path, InMemoryStore::default),
             Err(StorePersistenceError::PopulatedUninitializedDatabase)
         ));
         let existing: String = connection

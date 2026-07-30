@@ -58,14 +58,8 @@ pub(crate) enum McpTool {
     GetFeedBatch,
     CompleteFeedBatch,
     RecordFeedFeedback,
-    SetPrioritySubscription,
     GetTasteProfile,
-    UpdateTasteProfile,
-    ResetLearnedTaste,
     RetractInterestSeed,
-    RegisterAgentHarness,
-    RevokeAgentHarness,
-    CreatePendingProposal,
     GetPendingProposal,
     ApprovePendingProposal,
     RejectPendingProposal,
@@ -73,17 +67,11 @@ pub(crate) enum McpTool {
     RouteCandidate,
     ReviewCandidatePlacement,
     ListPodContent,
-    CreatePrivatePodWithPackage,
-    JoinPod,
     SubmitCandidate,
     InspectCandidate,
-    MaterializeDiscoveryTasks,
-    ListDiscoveryTasks,
     ListReadyDiscoveryTasks,
     CreateImmediateDiscoveryTask,
-    DiscoveryTaskStatus,
     ClaimDiscoveryTask,
-    RenewDiscoveryTask,
     CompleteDiscoveryTask,
     FailDiscoveryTask,
     PersonalDiscoveryReadiness,
@@ -102,27 +90,15 @@ pub(crate) enum McpTool {
     ListPersonalDiscoverySchedules,
     GetPersonalDiscoverySchedule,
     UpdatePersonalDiscoverySchedule,
-    DisablePersonalDiscoverySchedule,
-    RemovePersonalDiscoverySchedule,
     AttemptDiscoveryResultsReadyNotification,
     GetPodPackage,
-    ExportPodPackage,
-    ImportPodPackage,
-    ForkPodPackage,
-    ValidatePodPackage,
-    GetNodeInfo,
-    ListTrustedPeers,
-    AddTrustedPeer,
     SubscribePublicPod,
     SynchronizeSubscription,
-    SyncPodWithPeer,
-    ExportPodEvents,
-    ImportPodEvents,
 }
 
 #[cfg(test)]
 impl McpTool {
-    pub(crate) const VARIANT_COUNT: usize = Self::ImportPodEvents as usize + 1;
+    pub(crate) const VARIANT_COUNT: usize = Self::SynchronizeSubscription as usize + 1;
 }
 
 pub(crate) fn definitions() -> &'static [ToolDefinition] {
@@ -141,14 +117,8 @@ pub(crate) fn definitions() -> &'static [ToolDefinition] {
         d(Tool::GetFeedBatch, "get_feed_batch", CapabilityOnly(Capability::FeedRead), feed_batch_schema(), Blocking, published(18, "Get Personal Feed", "Return a stable finite Feed Batch with provenance, explanations, and allowed actions.", false, false)),
         d(Tool::CompleteFeedBatch, "complete_feed_batch", CapabilityOnly(Capability::FeedRead), uuid_schema("batch_id"), Blocking, published(19, "Complete Feed Batch", "Mark a finite Feed Batch complete after presentation.", false, false)),
         d(Tool::RecordFeedFeedback, "record_feed_feedback", InteractiveFeedback, feedback_schema(), Blocking, published(20, "Record Feed Feedback", "Record an explicit private Feedback Signal for a delivered Content Item.", false, false)),
-        d(Tool::SetPrioritySubscription, "set_priority_subscription", CapabilityOnly(Capability::SubscriptionManagement), object_schema(json!({"pod_id": uuid(), "is_priority": {"type": "boolean"}}), &["pod_id", "is_priority"]), Blocking, hidden("Set Priority Subscription", "Change whether a Subscription is prioritized in Feed composition.", false, false)),
         d(Tool::GetTasteProfile, "get_taste_profile", UnscopedInteractiveFeedback, empty_schema(), Blocking, published(21, "Get Taste Profile", "Read the private inspectable Taste Profile.", true, false)),
-        d(Tool::UpdateTasteProfile, "update_taste_profile", UnscopedInteractiveFeedback, update_taste_schema(), Blocking, hidden("Update Taste Profile", "Update explicit private Taste Profile settings.", false, false)),
-        d(Tool::ResetLearnedTaste, "reset_learned_taste", UnscopedInteractiveFeedback, reset_taste_schema(), Blocking, hidden("Reset Learned Taste", "Reset learned private Taste Profile weights.", false, true)),
         d(Tool::RetractInterestSeed, "retract_interest_seed", UnscopedInteractiveFeedback, uuid_schema("candidate_id"), Blocking, published(22, "Retract Interest Seed", "Retract one submitted reference's private learning contribution without deleting the reference.", false, true)),
-        d(Tool::RegisterAgentHarness, "register_agent_harness", CapabilityOnly(Capability::Administration), register_harness_schema(), Blocking, hidden("Register Agent Harness", "Register a scoped Agent Harness grant.", false, false)),
-        d(Tool::RevokeAgentHarness, "revoke_agent_harness", CapabilityOnly(Capability::Administration), uuid_schema("harness_id"), Blocking, hidden("Revoke Agent Harness", "Revoke an Agent Harness grant.", false, true)),
-        d(Tool::CreatePendingProposal, "create_pending_proposal", CapabilityOnly(Capability::PodCuration), pending_proposal_schema(), Blocking, hidden("Create Pending Proposal", "Propose a sensitive change for independent approval.", false, false)),
         d(Tool::GetPendingProposal, "get_pending_proposal", CapabilityOnly(Capability::Approval), uuid_schema("proposal_id"), Blocking, published(3, "Inspect Pending Proposal", "Inspect a sensitive change before making an independent approval decision.", true, false)),
         d(Tool::ApprovePendingProposal, "approve_pending_proposal", CapabilityOnly(Capability::Approval), uuid_schema("proposal_id"), Blocking, published(4, "Approve Pending Proposal", "Approve a sensitive change as a separately authorized interactive Harness.", false, false)),
         d(Tool::RejectPendingProposal, "reject_pending_proposal", CapabilityOnly(Capability::Approval), object_schema(json!({"proposal_id": uuid(), "reason": {"type": "string"}}), &["proposal_id", "reason"]), Blocking, published(5, "Reject Pending Proposal", "Reject a sensitive change as a separately authorized interactive Agent Harness.", false, false)),
@@ -156,17 +126,11 @@ pub(crate) fn definitions() -> &'static [ToolDefinition] {
         d(Tool::RouteCandidate, "route_candidate", CapabilityOnly(Capability::PodCuration), route_candidate_schema(), Blocking, published(6, "Route Candidate", "Propose an evidence-backed Pod Placement for a private Candidate in an authorized local Pod.", false, false)),
         d(Tool::ReviewCandidatePlacement, "review_candidate_placement", CapabilityOnly(Capability::PodCuration), review_candidate_schema(), Blocking, published(7, "Review Candidate Placement", "Accept or reject one pending Pod Placement under existing curation authority.", false, false)),
         d(Tool::ListPodContent, "list_pod_content", CapabilityOnly(Capability::FeedRead), uuid_schema("pod_id"), Blocking, published(8, "List Pod Content", "List the complete accepted Content Item stream for one Pod without private Candidate data.", true, false)),
-        d(Tool::CreatePrivatePodWithPackage, "create_private_pod_with_package", CapabilityOnly(Capability::PodCuration), private_pod_package_schema(), Blocking, hidden("Create Private Pod with Package", "Create a private Pod with its initial Pod Package.", false, false)),
-        d(Tool::JoinPod, "join_pod", CapabilityOnly(Capability::SubscriptionManagement), string_schema("pod_slug"), Blocking, hidden("Join Pod", "Subscribe to a local Pod by slug.", false, false)),
         d(Tool::SubmitCandidate, "submit_candidate", CandidateSubmissionOrPersonalExecution, candidate_schema(), Blocking, published(11, "Save Discovered Link", "Submit one externally discovered link with source metadata and provenance to an explicit User, Pod Placements, or Personal Discovery Task target. This creates a private Candidate, not an Accepted Placement.", false, false)),
         d(Tool::InspectCandidate, "inspect_candidate", CandidateSubmissionOrPersonalExecution, uuid_schema("candidate_id"), Blocking, published(12, "Inspect Candidate", "Inspect a private Candidate and its independent provenance records.", true, false)),
-        d(Tool::MaterializeDiscoveryTasks, "materialize_discovery_tasks", CapabilityOnly(Capability::DiscoveryTasks), empty_schema(), Blocking, hidden("Materialize Discovery Tasks", "Materialize due Discovery Tasks from Source Rules.", false, false)),
-        d(Tool::ListDiscoveryTasks, "list_discovery_tasks", DiscoveryExecution, empty_schema(), Blocking, hidden("List Discovery Tasks", "List Discovery Tasks visible to this Harness.", true, false)),
         d(Tool::ListReadyDiscoveryTasks, "list_ready_discovery_tasks", DiscoveryExecution, empty_schema(), Blocking, published(13, "List Ready Discovery Tasks", "List due discovery work that this Agent Harness is authorized to claim.", true, false)),
         d(Tool::CreateImmediateDiscoveryTask, "create_immediate_discovery_task", CapabilityOnly(Capability::DiscoveryTasks), immediate_task_schema(), Blocking, published(14, "Request Discovery", "Create retry-safe discovery work for a Pod from the user's current instructions.", false, false)),
-        d(Tool::DiscoveryTaskStatus, "discovery_task_status", DiscoveryExecution, uuid_schema("task_id"), Blocking, hidden("Discovery Task Status", "Inspect one Discovery Task.", true, false)),
         d(Tool::ClaimDiscoveryTask, "claim_discovery_task", DiscoveryExecution, task_lease_schema(), Blocking, published(15, "Claim Discovery Task", "Claim a ready Discovery Task with an exclusive, expiring lease.", false, false)),
-        d(Tool::RenewDiscoveryTask, "renew_discovery_task", DiscoveryExecution, task_lease_schema(), Blocking, hidden("Renew Discovery Task", "Renew an owned Discovery Task lease.", false, false)),
         d(Tool::CompleteDiscoveryTask, "complete_discovery_task", DiscoveryExecution, uuid_schema("task_id"), Blocking, published(16, "Complete Discovery Task", "Mark a claimed Discovery Task complete after its Candidates have been submitted.", false, false)),
         d(Tool::FailDiscoveryTask, "fail_discovery_task", DiscoveryExecution, object_schema(json!({"task_id": uuid(), "reason": {"type": "string"}}), &["task_id", "reason"]), Blocking, published(17, "Fail Discovery Task", "Record a failed Discovery Task attempt with an inspectable reason.", false, true)),
         d(Tool::PersonalDiscoveryReadiness, "personal_discovery_readiness", PersonalDiscoveryManagement, empty_schema(), Blocking, published(23, "Check Personal Discovery Readiness", "Inspect whether private aggregate User evidence can support a generic Personal Discovery run.", true, false)),
@@ -185,22 +149,11 @@ pub(crate) fn definitions() -> &'static [ToolDefinition] {
         d(Tool::ListPersonalDiscoverySchedules, "list_personal_discovery_schedules", PersonalPlanAccess, empty_schema(), Blocking, published(32, "List Personal Discovery Schedules", "List private Personal Discovery schedules with inspectable backpressure state.", true, false)),
         d(Tool::GetPersonalDiscoverySchedule, "get_personal_discovery_schedule", PersonalPlanAccess, uuid_schema("schedule_id"), Blocking, published(33, "Inspect Personal Discovery Schedule", "Inspect one private Personal Discovery schedule and its backpressure state.", true, false)),
         d(Tool::UpdatePersonalDiscoverySchedule, "update_personal_discovery_schedule", PersonalDiscoveryManagement, update_personal_schedule_schema(), Blocking, published(34, "Update Personal Discovery Schedule", "Update cadence, temporary intent, batch size, delivery mode, or enabled state for a private schedule.", false, false)),
-        d(Tool::DisablePersonalDiscoverySchedule, "disable_personal_discovery_schedule", PersonalDiscoveryManagement, uuid_schema("schedule_id"), Blocking, hidden("Disable Personal Discovery Schedule", "Disable a private schedule without deleting its configuration.", false, true)),
-        d(Tool::RemovePersonalDiscoverySchedule, "remove_personal_discovery_schedule", PersonalDiscoveryManagement, uuid_schema("schedule_id"), Blocking, hidden("Remove Personal Discovery Schedule", "Remove a private schedule configuration.", false, true)),
         d(Tool::AttemptDiscoveryResultsReadyNotification, "attempt_discovery_results_ready_notification", PersonalPlanAccess, uuid_schema("batch_id"), Blocking, published(35, "Attempt Results-ready Notification", "Perform the single notify-when-supported attempt for a completed scheduled batch without marking it reviewed.", false, false)),
         d(Tool::GetPodPackage, "get_pod_package", Public, string_schema("pod_slug"), Blocking, published(1, "Read Pod Package", "Read the versioned context, curation instructions, and Source Rules for one Pod.", true, false)),
-        d(Tool::ExportPodPackage, "export_pod_package", CapabilityOnly(Capability::PackageManagement), string_schema("pod_slug"), Blocking, hidden("Export Pod Package", "Export a portable Pod Package.", true, false)),
-        d(Tool::ImportPodPackage, "import_pod_package", CapabilityOnly(Capability::PackageManagement), object_schema(json!({"pod_slug": {"type": "string"}, "files": {"type": "object"}}), &["pod_slug", "files"]), Blocking, hidden("Import Pod Package", "Import Pod Package files.", false, false)),
-        d(Tool::ForkPodPackage, "fork_pod_package", CapabilityOnly(Capability::PackageManagement), fork_package_schema(), Blocking, hidden("Fork Pod Package", "Fork a Pod Package into a new Pod.", false, false)),
-        d(Tool::ValidatePodPackage, "validate_pod_package", CapabilityOnly(Capability::PackageManagement), string_schema("pod_slug"), Blocking, hidden("Validate Pod Package", "Validate a Pod Package.", true, false)),
-        d(Tool::GetNodeInfo, "get_node_info", Public, empty_schema(), Blocking, hidden("Get Node Info", "Read public node identity information.", true, false)),
-        d(Tool::ListTrustedPeers, "list_trusted_peers", CapabilityOnly(Capability::Administration), empty_schema(), Blocking, hidden("List Trusted Peers", "List locally trusted peers.", true, false)),
-        d(Tool::AddTrustedPeer, "add_trusted_peer", CapabilityOnly(Capability::Administration), object_schema(json!({"display_name": {"type": "string"}, "base_url": {"type": "string", "format": "uri"}, "public_key": {"type": "string"}}), &["display_name", "base_url", "public_key"]), Blocking, hidden("Add Trusted Peer", "Propose adding a trusted peer.", false, false)),
         d(Tool::SubscribePublicPod, "subscribe_public_pod", CapabilityOnly(Capability::SubscriptionManagement), object_schema(json!({"public_pod_url": {"type": "string", "format": "uri"}}), &["public_pod_url"]), Async, published(9, "Subscribe to Public Pod", "Subscribe to a canonical public Pod URL and import its verified signed history from the Origin Node.", false, false)),
         d(Tool::SynchronizeSubscription, "synchronize_subscription", CapabilityOnly(Capability::SubscriptionManagement), uuid_schema("subscription_id"), Async, published(10, "Synchronize Subscription", "Fetch and apply signed Pod Events from the Origin Node after the Subscription's verified cursor.", false, false)),
-        d(Tool::SyncPodWithPeer, "sync_pod_with_peer", CapabilityOnly(Capability::Administration), object_schema(json!({"peer_id": uuid(), "pod_slug": {"type": "string"}}), &["peer_id", "pod_slug"]), Async, hidden("Synchronize Pod with Peer", "Synchronize signed Pod Events from a trusted peer.", false, false)),
-        d(Tool::ExportPodEvents, "export_pod_events", Public, string_schema("pod_slug"), Blocking, hidden("Export Pod Events", "Export signed Pod Events.", true, false)),
-        d(Tool::ImportPodEvents, "import_pod_events", CapabilityOnly(Capability::Administration), object_schema(json!({"peer_id": uuid(), "events": {"type": "array"}}), &["peer_id", "events"]), Blocking, hidden("Import Pod Events", "Import verified signed Pod Events.", false, false)),
+    
     ])
 }
 
@@ -259,21 +212,6 @@ fn published(
 ) -> DiscoveryMetadata {
     DiscoveryMetadata {
         order: Some(order),
-        title,
-        description,
-        read_only,
-        destructive,
-    }
-}
-
-fn hidden(
-    title: &'static str,
-    description: &'static str,
-    read_only: bool,
-    destructive: bool,
-) -> DiscoveryMetadata {
-    DiscoveryMetadata {
-        order: None,
         title,
         description,
         read_only,
@@ -474,83 +412,11 @@ fn complete_batch_schema() -> Value {
     )
 }
 
-fn update_taste_schema() -> Value {
-    object_schema(
-        json!({
-            "interests": {"type": "array", "items": {"type": "string"}},
-            "blocked_topics": {"type": "array", "items": {"type": "string"}},
-            "blocked_sources": {"type": "array", "items": {"type": "string"}},
-            "blocked_source_affinities": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "kind": {"enum": ["source", "publisher", "author_or_account", "community", "referrer_context"]},
-                        "value": {"type": "string"}
-                    },
-                    "required": ["kind", "value"],
-                    "additionalProperties": false
-                }
-            },
-            "recurrence_penalty_days": {"type": "integer", "minimum": 0, "maximum": 36500}
-        }),
-        &[],
-    )
-}
 
-fn reset_taste_schema() -> Value {
-    object_schema(json!({"signal": {"type": ["object", "null"]}}), &[])
-}
 
-fn register_harness_schema() -> Value {
-    object_schema(
-        json!({
-            "label": {"type": "string"},
-            "kind": {"type": "string", "enum": ["interactive", "unattended"]},
-            "capabilities": {"type": "array", "items": {"type": "string"}},
-            "pod_ids": {"type": ["array", "null"], "items": uuid()}
-        }),
-        &["label", "kind", "capabilities"],
-    )
-}
 
-fn pending_proposal_schema() -> Value {
-    object_schema(
-        json!({
-            "requested_change": {"type": "object"},
-            "expires_in_seconds": {"type": "integer", "minimum": 1, "maximum": 604800}
-        }),
-        &["requested_change", "expires_in_seconds"],
-    )
-}
 
-fn private_pod_package_schema() -> Value {
-    object_schema(
-        json!({
-            "name": {"type": "string"},
-            "slug": {"type": "string"},
-            "description": {"type": "string"},
-            "package": {
-                "type": "object",
-                "properties": {
-                    "context_md": {"type": "string"}, "skill_md": {"type": "string"},
-                    "sources_yaml": {"type": "string"}, "filters_yaml": {"type": "string"},
-                    "examples_good_md": {"type": "string"}, "examples_bad_md": {"type": "string"}
-                },
-                "required": ["context_md", "skill_md", "sources_yaml", "filters_yaml", "examples_good_md", "examples_bad_md"],
-                "additionalProperties": false
-            }
-        }),
-        &["name", "slug", "description", "package"],
-    )
-}
 
-fn fork_package_schema() -> Value {
-    object_schema(
-        json!({"source_pod_slug": {"type": "string"}, "target": create_pod_schema()}),
-        &["source_pod_slug", "target"],
-    )
-}
 fn feed_batch_schema() -> Value {
     object_schema(
         json!({

@@ -428,57 +428,6 @@ fn canonical_feed(mut value: Value) -> Value {
     value
 }
 
-fn prove_json_migration_guards() {
-    // Arrange and Act: import valid legacy state and restart it idempotently.
-    let migration_dir = TestDataDir::new("migration");
-    save_store_snapshot(&seed_store(), &migration_dir.0.join("store.json")).unwrap();
-    let migrated = AgentTools::open_home_node(&migration_dir.0, InMemoryStore::default).unwrap();
-    let migrated_owner = migrated.default_auth_context().unwrap();
-    let migrated_node_id = migrated.node_info(&migrated_owner).unwrap().node_id;
-    drop(migrated);
-
-    // Assert: the source is recoverable and restart does not import again.
-    assert!(migration_dir.0.join("store.json.migrated.bak").exists());
-    let restarted = AgentTools::open_home_node(&migration_dir.0, InMemoryStore::default).unwrap();
-    assert_eq!(
-        restarted
-            .node_info(&restarted.default_auth_context().unwrap())
-            .unwrap()
-            .node_id,
-        migrated_node_id
-    );
-
-    // Arrange and Act: malformed legacy state fails, then a valid retry succeeds.
-    let malformed_dir = TestDataDir::new("malformed-migration");
-    std::fs::write(malformed_dir.0.join("store.json"), b"{").unwrap();
-    assert!(AgentTools::open_home_node(&malformed_dir.0, seed_store).is_err());
-    save_store_snapshot(&seed_store(), &malformed_dir.0.join("store.json")).unwrap();
-    assert!(AgentTools::open_home_node(&malformed_dir.0, InMemoryStore::default).is_ok());
-    assert!(malformed_dir.0.join("store.json.migrated.bak").exists());
-
-    // Arrange and Act: populated SQLite wins over a later legacy snapshot.
-    let populated_dir = TestDataDir::new("populated-migration");
-    let populated = AgentTools::open_home_node(&populated_dir.0, seed_store).unwrap();
-    let owner = populated.default_auth_context().unwrap();
-    populated
-        .create_pod(
-            &owner,
-            CreatePodRequest {
-                name: "SQLite authority".into(),
-                slug: "sqlite-authority".into(),
-                description: "Must survive ignored legacy state".into(),
-                visibility: Visibility::Private,
-            },
-        )
-        .unwrap();
-    drop(populated);
-    save_store_snapshot(&seed_store(), &populated_dir.0.join("store.json")).unwrap();
-    let reopened = AgentTools::open_home_node(&populated_dir.0, InMemoryStore::default).unwrap();
-
-    // Assert: the existing authoritative database was neither replaced nor migrated.
-    assert!(reopened.pod_by_slug("sqlite-authority", None).is_ok());
-    assert!(!populated_dir.0.join("store.json.migrated.bak").exists());
-}
 
 fn materialize_and_wake_discovery(
     home: &AgentTools,
@@ -1354,7 +1303,6 @@ fn prove_restart(scenario: &TwoNodeScenario, federation: &FederationEvidence) {
 
 #[tokio::test]
 async fn scoped_harness_proves_the_complete_headless_two_node_first_release() {
-    prove_json_migration_guards();
     let scenario = arrange_two_node_scenario();
     let now = Utc::now();
     let discovery = discover_and_curate_local_content(&scenario, now);

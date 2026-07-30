@@ -17,7 +17,7 @@ impl Environment {
         let environment = Self { root };
         let output = environment
             .command()
-            .args(["node", "init"])
+            .args(["node", "init", "--demo"])
             .output()
             .unwrap();
         assert!(

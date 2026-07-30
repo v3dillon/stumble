@@ -11,7 +11,9 @@ use chrono::Duration;
 use chrono::Utc;
 use uuid::Uuid;
 
-pub fn seed_store() -> InMemoryStore {
+/// Minimal Home Node seed: local identity, one owner User, and default
+/// bootstrap / discovery-peer configuration. Used by `node init` by default.
+pub fn empty_home_node_store() -> InMemoryStore {
     let mut store = InMemoryStore::default();
     // Sponsored Bootstrap is ordinary removable Home Node config, not protocol authority.
     crate::bootstrap::ensure_default_bootstrap_endpoint(&mut store, Utc::now());
@@ -21,6 +23,36 @@ pub fn seed_store() -> InMemoryStore {
     store
         .node_identities
         .insert(local_node.id, local_node.clone());
+
+    let user = User {
+        id: Uuid::now_v7(),
+        display_name: "Local Owner".to_string(),
+        created_at: Utc::now(),
+    };
+    store.user_preferences.insert(
+        (user.id, None),
+        UserPreferences {
+            user_id: user.id,
+            tenant_id: None,
+            interests: vec![],
+            blocked_topics: vec![],
+            blocked_sources: vec![],
+            blocked_source_affinities: vec![],
+            preferred_brief_length: 7,
+            preferred_discovery_mode: DiscoveryMode::DeepMatch,
+            recurrence_penalty_days: RecurrencePenaltyDays::default(),
+        },
+    );
+    store.users.insert(user.id, user);
+    store
+}
+
+/// Demo seed data for tests and `node init --demo`.
+pub fn seed_store() -> InMemoryStore {
+    let mut store = empty_home_node_store();
+    // Replace the minimal owner with richer multi-user demo fixtures.
+    store.users.clear();
+    store.user_preferences.clear();
 
     let hosted_tenant = Tenant {
         id: Uuid::now_v7(),

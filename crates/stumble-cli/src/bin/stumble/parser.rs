@@ -46,7 +46,12 @@ pub(super) enum Workflow {
 
 #[derive(Subcommand)]
 pub(super) enum NodeWorkflow {
-    Init,
+    /// Initialize a new Home Node (empty by default; pass --demo for seed fixtures)
+    Init {
+        /// Seed demo users, peers, hosted tenant, and a development API token
+        #[arg(long)]
+        demo: bool,
+    },
     Show,
     Harness {
         #[command(subcommand)]

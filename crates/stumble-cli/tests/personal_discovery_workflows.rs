@@ -15,7 +15,7 @@ impl Environment {
         let data_dir = root.join("home");
         fs::create_dir_all(&root).unwrap();
         let environment = Self { root, data_dir };
-        environment.run(None, &["node", "init"]);
+        environment.run(None, &["node", "init", "--demo"]);
         environment
     }
 

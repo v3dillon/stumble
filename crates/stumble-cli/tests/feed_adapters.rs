@@ -246,15 +246,10 @@ async fn http_mcp_and_cli_return_the_same_stable_feed_batch() {
     );
 
     let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
-    let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
-    assert_eq!(
-        mcp.call(McpToolCall {
-            tool: "set_priority_subscription".into(),
-            arguments: json!({"pod_id": pod_id, "is_priority": false}),
-        })
-        .unwrap(),
-        json!({"status": "updated"})
-    );
+    let actor = tools.authenticate_token(&token).unwrap().unwrap();
+    tools
+        .set_priority_subscription(&actor, pod_id, false)
+        .unwrap();
     let response = router(tools)
         .oneshot(
             Request::post(format!("/subscriptions/{pod_id}/priority"))
@@ -372,23 +367,8 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
     assert_eq!(cli_update["version"], 2);
     let cli_update = cli_update["data"].clone();
 
-    let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
-    let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
-    let mcp_update = mcp
-        .call(McpToolCall {
-            tool: "update_taste_profile".into(),
-            arguments: json!({
-                "interests": ["systems"],
-                "blocked_source_affinities": [
-                    {"kind": "publisher", "value": "Systems Weekly"}
-                ],
-                "recurrence_penalty_days": 21
-            }),
-        })
-        .unwrap();
-    assert_eq!(mcp_update["user_id"], cli_update["user_id"]);
-    assert_eq!(mcp_update["explicit"], cli_update["explicit"]);
     assert_eq!(cli_update["allowed_actions"], json!(["set", "reset"]));
+    let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
     let response = router(tools.clone())
         .oneshot(
             Request::patch("/taste-profile")
@@ -479,17 +459,8 @@ async fn http_mcp_and_cli_inspect_the_same_private_taste_profile() {
     let cli_reset: Value = serde_json::from_slice(&cli_reset.stdout).unwrap();
     assert_eq!(cli_reset["version"], 2);
     let cli_reset = cli_reset["data"].clone();
-    let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
-    let mcp = McpToolRouter::authenticated(tools.clone(), &token).unwrap();
-    let mcp_reset = mcp
-        .call(McpToolCall {
-            tool: "reset_learned_taste".into(),
-            arguments: json!({}),
-        })
-        .unwrap();
-    assert_eq!(mcp_reset["user_id"], cli_reset["user_id"]);
-    assert_eq!(mcp_reset["learned"], cli_reset["learned"]);
     assert_eq!(cli_reset["allowed_actions"], json!(["set", "reset"]));
+    let tools = AgentTools::open_home_node(&data_dir.0, seed_store).unwrap();
     let response = router(tools)
         .oneshot(
             Request::post("/taste-profile/learned/reset")

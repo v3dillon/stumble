@@ -237,7 +237,8 @@ fn manual_curation_queues_every_placement_until_authorized_review() {
         "https://media.example.com/curation/later.jpg",
     )];
     let staged = tools.store().read().unwrap().clone();
-    let failing = AgentTools::new_persistent(staged, &data_dir.0);
+    // Point persistence at a directory so SQLite open fails.
+    let failing = AgentTools::new_sqlite_persistent(staged, &data_dir.0);
     let events_before = failing
         .federation_pod_events(&curator, &pod.slug)
         .unwrap()
@@ -245,7 +246,7 @@ fn manual_curation_queues_every_placement_until_authorized_review() {
 
     assert!(matches!(
         failing.submit_candidate(&submitter, later),
-        Err(AgentToolsError::Persistence(StorePersistenceError::Io(_)))
+        Err(AgentToolsError::Persistence(StorePersistenceError::Sqlite(_)))
     ));
     assert_eq!(
         failing
