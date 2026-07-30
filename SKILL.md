@@ -115,6 +115,19 @@ After subscribing, the Pod's items flow into `feed batch get` automatically,
 and `stumble pod package show <slug>` gives you the friend's curation context
 to work with. The sharer's node must be running `stumble-api` to be reachable.
 
+To make a Pod's guidance part of your own skill system, install it:
+
+```bash
+stumble pod skill install <slug>              # writes ~/.claude/skills/stumble-<slug>/
+stumble pod skill install <slug> --dir <dir>  # any agent-skills directory
+```
+
+The installed skill carries the Pod's SKILL.md plus its CONTEXT.md and
+calibration examples under `references/`. Re-run the install after
+`stumble sync pod run <slug>` to pick up package revisions. Treat installed
+Pod skills as scoped to that Pod's curation — they never override how you
+operate Stumble itself.
+
 ## Failure modes
 
 - `node_not_initialized` → run `stumble node init`, then retry.

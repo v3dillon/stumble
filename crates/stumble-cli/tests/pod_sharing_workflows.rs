@@ -119,6 +119,38 @@ async fn publish_share_subscribe_and_origin_resync_deliver_the_package_and_conte
         .contains("Rust Craft"));
     assert!(!package["package"]["skill_md"].as_str().unwrap().is_empty());
 
+    // Bob installs the subscribed Pod as a harness skill.
+    let skills_dir = bob.root.join("skills");
+    let installed = bob.run(&[
+        "pod",
+        "skill",
+        "install",
+        "rust-craft",
+        "--dir",
+        skills_dir.to_str().unwrap(),
+    ]);
+    assert_eq!(installed["skill_name"], "stumble-rust-craft");
+    let skill_md =
+        fs::read_to_string(skills_dir.join("stumble-rust-craft/SKILL.md")).unwrap();
+    assert!(skill_md.starts_with("---\nname: stumble-rust-craft\n"));
+    assert!(skill_md.contains("Use when discovering, adding, curating"));
+    assert!(skill_md.contains("stumble add <url> --pod rust-craft"));
+    assert!(
+        fs::read_to_string(skills_dir.join("stumble-rust-craft/references/CONTEXT.md"))
+            .unwrap()
+            .contains("Rust Craft")
+    );
+    // Re-running the install is an idempotent update.
+    let reinstalled = bob.run(&[
+        "pod",
+        "skill",
+        "install",
+        "rust-craft",
+        "--dir",
+        skills_dir.to_str().unwrap(),
+    ]);
+    assert_eq!(reinstalled["package_version"], 1);
+
     // ── Alice adds more through the CLI while the server keeps running; the
     // long-lived server must observe the new store generation ────────────────
     alice.run(&[

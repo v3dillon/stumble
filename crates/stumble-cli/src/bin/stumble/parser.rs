@@ -116,6 +116,25 @@ pub(super) enum PodWorkflow {
         #[command(subcommand)]
         command: PackageWorkflow,
     },
+    /// Install a Pod's SKILL.md into an agent harness skills directory
+    Skill {
+        #[command(subcommand)]
+        command: SkillWorkflow,
+    },
+}
+
+#[derive(Subcommand)]
+pub(super) enum SkillWorkflow {
+    /// Write or update the Pod's skill folder inside a skills directory
+    Install(SkillInstallArgs),
+}
+
+#[derive(Args)]
+pub(super) struct SkillInstallArgs {
+    pub(super) pod: String,
+    /// Skills directory to install into (default: ~/.claude/skills)
+    #[arg(long, env = "STUMBLE_SKILLS_DIR", value_hint = ValueHint::DirPath)]
+    pub(super) dir: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
