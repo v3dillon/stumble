@@ -80,7 +80,7 @@ Your harness then knows the loop: open a shared link, understand it, `stumble ad
 
 | Command | Description |
 | --- | --- |
-| `stumble add <url>` | Add a link to a Pod and your Feed in one step (`--pod`, `--title`, `--summary`, `--tag`, `--note`). |
+| `stumble add <url>` | Add a link to a Pod and your Feed in one step (`--pod`, `--title`, `--summary`, `--tag`, `--note`, `--image`, `--cover`). |
 
 The rest of the CLI is JSON-first and organized into five workflow families. Add `--help` at any command level for arguments and defaults.
 

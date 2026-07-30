@@ -116,12 +116,17 @@ impl AgentTools {
             discovered_by_crawler: false,
             submitter_note: None,
             summary: request.summary.clone(),
+            media_references: request
+                .images
+                .iter()
+                .map(|url| MediaReference::new(MediaReferenceType::Image, url))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| StoreError::Validation(error.to_string()))?,
             provenance: vec![CandidateProvenance {
                 discovered_at: now,
                 discovery_method: "user_share".to_string(),
                 referrer_url: None,
             }],
-            media_references: Vec::new(),
             tags: request.tags.clone(),
             embedding: None,
             created_at: now,

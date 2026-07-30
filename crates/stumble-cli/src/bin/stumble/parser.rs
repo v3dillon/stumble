@@ -452,6 +452,22 @@ pub(super) struct AddArgs {
     /// Why this belongs in the Pod
     #[arg(long)]
     pub(super) note: Option<String>,
+    /// Illustrative image URL from the source page; repeatable, first becomes the cover
+    #[arg(long = "image")]
+    pub(super) images: Vec<String>,
+    /// Local image file to store as the cover (e.g. a generated one)
+    #[arg(long, value_hint = ValueHint::FilePath)]
+    pub(super) cover: Option<PathBuf>,
+    /// Where the cover file came from
+    #[arg(long, value_enum, default_value_t = CoverSource::AiGenerated, requires = "cover")]
+    pub(super) cover_source: CoverSource,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(super) enum CoverSource {
+    AiGenerated,
+    PageImage,
+    UserProvided,
 }
 
 #[derive(Args)]

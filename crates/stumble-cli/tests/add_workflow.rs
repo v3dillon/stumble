@@ -116,3 +116,51 @@ fn add_requires_an_explicit_pod_slug_to_already_exist() {
     ]);
     assert_eq!(error["code"], "not_found");
 }
+
+#[test]
+fn add_stores_page_images_and_a_generated_cover() {
+    let environment = Environment::new();
+    let cover = environment.root.join("cover.png");
+    fs::write(&cover, b"png-bytes").unwrap();
+
+    let added = environment.run(&[
+        "add",
+        "https://example.com/visual-essay",
+        "--title",
+        "A visual essay",
+        "--image",
+        "https://example.com/hero.png",
+        "--image",
+        "https://example.com/figure-2.png",
+        "--cover",
+        cover.to_str().unwrap(),
+    ]);
+    let media: Vec<_> = added["content_item"]["media_references"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|reference| reference["url"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        media,
+        ["https://example.com/hero.png", "https://example.com/figure-2.png"]
+    );
+    let assets = added["assets"].as_array().unwrap();
+    assert_eq!(assets.len(), 2);
+    assert_eq!(assets[0]["source"], "page_image");
+    assert_eq!(assets[0]["url"], "https://example.com/hero.png");
+    assert_eq!(assets[1]["source"], "ai_generated");
+    let stored = assets[1]["local_path"].as_str().unwrap();
+    assert!(stored.contains("/media/"), "{stored}");
+    assert_eq!(fs::read(stored).unwrap(), b"png-bytes");
+
+    // The cover survives in reads: pod content show lists the assets.
+    let shown = environment.run(&[
+        "pod",
+        "content",
+        "show",
+        "saved",
+        added["content_item"]["id"].as_str().unwrap(),
+    ]);
+    assert_eq!(shown["assets"].as_array().unwrap().len(), 2);
+}

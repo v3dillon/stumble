@@ -710,7 +710,11 @@ fn execute_content(command: ContentWorkflow, tools: &AgentTools, actor: &AuthCon
                 Err(AgentToolsError::Forbidden { .. }) => Vec::new(),
                 Err(error) => return Err(agent_tools_error(error)),
             };
+            let assets = tools
+                .assets_for_submission(actor, content_item_id.into())
+                .unwrap_or_default();
             Ok(json!({
+                "assets": assets,
                 "pod_id": pod.id,
                 "slug": pod.slug,
                 "content_item": item.content_item,

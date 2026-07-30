@@ -52,6 +52,23 @@ Feed-eligible. With no `--pod`, it goes to the private `saved` Pod (created
 automatically on first use). Use `--pod <slug>` to target a specific Pod, and
 `--note "why it belongs here"` to record curation rationale.
 
+**Give it a cover.** While reading the page, pick up to three images that
+genuinely illustrate the content — the hero image, `og:image`, or in-context
+figures that match your summary. Skip logos, avatars, ads, and unrelated
+decoration; choose relative to what the summary actually says. Pass them in
+order of relevance with repeated `--image <url>` flags: they ride the Feed as
+reference-first media, and the first becomes the cover. When the page has no
+usable imagery and you have image generation, generate a simple cover from
+the summary, save it to a file, and attach it:
+
+```bash
+stumble add "<url>" --title "..." --summary "..."   --image "https://site/hero.png" --image "https://site/figure-2.png"   --cover /tmp/generated-cover.png        # --cover-source ai-generated is the default
+```
+
+Covers are stored under the node's data directory and stay local — they never
+federate. Read them back (with `local_path`) via
+`stumble pod content show <pod> <content_item_id>`, which lists `assets`.
+
 If the page can't be read (paywall, dead link, no browser available), still run
 `stumble add` with the URL and whatever the user told you — the URL is the only
 required argument. Re-adding the same URL is safe; it dedupes on canonical URL.

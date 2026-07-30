@@ -3740,6 +3740,10 @@ pub struct AddReferenceRequest {
     /// Optional curation rationale recorded on the Accepted Placement.
     #[serde(default)]
     pub note: Option<String>,
+    /// Harness-selected illustrative image URLs from the source page,
+    /// reference-first (bytes are not archived).
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 /// Outcome of a one-shot `stumble add`, including any setup it performed.

@@ -232,7 +232,8 @@ fn add_reference_schema() -> Value {
             "summary": {"type": "string"},
             "excerpt": {"type": "string"},
             "tags": {"type": "array", "items": {"type": "string"}},
-            "note": {"type": "string"}
+            "note": {"type": "string"},
+            "images": {"type": "array", "items": {"type": "string", "format": "uri"}}
         }),
         &["url"],
     )
