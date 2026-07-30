@@ -1,6 +1,6 @@
 ---
 name: stumble
-description: Save links into the user's Stumble feed, read the feed back, and run discovery for them. Use when the user shares a URL worth keeping ("add this to stumble", "save this"), asks for their feed ("what's in my stumble", "drip", "anything new"), wants a morning brief or new content found ("go find me stuff", "scroll X for me"), or wants to curate or share Pods. Runs the local stumble CLI; browsing stays in this harness's own browser tools.
+description: Save links into the user's Stumble feed, read the feed back, and run discovery for them. Use when the user shares a URL worth keeping ("add this to stumble", "save this"), pastes a bare link with little or no comment, asks for their feed ("what's in my stumble", "drip", "anything new"), wants a morning brief or new content found ("go find me stuff", "scroll X for me"), or wants to curate or share Pods. Runs the local stumble CLI; browsing stays in this harness's own browser tools.
 ---
 
 # Stumble
@@ -25,6 +25,13 @@ stumble node init   # one-time setup; add --demo only for throwaway fixture data
 
 Treat a shared URL like a friend texting you an X post: open it, understand it,
 save it with that understanding attached.
+
+**A bare link is an add.** When the user pastes a link with little or no
+commentary, don't ask what to do — open it, react with one line of what it is
+and why it's interesting, and save it. Route it to a matching Pod when one
+obviously fits (mention which); otherwise the default `saved` Pod. Re-adding
+dedupes, and if they wanted something else ("just summarize this") they'll
+say so — offer to remove it (`stumble pod content remove`) and move on.
 
 1. Open the URL with your own browser tools. If it needs a login (an X post,
    a members-only newsletter), use the user's existing browser session — never
