@@ -62,9 +62,9 @@ Point your own node at an Index with `stumble sync discovery index add --label <
 
 Stumble plans, your harness browses, you wake up to a shortlist. A daily Personal Discovery schedule (`stumble discover personal schedule create`) materializes a browsing task each morning from your private taste evidence; the harness claims it, scrolls X and your other sources with its own logged-in browser, submits what fits, and presents the batch alongside your Feed as a conversational brief. Nothing enters your Feed or Pods until you say so — see the "Autonomous discovery" and "morning brief" workflows in [`SKILL.md`](SKILL.md).
 
-### Onboard a friend
+### Get started for your agent
 
-[`llms.txt`](llms.txt) is a paste-able onboarding script for a friend's AI harness: it installs Stumble, connects to your Bootstrap, has them log into X in the harness browser, learns their taste from "send me something cool," runs their first discovery scroll, and offers their first Pod. Fill in your Bootstrap URL at the top and send them the file — or just send `https://your-bootstrap/llms.txt`, which every node serves with its own URL pre-filled.
+[`llms.txt`](llms.txt) is a paste-able get-started script for your AI harness: it installs Stumble, connects to a Bootstrap, has you log into X in the harness browser, learns your taste from "send me something cool," runs your first discovery scroll, and offers your first Pod. Paste the file into the harness — or point it at `https://your-bootstrap/llms.txt`, which every node serves with its own URL pre-filled.
 
 ### Use it from an AI harness
 
