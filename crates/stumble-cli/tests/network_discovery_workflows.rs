@@ -120,6 +120,36 @@ async fn published_pods_travel_bootstrap_to_explore_to_subscription() {
     assert_eq!(submissions.len(), 1, "{submissions:?}");
     assert_eq!(submissions[0]["status"], "admitted", "{submissions:?}");
 
+    // ── Carol: publishes her own Pod, then endorses Alice's from it ──────────
+    let carol = Environment::new("carol");
+    carol.use_bootstrap(&bootstrap_base);
+    carol.run(&[
+        "pod", "create", "--name", "Chaos Engineering", "--slug", "chaos-eng",
+        "--description", "Failure injection and resilience.", "--visibility", "private",
+    ]);
+    let carol_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let carol_base = format!("http://{}", carol_listener.local_addr().unwrap());
+    let carol_origin = AgentTools::open_initialized_home_node(&carol.data_dir).unwrap();
+    let carol_router = router_with_base_url(carol_origin, &carol_base);
+    let carol_server =
+        tokio::spawn(async move { axum::serve(carol_listener, carol_router).await.unwrap() });
+    carol.run(&["pod", "publish", "chaos-eng", "--base-url", &carol_base]);
+    carol.run(&["sync", "bootstrap", "run"]);
+    let endorsed = carol.run(&[
+        "pod",
+        "endorse",
+        "distributed-craft",
+        "--from",
+        "chaos-eng",
+        "--reason",
+        "Best practical distributed systems collection I know.",
+    ]);
+    assert_eq!(endorsed["endorsed_pod"], "distributed-craft");
+    assert_eq!(
+        endorsed["bootstrap_submissions"][0]["status"], "admitted",
+        "{endorsed}"
+    );
+
     // ── Bob: pulls the Announcement Stream and discovers Alice's Pod locally ─
     let bob = Environment::new("bob");
     bob.use_bootstrap(&bootstrap_base);
@@ -145,6 +175,15 @@ async fn published_pods_travel_bootstrap_to_explore_to_subscription() {
             .any(|sample| sample["title"] == "Raft explained visually"),
         "{samples:?}"
     );
+    // Carol's endorsement traveled through the Bootstrap and is inspectable
+    // evidence in Bob's local ranking.
+    let endorsements = found["endorsements"].as_array().unwrap();
+    assert!(
+        endorsements
+            .iter()
+            .any(|endorsement| endorsement["endorsing_pod_slug"] == "chaos-eng"),
+        "{endorsements:?}"
+    );
     let public_pod_url = found["announcement"]["public_pod_url"].as_str().unwrap();
 
     // Explore hands Bob everything needed to subscribe in one command.
@@ -161,7 +200,9 @@ async fn published_pods_travel_bootstrap_to_explore_to_subscription() {
     assert!(titles.contains(&"Raft explained visually"), "{titles:?}");
 
     alice_server.abort();
+    carol_server.abort();
     bootstrap_server.abort();
     let _ = alice_server.await;
+    let _ = carol_server.await;
     let _ = bootstrap_server.await;
 }

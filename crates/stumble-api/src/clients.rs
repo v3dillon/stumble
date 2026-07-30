@@ -452,3 +452,56 @@ impl OriginExploreSampleClient for ReqwestOriginExploreSampleClient {
         })
     }
 }
+
+/// Submits a signed Pod Endorsement to one Bootstrap endpoint.
+pub async fn submit_pod_endorsement_to_bootstrap(
+    base_url: &str,
+    endorsement: &PodEndorsement,
+) -> Result<serde_json::Value, String> {
+    let url = format!("{}/bootstrap/endorsements", base_url.trim_end_matches('/'));
+    let response = reqwest::Client::new()
+        .post(&url)
+        .json(endorsement)
+        .send()
+        .await
+        .map_err(|error| format!("bootstrap unreachable: {error}"))?;
+    let status = response.status();
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .unwrap_or_else(|_| serde_json::json!({"status": status.as_u16()}));
+    if status.is_success() {
+        Ok(body)
+    } else {
+        Err(body
+            .get("code")
+            .and_then(|code| code.as_str())
+            .map_or_else(
+                || format!("bootstrap endorsement HTTP {status}"),
+                ToString::to_string,
+            ))
+    }
+}
+
+/// Fetches valid endorsements of one Pod from a Bootstrap endpoint.
+pub async fn fetch_pod_endorsements_from_bootstrap(
+    base_url: &str,
+    endorsed_node_id: NodeIdentityId,
+    endorsed_pod_slug: &str,
+) -> Result<Vec<PodEndorsement>, String> {
+    let url = format!("{}/bootstrap/endorsements", base_url.trim_end_matches('/'));
+    reqwest::Client::new()
+        .get(&url)
+        .query(&[
+            ("endorsed_node_id", endorsed_node_id.to_string()),
+            ("endorsed_pod_slug", endorsed_pod_slug.to_string()),
+        ])
+        .send()
+        .await
+        .map_err(|error| format!("bootstrap unreachable: {error}"))?
+        .error_for_status()
+        .map_err(|error| error.to_string())?
+        .json()
+        .await
+        .map_err(|error| error.to_string())
+}

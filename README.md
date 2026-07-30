@@ -45,7 +45,7 @@ stumble pod explore --query "distributed systems"   # ranked against your privat
 stumble pod subscribe <public_pod_url>              # from the explore result
 ```
 
-Ranking happens entirely on your node — queries and taste never leave it. To help the network, run a Bootstrap or Index role: `stumble-api --bootstrap` (open announcement admission + streams) or `stumble-api --index` (public search over admitted announcements).
+Pods can vouch for each other: `stumble pod endorse <slug> --from <your-pod> --reason "..."` signs a recommendation that travels through Bootstrap nodes and shows up as inspectable evidence in other users' local ranking — never as global reputation. Ranking happens entirely on your node — queries and taste never leave it. To help the network, run a Bootstrap or Index role: `stumble-api --bootstrap` (open announcement admission + streams) or `stumble-api --index` (public search over admitted announcements).
 
 ### Use it from an AI harness
 
@@ -87,6 +87,7 @@ Find, subscribe to, curate, and govern Pods.
 | `stumble pod create` | Create a Pod. |
 | `stumble pod explore` | Explore public Pods. |
 | `stumble pod publish` | Make a Pod public and print its shareable URL. |
+| `stumble pod endorse` | Sign a recommendation of another public Pod (`--from`, `--reason`). |
 | `stumble pod subscribe` | Subscribe to a local Pod by slug or a public Pod by URL. |
 | `stumble pod unsubscribe` | Unsubscribe from a Pod. |
 | `stumble pod subscription set` | Set subscription priority. |

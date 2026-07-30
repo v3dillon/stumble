@@ -487,6 +487,80 @@ impl AgentTools {
         Ok(endorsement)
     }
 
+    /// Lists locally known current announcements matching a Pod slug.
+    ///
+    /// Public metadata only; used to resolve Explore results into endorsement
+    /// and subscription targets without exposing the store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store lock is poisoned.
+    pub fn known_pod_announcements_for_slug(
+        &self,
+        pod_slug: &str,
+    ) -> Result<Vec<PodAnnouncement>, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        Ok(store
+            .known_pod_announcements
+            .values()
+            .filter(|known| known.announcement.pod_slug == pod_slug)
+            .map(|known| known.announcement.clone())
+            .collect())
+    }
+
+    /// Open Bootstrap admission of a signed Pod Endorsement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Bootstrap is disabled, the signature is invalid,
+    /// either bound announcement is unknown, or persistence fails.
+    pub fn admit_bootstrap_endorsement(
+        &self,
+        endorsement: PodEndorsement,
+    ) -> Result<PodEndorsement, AgentToolsError> {
+        if !self.bootstrap.enabled {
+            return Err(AgentToolsError::BootstrapRejected {
+                message: "bootstrap endorsement admission is disabled".into(),
+                reason: BootstrapAdmissionRejectionReason::BootstrapDisabled,
+            });
+        }
+        self.index_pod_endorsement(endorsement)
+    }
+
+    /// Serves valid endorsements of one endorsed Pod (Bootstrap role).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Bootstrap is disabled or the store lock is poisoned.
+    pub fn bootstrap_endorsements_for(
+        &self,
+        endorsed_node_id: NodeIdentityId,
+        endorsed_pod_slug: &str,
+    ) -> Result<Vec<PodEndorsement>, AgentToolsError> {
+        if !self.bootstrap.enabled {
+            return Err(AgentToolsError::BootstrapRejected {
+                message: "bootstrap endorsement serving is disabled".into(),
+                reason: BootstrapAdmissionRejectionReason::BootstrapDisabled,
+            });
+        }
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        Ok(store
+            .pod_endorsements
+            .values()
+            .filter(|endorsement| {
+                endorsement.endorsed_node_id == endorsed_node_id
+                    && endorsement.endorsed_pod_slug == endorsed_pod_slug
+            })
+            .cloned()
+            .collect())
+    }
+
     /// Aggregates a valid Pod Endorsement without treating it as authority.
     ///
     /// # Errors

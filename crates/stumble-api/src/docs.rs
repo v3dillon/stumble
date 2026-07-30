@@ -49,6 +49,16 @@ pub(crate) fn route_docs() -> Vec<ApiRouteDoc> {
         },
         ApiRouteDoc {
             method: "POST",
+            path: "/bootstrap/endorsements",
+            description: "open Bootstrap admission of a signed Pod Endorsement binding two known announcements",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/bootstrap/endorsements",
+            description: "valid endorsements of one endorsed Pod, without rank or trust authority",
+        },
+        ApiRouteDoc {
+            method: "POST",
             path: "/bootstrap/peer-advertisements",
             description: "open Bootstrap admission of a signed Discovery Peer Advertisement",
         },

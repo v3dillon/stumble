@@ -11,7 +11,8 @@ mod error;
 mod federation;
 
 pub use clients::{
-    submit_pod_announcement_to_bootstrap, ReqwestAnnouncementStreamClient,
+    fetch_pod_endorsements_from_bootstrap, submit_pod_announcement_to_bootstrap,
+    submit_pod_endorsement_to_bootstrap, ReqwestAnnouncementStreamClient,
     ReqwestDiscoveryPeerProbe, ReqwestDiscoveryPeerStreamClient, ReqwestIndexSearchClient,
     ReqwestOriginExploreSampleClient, ReqwestOriginProbe, ReqwestPeerAdvertisementSampleClient,
 };
@@ -109,6 +110,10 @@ pub fn router_with_options(
             get(bootstrap_announcement_stream),
         )
         .route("/bootstrap/withdrawals", post(bootstrap_admit_withdrawal))
+        .route(
+            "/bootstrap/endorsements",
+            post(bootstrap_admit_endorsement).get(bootstrap_list_endorsements),
+        )
         .route(
             "/bootstrap/peer-advertisements",
             post(bootstrap_admit_peer_advertisement).get(bootstrap_peer_advertisement_sample),

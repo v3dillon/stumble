@@ -4,7 +4,7 @@ use super::{
 };
 use crate::parser::{
     ContentWorkflow, CreatePodArgs, PackageWorkflow, PodWorkflow, PolicyMode, PolicyWorkflow,
-    PublishPodArgs, RoleChangeArgs, RoleWorkflow, SkillInstallArgs, SkillWorkflow,
+    EndorsePodArgs, PublishPodArgs, RoleChangeArgs, RoleWorkflow, SkillInstallArgs, SkillWorkflow,
     SubscriptionWorkflow, VisibilityWorkflow,
 };
 use serde_json::json;
@@ -71,14 +71,15 @@ pub(super) fn execute(command: PodWorkflow, tools: &AgentTools, actor: &AuthCont
                     .explore_public_pods(actor, request.clone())
                     .map_err(agent_tools_error)?
             };
-            // Fetch verified Origin samples for the top unsubscribed results
-            // that lack previews, then re-rank so samples are included.
-            // Best-effort: unreachable Origins never fail Explore.
+            // Enrich the top unsubscribed results with verified Origin samples
+            // and Bootstrap-served endorsements, then re-rank so both appear.
+            // Best-effort: unreachable nodes never fail Explore.
+            let mut enriched = 0usize;
             if sample_size > 0 {
                 let sample_client = stumble_api::ReqwestOriginExploreSampleClient::new(
                     runtime.handle().clone(),
                 );
-                let fetched = explored
+                enriched += explored
                     .results
                     .iter()
                     .take(5)
@@ -97,11 +98,33 @@ pub(super) fn execute(command: PodWorkflow, tools: &AgentTools, actor: &AuthCont
                             .is_ok()
                     })
                     .count();
-                if fetched > 0 {
-                    explored = tools
-                        .explore_public_pods(actor, request)
-                        .map_err(agent_tools_error)?;
+            }
+            let bootstrap_endpoints: Vec<_> = tools
+                .list_bootstrap_endpoints(actor)
+                .map_err(agent_tools_error)?
+                .into_iter()
+                .filter(|endpoint| endpoint.enabled)
+                .collect();
+            for result in explored.results.iter().take(5) {
+                for endpoint in &bootstrap_endpoints {
+                    let fetched = runtime.block_on(
+                        stumble_api::fetch_pod_endorsements_from_bootstrap(
+                            &endpoint.base_url,
+                            result.announcement.origin_node_id,
+                            &result.announcement.pod_slug,
+                        ),
+                    );
+                    for endorsement in fetched.unwrap_or_default() {
+                        if tools.index_pod_endorsement(endorsement).is_ok() {
+                            enriched += 1;
+                        }
+                    }
                 }
+            }
+            if enriched > 0 {
+                explored = tools
+                    .explore_public_pods(actor, request)
+                    .map_err(agent_tools_error)?;
             }
             drop(runtime);
             let results = paginate(
@@ -117,6 +140,7 @@ pub(super) fn execute(command: PodWorkflow, tools: &AgentTools, actor: &AuthCont
             }))
         }
         PodWorkflow::Publish(args) => publish(&args, tools, actor),
+        PodWorkflow::Endorse(args) => endorse(&args, tools, actor),
         PodWorkflow::Subscribe(args) => subscribe(&args.pod, tools, actor),
         PodWorkflow::Unsubscribe(args) => {
             let pod = resolve_pod(tools, actor, &args.pod)?;
@@ -412,6 +436,104 @@ fn publish(args: &PublishPodArgs, tools: &AgentTools, actor: &AuthContext) -> Cl
         "announcement": announcement,
         "bootstrap_submissions": bootstrap_submissions,
         "serve_hint": "friends can subscribe once this node is reachable: stumble-api --bind <addr>",
+    }))
+}
+
+/// Signs a Pod Endorsement from one of the caller's public Pods and pushes it
+/// to every enabled Bootstrap endpoint so other Home Nodes can weigh it in
+/// their own local ranking.
+fn endorse(args: &EndorsePodArgs, tools: &AgentTools, actor: &AuthContext) -> CliResult {
+    let endorsing_pod = resolve_pod(tools, actor, &args.from)?;
+    let endorsing = tools
+        .known_pod_announcements_for_slug(&endorsing_pod.slug)
+        .map_err(agent_tools_error)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            (
+                ErrorBody::new(
+                    "not_found",
+                    format!(
+                        "no current announcement for {}; run stumble pod publish {} --base-url <url> first",
+                        endorsing_pod.slug, endorsing_pod.slug
+                    ),
+                ),
+                ExitStatusCategory::ValidationOrConflict,
+            )
+        })?;
+    let endorsed_slug = args
+        .endorsed
+        .rsplit("/federation/pods/")
+        .next()
+        .unwrap_or(&args.endorsed)
+        .trim_matches('/');
+    let candidates = tools
+        .known_pod_announcements_for_slug(endorsed_slug)
+        .map_err(agent_tools_error)?;
+    let endorsed = match candidates.len() {
+        0 => {
+            return Err((
+                ErrorBody::new(
+                    "not_found",
+                    format!(
+                        "no known announcement for {endorsed_slug}; run stumble sync bootstrap run or stumble pod explore first"
+                    ),
+                ),
+                ExitStatusCategory::ValidationOrConflict,
+            ))
+        }
+        1 => candidates.into_iter().next().expect("one candidate"),
+        _ => {
+            return Err((
+                ErrorBody::new(
+                    "validation_error",
+                    format!(
+                        "multiple Origins announce the slug {endorsed_slug}; endorse by full federation URL"
+                    ),
+                ),
+                ExitStatusCategory::ValidationOrConflict,
+            ))
+        }
+    };
+    let endorsement = tools
+        .endorse_public_pod(actor, &endorsing, &endorsed, args.reason.clone())
+        .map_err(agent_tools_error)?;
+    // Best-effort propagation: a down Bootstrap never blocks the endorsement.
+    let endpoints: Vec<_> = tools
+        .list_bootstrap_endpoints(actor)
+        .map_err(agent_tools_error)?
+        .into_iter()
+        .filter(|endpoint| endpoint.enabled)
+        .collect();
+    let bootstrap_submissions = if endpoints.is_empty() {
+        Vec::new()
+    } else {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(internal_error)?;
+        endpoints
+            .iter()
+            .map(|endpoint| {
+                match runtime.block_on(stumble_api::submit_pod_endorsement_to_bootstrap(
+                    &endpoint.base_url,
+                    &endorsement,
+                )) {
+                    Ok(_) => json!({"base_url": endpoint.base_url, "status": "admitted"}),
+                    Err(reason) => json!({
+                        "base_url": endpoint.base_url,
+                        "status": "failed",
+                        "reason": reason,
+                    }),
+                }
+            })
+            .collect()
+    };
+    Ok(json!({
+        "endorsement": endorsement,
+        "endorsing_pod": endorsing_pod.slug,
+        "endorsed_pod": endorsed.pod_slug,
+        "bootstrap_submissions": bootstrap_submissions,
     }))
 }
 

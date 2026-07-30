@@ -89,6 +89,8 @@ pub(super) enum PodWorkflow {
     Explore(ExploreArgs),
     /// Make a Pod public and print its shareable federation URL
     Publish(PublishPodArgs),
+    /// Sign a recommendation of another public Pod from one of your public Pods
+    Endorse(EndorsePodArgs),
     /// Subscribe to a local Pod by slug or a public Pod by its federation URL
     Subscribe(PodArgs),
     Unsubscribe(PodArgs),
@@ -489,6 +491,18 @@ pub(super) struct PublishPodArgs {
     /// used to build the share URL and issue the Pod Announcement
     #[arg(long, env = "STUMBLE_BASE_URL")]
     pub(super) base_url: Option<String>,
+}
+
+#[derive(Args)]
+pub(super) struct EndorsePodArgs {
+    /// Endorsed Pod: a slug known from Explore, or its public federation URL
+    pub(super) endorsed: String,
+    /// Your public Pod that signs the endorsement
+    #[arg(long)]
+    pub(super) from: String,
+    /// Why the endorsed Pod is worth a look
+    #[arg(long)]
+    pub(super) reason: String,
 }
 
 #[derive(Args)]

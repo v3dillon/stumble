@@ -148,8 +148,17 @@ stumble pod skill install <slug>
 ```
 
 Ranking is local and private; exploring never sends the user's interests
-anywhere. If explore returns nothing, the node may not have synced
-announcements yet — `stumble sync bootstrap run` pulls the latest.
+anywhere. Results may carry `endorsements` — signed recommendations from other
+Pods, shown as evidence, never authority. If explore returns nothing, the node
+may not have synced announcements yet — `stumble sync bootstrap run` pulls the
+latest.
+
+When the user loves a Pod and wants to vouch for it from one of their own
+public Pods:
+
+```bash
+stumble pod endorse <slug-or-url> --from <their-pod-slug> --reason "why it's great"
+```
 
 ## Failure modes
 

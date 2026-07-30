@@ -210,3 +210,28 @@ pub(crate) async fn receive_pod_withdrawal(
         request.withdrawal,
     )?))
 }
+
+/// Open Bootstrap admission of a signed Pod Endorsement.
+pub(crate) async fn bootstrap_admit_endorsement(
+    State(state): State<ApiState>,
+    Json(endorsement): Json<PodEndorsement>,
+) -> Result<Json<PodEndorsement>, ApiError> {
+    Ok(Json(state.tools.admit_bootstrap_endorsement(endorsement)?))
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct EndorsementQuery {
+    endorsed_node_id: NodeIdentityId,
+    endorsed_pod_slug: String,
+}
+
+/// Serves valid endorsements of one endorsed Pod (Bootstrap role).
+pub(crate) async fn bootstrap_list_endorsements(
+    State(state): State<ApiState>,
+    Query(query): Query<EndorsementQuery>,
+) -> Result<Json<Vec<PodEndorsement>>, ApiError> {
+    Ok(Json(state.tools.bootstrap_endorsements_for(
+        query.endorsed_node_id,
+        &query.endorsed_pod_slug,
+    )?))
+}
