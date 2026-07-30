@@ -3,8 +3,8 @@ use super::{
     peer_sync_failure_code, peer_sync_failure_is_retryable, resolve_pod, CliResult,
 };
 use crate::parser::{
-    BootstrapWorkflow, DiscoveryServeWorkflow, DiscoveryWorkflow, PeerWorkflow, SyncPodWorkflow,
-    SyncWorkflow,
+    BootstrapWorkflow, DiscoveryServeWorkflow, DiscoveryWorkflow, IndexNodeWorkflow, PeerWorkflow,
+    SyncPodWorkflow, SyncWorkflow,
 };
 use serde_json::json;
 use stumble_core::{
@@ -67,6 +67,34 @@ fn execute_discovery(
                 .map_err(agent_tools_error)?,
         )
         .map_err(internal_error),
+        DiscoveryWorkflow::Index { command } => {
+            let outcome = |change| {
+                tools
+                    .change_trust_policy(actor, change, chrono::Utc::now())
+                    .map_err(agent_tools_error)
+                    .and_then(|outcome| serde_json::to_value(outcome).map_err(internal_error))
+            };
+            match command {
+                IndexNodeWorkflow::List => serde_json::to_value(
+                    tools
+                        .trust_policy(actor)
+                        .map_err(agent_tools_error)?
+                        .index_nodes,
+                )
+                .map_err(internal_error),
+                IndexNodeWorkflow::Add(args) => {
+                    outcome(stumble_core::TrustPolicyChange::AddIndexNode {
+                        label: args.label,
+                        base_url: args.base_url,
+                    })
+                }
+                IndexNodeWorkflow::Remove(args) => {
+                    outcome(stumble_core::TrustPolicyChange::RemoveIndexNode {
+                        base_url: args.base_url,
+                    })
+                }
+            }
+        }
         DiscoveryWorkflow::Run(args) => {
             // Multi-thread runtime so the HTTP clients can block_on off the
             // store write path without nesting on a current_thread runtime.

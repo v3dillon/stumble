@@ -323,6 +323,34 @@ pub(super) enum DiscoveryWorkflow {
     Gossip(DiscoveryGossipArgs),
     /// Learn Discovery Peers and synchronize their Announcement Streams.
     Run(DiscoveryRunArgs),
+    /// Manage replaceable Index Nodes in the local Trust Policy.
+    Index {
+        #[command(subcommand)]
+        command: IndexNodeWorkflow,
+    },
+}
+
+#[derive(Subcommand)]
+pub(super) enum IndexNodeWorkflow {
+    /// List configured Index Nodes.
+    List,
+    /// Add a replaceable Index Node used for outbound Explore queries.
+    Add(IndexNodeAddArgs),
+    /// Remove an Index Node and stop considering results only it returned.
+    Remove(IndexNodeRemoveArgs),
+}
+
+#[derive(Args)]
+pub(super) struct IndexNodeAddArgs {
+    #[arg(long)]
+    pub(super) label: String,
+    #[arg(long)]
+    pub(super) base_url: String,
+}
+
+#[derive(Args)]
+pub(super) struct IndexNodeRemoveArgs {
+    pub(super) base_url: String,
 }
 
 #[derive(Subcommand)]

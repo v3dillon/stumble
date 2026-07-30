@@ -45,7 +45,7 @@ stumble pod explore --query "distributed systems"   # ranked against your privat
 stumble pod subscribe <public_pod_url>              # from the explore result
 ```
 
-Pods can vouch for each other: `stumble pod endorse <slug> --from <your-pod> --reason "..."` signs a recommendation that travels through Bootstrap nodes and shows up as inspectable evidence in other users' local ranking — never as global reputation. Ranking happens entirely on your node — queries and taste never leave it. To help the network, run a Bootstrap or Index role: `stumble-api --bootstrap` (open announcement admission + streams) or `stumble-api --index` (public search over admitted announcements).
+Pods can vouch for each other: `stumble pod endorse <slug> --from <your-pod> --reason "..."` signs a recommendation that travels through Bootstrap nodes and shows up as inspectable evidence in other users' local ranking — never as global reputation. Ranking happens entirely on your node — queries and taste never leave it. To help the network, run a Bootstrap or Index role: `stumble-api --bootstrap` (open announcement admission + streams) or `stumble-api --index` (public search over admitted announcements). Point your own node at an Index with `stumble sync discovery index add --label <name> --base-url <url>` — explore then fans explicit queries out to it and still ranks everything locally.
 
 ### Use it from an AI harness
 
@@ -184,3 +184,6 @@ Manage trusted peers and synchronize Pod state.
 | `stumble sync discovery peers` | List the rotating outbound Discovery Peer set. |
 | `stumble sync discovery gossip` | Enable or disable automatic peer gossip. |
 | `stumble sync discovery run` | Learn Discovery Peers and synchronize their streams. |
+| `stumble sync discovery index list` | List configured Index Nodes. |
+| `stumble sync discovery index add` | Add a replaceable Index Node (`--label`, `--base-url`). |
+| `stumble sync discovery index remove` | Remove an Index Node. |

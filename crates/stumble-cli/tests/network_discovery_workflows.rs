@@ -39,8 +39,8 @@ impl Environment {
         serde_json::from_slice::<Value>(&output.stdout).unwrap()["data"].clone()
     }
 
-    /// Points this node at exactly one Bootstrap: the test's live one.
-    fn use_bootstrap(&self, base_url: &str) {
+    /// Disables every configured Bootstrap endpoint (e.g. the sponsored default).
+    fn disable_all_bootstraps(&self) {
         let endpoints = self.run(&["sync", "bootstrap", "list"]);
         for endpoint in endpoints.as_array().unwrap() {
             self.run(&[
@@ -50,6 +50,11 @@ impl Environment {
                 endpoint["id"].as_str().unwrap(),
             ]);
         }
+    }
+
+    /// Points this node at exactly one Bootstrap: the test's live one.
+    fn use_bootstrap(&self, base_url: &str) {
+        self.disable_all_bootstraps();
         self.run(&[
             "sync",
             "bootstrap",
@@ -234,4 +239,78 @@ async fn published_pods_travel_bootstrap_to_explore_to_subscription() {
     let _ = alice_server.await;
     let _ = carol_server.await;
     let _ = bootstrap_server.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn index_search_discovers_pods_without_announcement_sync() {
+    // One node serving both network roles: Bootstrap admission + Index search.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let index_base = format!("http://{}", listener.local_addr().unwrap());
+    let index_tools = AgentTools::new(seed_store())
+        .with_bootstrap_capability(true, Arc::new(ReqwestOriginProbe))
+        .with_index_capability(true);
+    let index_router = router_with_base_url(index_tools, &index_base);
+    let index_server =
+        tokio::spawn(async move { axum::serve(listener, index_router).await.unwrap() });
+
+    let alice = Environment::new("index-alice");
+    alice.run(&[
+        "pod", "create", "--name", "Type Systems", "--slug", "type-systems",
+        "--description", "Type theory in practice.", "--visibility", "private",
+    ]);
+    alice.use_bootstrap(&index_base);
+    let alice_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let alice_base = format!("http://{}", alice_listener.local_addr().unwrap());
+    let alice_origin = AgentTools::open_initialized_home_node(&alice.data_dir).unwrap();
+    let alice_router = router_with_base_url(alice_origin, &alice_base);
+    let alice_server =
+        tokio::spawn(async move { axum::serve(alice_listener, alice_router).await.unwrap() });
+    let published = alice.run(&["pod", "publish", "type-systems", "--base-url", &alice_base]);
+    assert_eq!(published["bootstrap_submissions"][0]["status"], "admitted");
+
+    // Bob never syncs the Announcement Stream; the Index alone surfaces the Pod.
+    let bob = Environment::new("index-bob");
+    bob.disable_all_bootstraps();
+    let added = bob.run(&[
+        "sync",
+        "discovery",
+        "index",
+        "add",
+        "--label",
+        "test-index",
+        "--base-url",
+        &index_base,
+    ]);
+    assert_eq!(added["status"], "applied", "{added}");
+    let listed = bob.run(&["sync", "discovery", "index", "list"]);
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+
+    let explored = bob.run(&["pod", "explore", "--query", "type theory"]);
+    let found = explored["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["announcement"]["pod_slug"] == "type-systems")
+        .unwrap_or_else(|| panic!("expected index-discovered pod in {explored}"))
+        .clone();
+    assert_eq!(found["is_subscribed"], false);
+
+    let subscribed = bob.run(&[
+        "pod",
+        "subscribe",
+        found["announcement"]["public_pod_url"].as_str().unwrap(),
+    ]);
+    assert_eq!(subscribed["slug"], "type-systems");
+
+    let removed = bob.run(&["sync", "discovery", "index", "remove", &index_base]);
+    assert_eq!(removed["status"], "applied", "{removed}");
+    assert!(bob.run(&["sync", "discovery", "index", "list"])
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    alice_server.abort();
+    index_server.abort();
+    let _ = alice_server.await;
+    let _ = index_server.await;
 }

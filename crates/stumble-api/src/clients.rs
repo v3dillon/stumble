@@ -16,7 +16,7 @@ impl ReqwestAnnouncementStreamClient {
     #[must_use]
     pub fn new(handle: tokio::runtime::Handle) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: http_client(),
             handle,
         }
     }
@@ -68,7 +68,7 @@ impl ReqwestPeerAdvertisementSampleClient {
     #[must_use]
     pub fn new(handle: tokio::runtime::Handle) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: http_client(),
             handle,
         }
     }
@@ -137,7 +137,7 @@ impl ReqwestDiscoveryPeerStreamClient {
     #[must_use]
     pub fn new(handle: tokio::runtime::Handle) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: http_client(),
             handle,
         }
     }
@@ -200,7 +200,7 @@ impl ReqwestIndexSearchClient {
     #[must_use]
     pub fn new(handle: tokio::runtime::Handle) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: http_client(),
             handle,
         }
     }
@@ -259,6 +259,15 @@ impl IndexSearchClient for ReqwestIndexSearchClient {
     }
 }
 
+/// Shared outbound HTTP client with a bounded timeout so unreachable nodes
+/// fail fast instead of hanging CLI commands and daemon ticks.
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default()
+}
+
 /// Runs a small isolated runtime on a fresh OS thread so probes stay safe to
 /// call from both async request handlers and synchronous CLI paths.
 fn probe_on_own_thread<T: Send + 'static>(
@@ -295,7 +304,7 @@ impl OriginProbe for ReqwestOriginProbe {
             .ok_or(OriginProbeError::Unreachable)?;
         let expected_slug = pod_slug.to_string();
         probe_on_own_thread(async move {
-            let client = reqwest::Client::new();
+            let client = http_client();
             let manifest: PodManifest = client
                 .get(&manifest_url)
                 .send()
@@ -348,7 +357,7 @@ impl DiscoveryPeerProbe for ReqwestDiscoveryPeerProbe {
             public_endpoint.trim_end_matches('/')
         );
         probe_on_own_thread(async move {
-            let well_known: WellKnownNode = reqwest::Client::new()
+            let well_known: WellKnownNode = http_client()
                 .get(&url)
                 .send()
                 .await
@@ -378,7 +387,7 @@ pub async fn submit_pod_announcement_to_bootstrap(
         "{}/bootstrap/announcements",
         base_url.trim_end_matches('/')
     );
-    let response = reqwest::Client::new()
+    let response = http_client()
         .post(&url)
         .json(announcement)
         .send()
@@ -414,7 +423,7 @@ impl ReqwestOriginExploreSampleClient {
     #[must_use]
     pub fn new(handle: tokio::runtime::Handle) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: http_client(),
             handle,
         }
     }
@@ -459,7 +468,7 @@ pub async fn submit_pod_endorsement_to_bootstrap(
     endorsement: &PodEndorsement,
 ) -> Result<serde_json::Value, String> {
     let url = format!("{}/bootstrap/endorsements", base_url.trim_end_matches('/'));
-    let response = reqwest::Client::new()
+    let response = http_client()
         .post(&url)
         .json(endorsement)
         .send()
@@ -490,7 +499,7 @@ pub async fn fetch_pod_endorsements_from_bootstrap(
     endorsed_pod_slug: &str,
 ) -> Result<Vec<PodEndorsement>, String> {
     let url = format!("{}/bootstrap/endorsements", base_url.trim_end_matches('/'));
-    reqwest::Client::new()
+    http_client()
         .get(&url)
         .query(&[
             ("endorsed_node_id", endorsed_node_id.to_string()),

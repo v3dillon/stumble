@@ -512,6 +512,14 @@ pub enum PodVisibilityOutcome {
     PendingApproval(Box<PendingProposal>),
 }
 
+/// Outcome of a Trust Policy change under the sensitive-change policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "result", rename_all = "snake_case")]
+pub enum TrustPolicyChangeOutcome {
+    Applied(Box<TrustPolicy>),
+    PendingApproval(Box<PendingProposal>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrustLevel {

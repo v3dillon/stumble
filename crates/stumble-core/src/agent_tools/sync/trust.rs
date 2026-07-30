@@ -67,6 +67,43 @@ impl AgentTools {
         )
     }
 
+    /// Changes the local Trust Policy: the direct Home Node Owner applies
+    /// immediately (they are the approval authority — ADR-0033); an Agent
+    /// Harness receives a Pending Proposal for independent approval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when authorization, validation, or persistence fails.
+    pub fn change_trust_policy(
+        &self,
+        ctx: &AuthContext,
+        change: TrustPolicyChange,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<TrustPolicyChangeOutcome, AgentToolsError> {
+        if ctx.harness_id.is_some() {
+            return self
+                .request_trust_policy_change(ctx, change, now)
+                .map(|proposal| TrustPolicyChangeOutcome::PendingApproval(Box::new(proposal)));
+        }
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("Trust Policy changes require an authenticated User".into())
+        })?;
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let key = (user_id, ctx.tenant_id);
+        let mut policy = store
+            .trust_policies
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| TrustPolicy::new(user_id, ctx.tenant_id));
+        apply_trust_policy_change(&mut policy, &change)?;
+        store.trust_policies.insert(key, policy.clone());
+        self.persist_locked(&mut store)?;
+        Ok(TrustPolicyChangeOutcome::Applied(Box::new(policy)))
+    }
+
     /// Requests an independently approved local Trust Policy change.
     ///
     /// # Errors
