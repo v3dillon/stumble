@@ -4,8 +4,8 @@ use super::{
 };
 use crate::parser::{
     ContentWorkflow, CreatePodArgs, PackageWorkflow, PodWorkflow, PolicyMode, PolicyWorkflow,
-    EndorsePodArgs, PublishPodArgs, RoleChangeArgs, RoleWorkflow, SkillInstallArgs, SkillWorkflow,
-    SubscriptionWorkflow, VisibilityWorkflow,
+    AnnouncePodArgs, EndorsePodArgs, PublishPodArgs, RoleChangeArgs, RoleWorkflow,
+    SkillInstallArgs, SkillWorkflow, SubscriptionWorkflow, VisibilityWorkflow,
 };
 use serde_json::json;
 use stumble_cli::{paginate, ErrorBody, ExitStatusCategory};
@@ -141,6 +141,7 @@ pub(super) fn execute(command: PodWorkflow, tools: &AgentTools, actor: &AuthCont
         }
         PodWorkflow::Publish(args) => publish(&args, tools, actor),
         PodWorkflow::Endorse(args) => endorse(&args, tools, actor),
+        PodWorkflow::Announce(args) => announce(&args, tools, actor),
         PodWorkflow::Subscribe(args) => subscribe(&args.pod, tools, actor),
         PodWorkflow::Unsubscribe(args) => {
             let pod = resolve_pod(tools, actor, &args.pod)?;
@@ -388,42 +389,7 @@ fn publish(args: &PublishPodArgs, tools: &AgentTools, actor: &AuthContext) -> Cl
     // publishing, and direct-URL sharing needs no announcement at all.
     let bootstrap_submissions = match &announcement {
         Some(announcement) => {
-            let endpoints: Vec<_> = tools
-                .list_bootstrap_endpoints(actor)
-                .map_err(agent_tools_error)?
-                .into_iter()
-                .filter(|endpoint| endpoint.enabled)
-                .collect();
-            if endpoints.is_empty() {
-                Vec::new()
-            } else {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(internal_error)?;
-                endpoints
-                    .iter()
-                    .map(|endpoint| {
-                        let result = runtime.block_on(
-                            stumble_api::submit_pod_announcement_to_bootstrap(
-                                &endpoint.base_url,
-                                announcement,
-                            ),
-                        );
-                        match result {
-                            Ok(_) => json!({
-                                "base_url": endpoint.base_url,
-                                "status": "admitted",
-                            }),
-                            Err(reason) => json!({
-                                "base_url": endpoint.base_url,
-                                "status": "failed",
-                                "reason": reason,
-                            }),
-                        }
-                    })
-                    .collect()
-            }
+            push_announcements_to_bootstraps(tools, actor, std::slice::from_ref(announcement))?
         }
         None => Vec::new(),
     };
@@ -436,6 +402,88 @@ fn publish(args: &PublishPodArgs, tools: &AgentTools, actor: &AuthContext) -> Cl
         "announcement": announcement,
         "bootstrap_submissions": bootstrap_submissions,
         "serve_hint": "friends can subscribe once this node is reachable: stumble-api --bind <addr>",
+    }))
+}
+
+/// Pushes signed announcements to every enabled Bootstrap endpoint,
+/// best-effort, reporting one status entry per endpoint per announcement.
+fn push_announcements_to_bootstraps(
+    tools: &AgentTools,
+    actor: &AuthContext,
+    announcements: &[stumble_core::PodAnnouncement],
+) -> Result<Vec<serde_json::Value>, (ErrorBody, ExitStatusCategory)> {
+    let endpoints: Vec<_> = tools
+        .list_bootstrap_endpoints(actor)
+        .map_err(agent_tools_error)?
+        .into_iter()
+        .filter(|endpoint| endpoint.enabled)
+        .collect();
+    if endpoints.is_empty() || announcements.is_empty() {
+        return Ok(Vec::new());
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(internal_error)?;
+    let mut reports = Vec::new();
+    for announcement in announcements {
+        for endpoint in &endpoints {
+            let result = runtime.block_on(stumble_api::submit_pod_announcement_to_bootstrap(
+                &endpoint.base_url,
+                announcement,
+            ));
+            reports.push(match result {
+                Ok(_) => json!({
+                    "pod_slug": announcement.pod_slug,
+                    "base_url": endpoint.base_url,
+                    "status": "admitted",
+                }),
+                Err(reason) => json!({
+                    "pod_slug": announcement.pod_slug,
+                    "base_url": endpoint.base_url,
+                    "status": "failed",
+                    "reason": reason,
+                }),
+            });
+        }
+    }
+    Ok(reports)
+}
+
+/// Re-signs current announcements (renewing leases and capturing the latest
+/// event pointer) and pushes them to enabled Bootstrap endpoints. The manual
+/// counterpart to the runner daemon's periodic network sync.
+fn announce(args: &AnnouncePodArgs, tools: &AgentTools, actor: &AuthContext) -> CliResult {
+    let mut refreshed = tools
+        .refresh_origin_pod_announcements(actor, chrono::Utc::now())
+        .map_err(agent_tools_error)?;
+    if let Some(reference) = &args.pod {
+        let pod = resolve_pod(tools, actor, reference)?;
+        refreshed.retain(|announcement| announcement.pod_slug == pod.slug);
+        if refreshed.is_empty() {
+            return Err((
+                ErrorBody::new(
+                    "not_found",
+                    format!(
+                        "{} has no current announcement; run stumble pod publish {} --base-url <url> first",
+                        pod.slug, pod.slug
+                    ),
+                ),
+                ExitStatusCategory::ValidationOrConflict,
+            ));
+        }
+    }
+    let bootstrap_submissions = push_announcements_to_bootstraps(tools, actor, &refreshed)?;
+    Ok(json!({
+        "refreshed": refreshed
+            .iter()
+            .map(|announcement| json!({
+                "pod_slug": announcement.pod_slug,
+                "expires_at": announcement.expires_at,
+                "latest_event_hash": announcement.latest_event_hash,
+            }))
+            .collect::<Vec<_>>(),
+        "bootstrap_submissions": bootstrap_submissions,
     }))
 }
 

@@ -120,6 +120,29 @@ async fn published_pods_travel_bootstrap_to_explore_to_subscription() {
     assert_eq!(submissions.len(), 1, "{submissions:?}");
     assert_eq!(submissions[0]["status"], "admitted", "{submissions:?}");
 
+    // Alice keeps curating after publishing: the Bootstrap's announcement is
+    // now stale (it binds the old event pointer), which would silently break
+    // sample fetches. `pod announce` re-signs and re-pushes current state.
+    alice.run(&[
+        "add",
+        "https://example.com/paxos-made-live",
+        "--pod",
+        "distributed-craft",
+        "--title",
+        "Paxos made live",
+        "--tag",
+        "distributed-systems",
+    ]);
+    let announced = alice.run(&["pod", "announce", "distributed-craft"]);
+    assert_eq!(
+        announced["refreshed"][0]["pod_slug"], "distributed-craft",
+        "{announced}"
+    );
+    assert_eq!(
+        announced["bootstrap_submissions"][0]["status"], "admitted",
+        "{announced}"
+    );
+
     // ── Carol: publishes her own Pod, then endorses Alice's from it ──────────
     let carol = Environment::new("carol");
     carol.use_bootstrap(&bootstrap_base);
@@ -173,6 +196,12 @@ async fn published_pods_travel_bootstrap_to_explore_to_subscription() {
         samples
             .iter()
             .any(|sample| sample["title"] == "Raft explained visually"),
+        "{samples:?}"
+    );
+    // The re-announced pointer is current, so post-publication content
+    // appears in the signed previews too.
+    assert!(
+        samples.iter().any(|sample| sample["title"] == "Paxos made live"),
         "{samples:?}"
     );
     // Carol's endorsement traveled through the Bootstrap and is inspectable

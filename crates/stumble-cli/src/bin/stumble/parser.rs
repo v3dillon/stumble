@@ -91,6 +91,8 @@ pub(super) enum PodWorkflow {
     Publish(PublishPodArgs),
     /// Sign a recommendation of another public Pod from one of your public Pods
     Endorse(EndorsePodArgs),
+    /// Re-sign current announcements and push them to Bootstrap endpoints
+    Announce(AnnouncePodArgs),
     /// Subscribe to a local Pod by slug or a public Pod by its federation URL
     Subscribe(PodArgs),
     Unsubscribe(PodArgs),
@@ -491,6 +493,12 @@ pub(super) struct PublishPodArgs {
     /// used to build the share URL and issue the Pod Announcement
     #[arg(long, env = "STUMBLE_BASE_URL")]
     pub(super) base_url: Option<String>,
+}
+
+#[derive(Args)]
+pub(super) struct AnnouncePodArgs {
+    /// Limit to one Pod; all published Pods with announcements otherwise
+    pub(super) pod: Option<String>,
 }
 
 #[derive(Args)]

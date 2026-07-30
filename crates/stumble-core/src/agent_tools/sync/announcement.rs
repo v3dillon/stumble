@@ -42,6 +42,54 @@ impl AgentTools {
     ///
     /// Returns an error when the Pod is not public or authoritative at this
     /// node, the direct address is invalid, signing fails, or state is unavailable.
+    /// Re-signs and retains the current announcement for every local public
+    /// Origin Pod that already has one, renewing Announcement Leases and
+    /// capturing the latest federated event pointer.
+    ///
+    /// Detection is event-driven — announcements bind `latest_event_hash`, so
+    /// re-signing simply asserts current state; callers push the results to
+    /// Bootstrap endpoints, whose admission dedupes unchanged announcements.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when authorization, signing, or persistence fails for
+    /// any Pod, or when the store lock is poisoned.
+    pub fn refresh_origin_pod_announcements(
+        &self,
+        ctx: &AuthContext,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Vec<PodAnnouncement>, AgentToolsError> {
+        let targets: Vec<(String, String)> = {
+            let store = self
+                .store
+                .read()
+                .map_err(|_| AgentToolsError::LockPoisoned)?;
+            let node = store.node_for_tenant(ctx.tenant_id)?;
+            store
+                .pods
+                .values()
+                .filter(|pod| {
+                    pod.tenant_id == ctx.tenant_id
+                        && pod.visibility == Visibility::Public
+                        && pod.origin_node_id.is_none_or(|origin| origin == node.id)
+                })
+                .filter_map(|pod| {
+                    store
+                        .known_pod_announcements
+                        .get(&(node.id, pod.slug.clone()))
+                        .map(|known| {
+                            (pod.slug.clone(), known.announcement.public_pod_url.clone())
+                        })
+                })
+                .collect()
+        };
+        let mut refreshed = Vec::with_capacity(targets.len());
+        for (slug, public_pod_url) in targets {
+            refreshed.push(self.pod_announcement_at(ctx, &slug, &public_pod_url, now)?);
+        }
+        Ok(refreshed)
+    }
+
     pub fn pod_announcement(
         &self,
         ctx: &AuthContext,

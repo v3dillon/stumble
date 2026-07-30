@@ -38,7 +38,7 @@ stumble pod skill install rust-craft     # loads the Pod's SKILL.md into ~/.agen
 
 ### Discover Pods from the network
 
-Home Nodes passively learn about published Pods: `stumble-runner serve` pulls Bootstrap Announcement Streams and Discovery Peer streams on an interval (`network_sync_every_seconds`, default 15 minutes), and `stumble pod publish` pushes your announcement to every enabled Bootstrap endpoint automatically. Then:
+Home Nodes passively learn about published Pods: `stumble-runner serve` pulls Bootstrap Announcement Streams and Discovery Peer streams on an interval (`network_sync_every_seconds`, default 15 minutes), and `stumble pod publish` pushes your announcement to every enabled Bootstrap endpoint automatically. The same daemon tick re-announces your published Pods — renewing Announcement Leases and propagating content changes, since announcements bind the latest signed event pointer. Without the daemon, run `stumble pod announce` after curating. Then:
 
 ```bash
 stumble pod explore --query "distributed systems"   # ranked against your private taste, with signed content previews
@@ -88,6 +88,7 @@ Find, subscribe to, curate, and govern Pods.
 | `stumble pod explore` | Explore public Pods. |
 | `stumble pod publish` | Make a Pod public and print its shareable URL. |
 | `stumble pod endorse` | Sign a recommendation of another public Pod (`--from`, `--reason`). |
+| `stumble pod announce` | Re-sign announcements (lease renewal + latest content) and push to Bootstraps. |
 | `stumble pod subscribe` | Subscribe to a local Pod by slug or a public Pod by URL. |
 | `stumble pod unsubscribe` | Unsubscribe from a Pod. |
 | `stumble pod subscription set` | Set subscription priority. |

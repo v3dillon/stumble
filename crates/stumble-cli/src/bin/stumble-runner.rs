@@ -305,8 +305,35 @@ fn start_network_sync(config: &RunnerConfig, tools: AgentTools) {
                         report.retained_announcements, report.retained_withdrawals
                     );
                 }
-                let peer_client = stumble_api::ReqwestDiscoveryPeerStreamClient::new(handle);
+                let peer_client =
+                    stumble_api::ReqwestDiscoveryPeerStreamClient::new(handle.clone());
                 let _ = tools.sync_outbound_discovery_peers(&actor, &peer_client, now)?;
+                // Re-assert current signed state for published Pods: renews
+                // Announcement Leases and propagates content changes, since
+                // announcements bind the latest federated event pointer.
+                let refreshed = tools.refresh_origin_pod_announcements(&actor, now)?;
+                if !refreshed.is_empty() {
+                    let endpoints: Vec<_> = tools
+                        .list_bootstrap_endpoints(&actor)?
+                        .into_iter()
+                        .filter(|endpoint| endpoint.enabled)
+                        .collect();
+                    for announcement in &refreshed {
+                        for endpoint in &endpoints {
+                            if let Err(reason) = handle.block_on(
+                                stumble_api::submit_pod_announcement_to_bootstrap(
+                                    &endpoint.base_url,
+                                    announcement,
+                                ),
+                            ) {
+                                eprintln!(
+                                    "re-announce {} to {} failed: {reason}",
+                                    announcement.pod_slug, endpoint.base_url
+                                );
+                            }
+                        }
+                    }
+                }
                 Ok(())
             })
             .await;
