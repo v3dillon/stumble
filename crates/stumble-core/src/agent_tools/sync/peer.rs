@@ -367,7 +367,7 @@ impl AgentTools {
         sample_client: &dyn PeerAdvertisementSampleClient,
         now: chrono::DateTime<Utc>,
         selection_seed: u64,
-    ) -> Result<Vec<OutboundDiscoveryPeer>, AgentToolsError> {
+    ) -> Result<crate::discovery_peer::PeerLearnReport, AgentToolsError> {
         let (mut sources, local_node_id, gossip_enabled) = {
             let store = self
                 .store
@@ -395,7 +395,10 @@ impl AgentTools {
                 .store
                 .read()
                 .map_err(|_| AgentToolsError::LockPoisoned)?;
-            return Ok(list_active_outbound_peers(&store));
+            return Ok(crate::discovery_peer::PeerLearnReport {
+                selected: list_active_outbound_peers(&store),
+                ..Default::default()
+            });
         }
 
         sources.sort();
@@ -412,7 +415,7 @@ impl AgentTools {
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
-        let selected = crate::discovery_peer::retain_learned_samples_and_select(
+        let report = crate::discovery_peer::retain_learned_samples_and_select(
             &mut store,
             &fetched,
             None,
@@ -421,7 +424,7 @@ impl AgentTools {
             selection_seed,
         );
         self.persist_locked(&mut store)?;
-        Ok(selected)
+        Ok(report)
     }
 
     /// Synchronizes Announcement Streams from each viable outbound Discovery Peer.
@@ -466,40 +469,11 @@ impl AgentTools {
                     .write()
                     .map_err(|_| AgentToolsError::LockPoisoned)?;
                 // Re-check lease under the write lock.
-                if let Some(known) = store
-                    .known_discovery_peer_advertisements
-                    .get(&plan.peer.node_id)
-                {
-                    if !known.advertisement.lease_is_active(now) {
-                        store.outbound_discovery_peers.remove(&plan.peer.node_id);
-                        if let Some(state) =
-                            store.discovery_peer_sync_states.get_mut(&plan.peer.node_id)
-                        {
-                            state.health = DiscoveryPeerHealth::Evicted;
-                            state.last_attempt_at = Some(now);
-                            state.last_error = Some(DiscoveryPeerSyncFailure::new(
-                                DiscoveryPeerSyncFailureKind::ExpiredAdvertisement,
-                                "peer advertisement expired before sync",
-                            ));
-                        }
-                        self.persist_locked(&mut store)?;
-                        evicted.push(plan.peer.node_id);
-                        outcomes.push(DiscoveryPeerSyncOutcome {
-                            node_id: plan.peer.node_id,
-                            public_endpoint: plan.peer.public_endpoint.clone(),
-                            ok: false,
-                            pages_fetched: 0,
-                            retained_announcements: 0,
-                            retained_withdrawals: 0,
-                            cursor: plan.cursor.clone(),
-                            health: DiscoveryPeerHealth::Evicted,
-                            error: Some(DiscoveryPeerSyncFailure::new(
-                                DiscoveryPeerSyncFailureKind::ExpiredAdvertisement,
-                                "peer advertisement expired before sync",
-                            )),
-                        });
-                        continue;
-                    }
+                if let Some(outcome) = evict_if_advertisement_expired(&mut store, &plan, now) {
+                    self.persist_locked(&mut store)?;
+                    evicted.push(plan.peer.node_id);
+                    outcomes.push(outcome);
+                    continue;
                 }
                 let outcome =
                     apply_discovery_peer_stream_pages(&mut store, &plan.peer, fetched, now);

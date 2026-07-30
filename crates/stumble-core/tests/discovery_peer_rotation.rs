@@ -168,7 +168,8 @@ fn learns_peers_from_bootstrap_sample_and_syncs_while_bootstrap_down() {
 
     let selected = tools
         .learn_and_select_discovery_peers(&admin, &samples, now, 7)
-        .unwrap();
+        .unwrap()
+        .selected;
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0].node_id, peer_node.id);
     // Sample provenance is populated through learn → select.
@@ -344,7 +345,8 @@ fn fresh_node_degraded_status_and_cursor_resume_survive_restart() {
     );
     let selected = tools
         .learn_and_select_discovery_peers(&admin, &samples, now, 3)
-        .unwrap();
+        .unwrap()
+        .selected;
     assert_eq!(selected.len(), 1);
 
     let origin = origin_tools();
@@ -464,7 +466,8 @@ fn multi_source_learned_from_and_relearn_after_transport_eviction() {
 
     let selected = tools
         .learn_and_select_discovery_peers(&admin, &samples, now, 5)
-        .unwrap();
+        .unwrap()
+        .selected;
     assert_eq!(selected.len(), 1);
     assert!(selected[0].learned_from.contains(&boot_a.base_url));
     assert!(selected[0].learned_from.contains(&boot_b.base_url));
@@ -512,7 +515,8 @@ fn multi_source_learned_from_and_relearn_after_transport_eviction() {
     // Re-learn after eviction re-admits the peer with provenance.
     let reselected = tools
         .learn_and_select_discovery_peers(&admin, &samples, t, 5)
-        .unwrap();
+        .unwrap()
+        .selected;
     assert_eq!(reselected.len(), 1);
     assert_eq!(reselected[0].node_id, peer_node.id);
     assert!(reselected[0].learned_from.contains(&boot_a.base_url));

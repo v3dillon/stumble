@@ -12,17 +12,18 @@ use crate::pod_announcement::{
     retain_verified_pod_announcement, retain_verified_pod_withdrawal, DeliveryProvenance,
 };
 use crate::store::{InMemoryStore, StoreError};
+use crate::stream_sync::{
+    apply_page_staged, drain_stream_pages, fetch_stream_pages, map_retain_error as classify_retain,
+    FetchedStream, RetainFailure,
+};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::BTreeSet;
 
-/// Maximum pages fetched from one Discovery Peer during a single sync pass.
-const MAX_PAGES_PER_PEER: usize = 32;
-
-/// Default page size requested by outbound Discovery Peer stream sync.
-const DEFAULT_SYNC_PAGE_LIMIT: usize = 50;
-
 /// Base backoff after the first consecutive peer failure.
 const BASE_BACKOFF_SECONDS: i64 = 30;
+
+/// Backoff doublings cap: consecutive failures beyond this stop growing the delay.
+const MAX_BACKOFF_DOUBLINGS: u32 = 5;
 
 /// Snapshot of one peer for a lock-free fetch plan.
 #[derive(Debug, Clone)]
@@ -34,15 +35,7 @@ pub struct DiscoveryPeerSyncPlan {
 }
 
 /// Pages fetched from one peer before any store mutation.
-#[derive(Debug, Clone)]
-pub struct FetchedDiscoveryPeerStream {
-    /// Successfully fetched pages in order (may be empty).
-    pub pages: Vec<AnnouncementStreamPage>,
-    /// Cursor used for the first page request.
-    pub start_cursor: Option<String>,
-    /// Transport/protocol failure after the last successful page, if any.
-    pub fetch_error: Option<DiscoveryPeerSyncFailure>,
-}
+pub type FetchedDiscoveryPeerStream = FetchedStream<DiscoveryPeerSyncFailure>;
 
 /// Builds the ordered plan of outbound peers ready for sync (read-only).
 #[must_use]
@@ -84,48 +77,11 @@ pub fn fetch_discovery_peer_stream_pages(
     base_url: &str,
     start_cursor: Option<String>,
 ) -> FetchedDiscoveryPeerStream {
-    let mut pages = Vec::new();
-    let mut cursor = start_cursor.clone();
-
-    for _ in 0..MAX_PAGES_PER_PEER {
-        let request = BootstrapStreamRequest {
-            cursor: cursor.clone(),
-            limit: Some(DEFAULT_SYNC_PAGE_LIMIT),
-        };
-        debug_assert!(peer_stream_request_is_public_only(&request));
-
-        let page = match client.fetch_peer_announcement_stream(base_url, &request) {
-            Ok(page) => page,
-            Err(error) => {
-                return FetchedDiscoveryPeerStream {
-                    pages,
-                    start_cursor,
-                    fetch_error: Some(error),
-                };
-            }
-        };
-
-        let next_cursor = page.next_cursor.clone();
-        pages.push(page);
-        match next_cursor {
-            Some(next) if next != cursor.clone().unwrap_or_default() => {
-                cursor = Some(next);
-            }
-            _ => {
-                return FetchedDiscoveryPeerStream {
-                    pages,
-                    start_cursor,
-                    fetch_error: None,
-                };
-            }
-        }
-    }
-
-    FetchedDiscoveryPeerStream {
-        pages,
-        start_cursor,
-        fetch_error: None,
-    }
+    fetch_stream_pages(start_cursor, |request| {
+        // Privacy invariant: request serializes only cursor + limit.
+        debug_assert!(peer_stream_request_is_public_only(request));
+        client.fetch_peer_announcement_stream(base_url, request)
+    })
 }
 
 /// Applies previously fetched peer stream pages and updates cursor / health.
@@ -142,77 +98,28 @@ pub fn apply_discovery_peer_stream_pages(
         .unwrap_or_else(|| empty_sync_state(peer.node_id));
     state.last_attempt_at = Some(now);
 
-    let mut cursor = fetched.start_cursor;
-    let mut pages_fetched = 0usize;
-    let mut retained_announcements = 0usize;
-    let mut retained_withdrawals = 0usize;
+    let drain = drain_stream_pages(
+        store,
+        fetched,
+        |cursor| state.cursor = cursor.clone(),
+        |store, page| apply_peer_stream_page_staged(store, &peer.public_endpoint, page, now),
+    );
 
-    for page in &fetched.pages {
-        match apply_peer_stream_page_staged(store, &peer.public_endpoint, page, now) {
-            Ok((announcements, withdrawals)) => {
-                retained_announcements = retained_announcements.saturating_add(announcements);
-                retained_withdrawals = retained_withdrawals.saturating_add(withdrawals);
-                pages_fetched = pages_fetched.saturating_add(1);
-                match &page.next_cursor {
-                    Some(next) if next != &cursor.clone().unwrap_or_default() => {
-                        cursor = Some(next.clone());
-                        state.cursor = cursor.clone();
-                    }
-                    _ => {
-                        cursor = page.next_cursor.clone().or(cursor);
-                        state.cursor = cursor.clone();
-                        state.last_success_at = Some(now);
-                        state.last_error = None;
-                        state.consecutive_failures = 0;
-                        state.backoff_until = None;
-                        state.health = DiscoveryPeerHealth::Healthy;
-                        store
-                            .discovery_peer_sync_states
-                            .insert(peer.node_id, state.clone());
-                        return peer_outcome(
-                            peer,
-                            true,
-                            pages_fetched,
-                            retained_announcements,
-                            retained_withdrawals,
-                            cursor,
-                            state.health,
-                            None,
-                        );
-                    }
-                }
-            }
-            Err(error) => {
-                record_peer_failure(store, peer, &mut state, error.clone(), now);
-                return peer_outcome(
-                    peer,
-                    false,
-                    pages_fetched,
-                    retained_announcements,
-                    retained_withdrawals,
-                    cursor,
-                    state.health,
-                    Some(error),
-                );
-            }
-        }
-    }
-
-    if let Some(error) = fetched.fetch_error {
+    if let Some(error) = drain.failure {
         record_peer_failure(store, peer, &mut state, error.clone(), now);
         return peer_outcome(
             peer,
             false,
-            pages_fetched,
-            retained_announcements,
-            retained_withdrawals,
-            cursor,
+            drain.pages_applied,
+            drain.retained_announcements,
+            drain.retained_withdrawals,
+            drain.cursor,
             state.health,
             Some(error),
         );
     }
 
-    state.cursor = cursor.clone();
+    state.cursor = drain.cursor.clone();
     state.last_success_at = Some(now);
     state.last_error = None;
     state.consecutive_failures = 0;
@@ -224,10 +131,10 @@ pub fn apply_discovery_peer_stream_pages(
     peer_outcome(
         peer,
         true,
-        pages_fetched,
-        retained_announcements,
-        retained_withdrawals,
-        cursor,
+        drain.pages_applied,
+        drain.retained_announcements,
+        drain.retained_withdrawals,
+        drain.cursor,
         state.health,
         None,
     )
@@ -249,35 +156,10 @@ pub fn sync_outbound_discovery_peers(
     let mut evicted = Vec::new();
 
     for plan in plans {
-        // Skip peers whose advertisement expired between plan and fetch.
-        if let Some(known) = store
-            .known_discovery_peer_advertisements
-            .get(&plan.peer.node_id)
-        {
-            if !known.advertisement.lease_is_active(now) {
-                mark_peer_evicted(
-                    store,
-                    plan.peer.node_id,
-                    now,
-                    "peer advertisement expired before sync",
-                );
-                store.outbound_discovery_peers.remove(&plan.peer.node_id);
-                evicted.push(plan.peer.node_id);
-                outcomes.push(peer_outcome(
-                    &plan.peer,
-                    false,
-                    0,
-                    0,
-                    0,
-                    plan.cursor.clone(),
-                    DiscoveryPeerHealth::Evicted,
-                    Some(DiscoveryPeerSyncFailure::new(
-                        DiscoveryPeerSyncFailureKind::ExpiredAdvertisement,
-                        "peer advertisement expired before sync",
-                    )),
-                ));
-                continue;
-            }
+        if let Some(outcome) = evict_if_advertisement_expired(store, &plan, now) {
+            evicted.push(plan.peer.node_id);
+            outcomes.push(outcome);
+            continue;
         }
 
         let fetched =
@@ -299,6 +181,40 @@ pub fn sync_outbound_discovery_peers(
         retained_withdrawals,
         evicted,
     }
+}
+
+/// Evicts the planned peer when its advertisement lease expired between plan
+/// and sync, recording an Evicted sync state even for peers with no prior
+/// state row. Returns the eviction outcome, or `None` when the lease is
+/// still active.
+pub fn evict_if_advertisement_expired(
+    store: &mut InMemoryStore,
+    plan: &DiscoveryPeerSyncPlan,
+    now: DateTime<Utc>,
+) -> Option<DiscoveryPeerSyncOutcome> {
+    const EXPIRED_MESSAGE: &str = "peer advertisement expired before sync";
+    let expired = store
+        .known_discovery_peer_advertisements
+        .get(&plan.peer.node_id)
+        .is_some_and(|known| !known.advertisement.lease_is_active(now));
+    if !expired {
+        return None;
+    }
+    mark_peer_evicted(store, plan.peer.node_id, now, EXPIRED_MESSAGE);
+    store.outbound_discovery_peers.remove(&plan.peer.node_id);
+    Some(peer_outcome(
+        &plan.peer,
+        false,
+        0,
+        0,
+        0,
+        plan.cursor.clone(),
+        DiscoveryPeerHealth::Evicted,
+        Some(DiscoveryPeerSyncFailure::new(
+            DiscoveryPeerSyncFailureKind::ExpiredAdvertisement,
+            EXPIRED_MESSAGE,
+        )),
+    ))
 }
 
 /// One peer-advertisement sample fetch result keyed by delivery source URL.
@@ -337,11 +253,27 @@ pub fn fetch_peer_advertisement_samples(
         .collect()
 }
 
+/// Evidence from one sample-learning pass. Soft-skipped advertisements and
+/// failed sources are counted and carried, never silently discarded, so a
+/// caller can tell "learned nothing because the network is quiet" apart from
+/// "every advertisement was forged and every source timed out".
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct PeerLearnReport {
+    /// Advertisements that verified and were retained (or refreshed).
+    pub retained: usize,
+    /// Advertisements rejected during verification and skipped.
+    pub skipped_invalid: usize,
+    /// Sample sources that failed, with the typed transport/protocol failure.
+    pub failed_sources: Vec<(String, DiscoveryPeerSyncFailure)>,
+    /// Selected outbound peers after learning.
+    pub selected: Vec<OutboundDiscoveryPeer>,
+}
+
 /// Verifies and retains previously fetched samples, then selects outbound peers.
 ///
 /// Intended to run under a short store write lock after
 /// [`fetch_peer_advertisement_samples`] completed without holding the store.
-/// Soft-skips invalid advertisements and failed sample sources.
+/// Soft-skips invalid advertisements and failed sample sources, reporting both.
 ///
 /// `probe` is optional: pass `None` for signed-ad local verification only
 /// (production default for outbound learning). Inject a real probe when live
@@ -353,9 +285,11 @@ pub fn retain_learned_samples_and_select(
     local_node_id: Option<NodeIdentityId>,
     now: DateTime<Utc>,
     selection_seed: u64,
-) -> Vec<OutboundDiscoveryPeer> {
+) -> PeerLearnReport {
+    let mut report = PeerLearnReport::default();
     if !peer_gossip_is_enabled(store) {
-        return list_active_outbound_peers(store);
+        report.selected = list_active_outbound_peers(store);
+        return report;
     }
 
     for (source, result) in fetched {
@@ -364,23 +298,28 @@ pub fn retain_learned_samples_and_select(
                 for advertisement in &sample.advertisements {
                     // Soft-skip individual invalid ads; hard failures only on
                     // transport for the sample itself (already filtered).
-                    let _ = learn_discovery_peer_advertisement(
+                    match learn_discovery_peer_advertisement(
                         store,
                         advertisement.clone(),
                         Some(source.as_str()),
                         probe,
                         now,
-                    );
+                    ) {
+                        Ok(_) => report.retained += 1,
+                        Err(_) => report.skipped_invalid += 1,
+                    }
                 }
             }
-            Err(_error) => {
+            Err(error) => {
                 // Sample source fallthrough: one unavailable Bootstrap/peer does
                 // not block learning from others.
+                report.failed_sources.push((source.clone(), error.clone()));
             }
         }
     }
 
-    select_outbound_discovery_peers(store, local_node_id, now, selection_seed)
+    report.selected = select_outbound_discovery_peers(store, local_node_id, now, selection_seed);
+    report
 }
 
 /// Learns peer advertisements from Bootstrap endpoints and existing outbound peers.
@@ -399,9 +338,12 @@ pub fn learn_peers_from_sample_sources(
     local_node_id: Option<NodeIdentityId>,
     now: DateTime<Utc>,
     selection_seed: u64,
-) -> Result<Vec<OutboundDiscoveryPeer>, DiscoveryPeerSyncFailure> {
+) -> Result<PeerLearnReport, DiscoveryPeerSyncFailure> {
     if !peer_gossip_is_enabled(store) {
-        return Ok(list_active_outbound_peers(store));
+        return Ok(PeerLearnReport {
+            selected: list_active_outbound_peers(store),
+            ..PeerLearnReport::default()
+        });
     }
 
     let mut sources: Vec<String> = bootstrap_base_urls
@@ -572,8 +514,8 @@ pub(super) fn record_peer_failure(
         return;
     }
 
-    let backoff_secs =
-        BASE_BACKOFF_SECONDS.saturating_mul(1_i64 << (state.consecutive_failures.min(5) - 1));
+    let backoff_secs = BASE_BACKOFF_SECONDS
+        .saturating_mul(1_i64 << (state.consecutive_failures.min(MAX_BACKOFF_DOUBLINGS) - 1));
     state.backoff_until = Some(now + Duration::seconds(backoff_secs));
     state.health = DiscoveryPeerHealth::BackedOff;
     store
@@ -605,24 +547,17 @@ pub(super) fn map_retain_error(
     error: StoreError,
     subject: &str,
 ) -> Result<(), DiscoveryPeerSyncFailure> {
-    match error {
-        StoreError::AnnouncementStale
-        | StoreError::AnnouncementExpired
-        | StoreError::AnnouncementWithdrawn
-        | StoreError::WithdrawalStale => Ok(()),
-        StoreError::InvalidSignature => Err(DiscoveryPeerSyncFailure::new(
-            DiscoveryPeerSyncFailureKind::InvalidSignature,
-            format!("{subject} signature verification failed"),
-        )),
-        StoreError::Validation(message) => Err(DiscoveryPeerSyncFailure::new(
-            DiscoveryPeerSyncFailureKind::Validation,
-            message,
-        )),
-        error => Err(DiscoveryPeerSyncFailure::new(
-            DiscoveryPeerSyncFailureKind::Protocol,
-            error.to_string(),
-        )),
-    }
+    classify_retain(error, subject).map_err(|failure| match failure {
+        RetainFailure::InvalidSignature(message) => {
+            DiscoveryPeerSyncFailure::new(DiscoveryPeerSyncFailureKind::InvalidSignature, message)
+        }
+        RetainFailure::Validation(message) => {
+            DiscoveryPeerSyncFailure::new(DiscoveryPeerSyncFailureKind::Validation, message)
+        }
+        RetainFailure::Protocol(message) => {
+            DiscoveryPeerSyncFailure::new(DiscoveryPeerSyncFailureKind::Protocol, message)
+        }
+    })
 }
 
 pub(super) fn apply_peer_stream_page_staged(
@@ -631,16 +566,9 @@ pub(super) fn apply_peer_stream_page_staged(
     page: &AnnouncementStreamPage,
     now: DateTime<Utc>,
 ) -> Result<(usize, usize), DiscoveryPeerSyncFailure> {
-    let before_announcements = store.known_pod_announcements.clone();
-    let before_withdrawals = store.known_pod_withdrawals.clone();
-    match apply_peer_stream_page(store, peer_endpoint, page, now) {
-        Ok(counts) => Ok(counts),
-        Err(error) => {
-            store.known_pod_announcements = before_announcements;
-            store.known_pod_withdrawals = before_withdrawals;
-            Err(error)
-        }
-    }
+    apply_page_staged(store, |store| {
+        apply_peer_stream_page(store, peer_endpoint, page, now)
+    })
 }
 
 pub(super) fn apply_peer_stream_page(
@@ -675,15 +603,8 @@ pub(super) fn apply_peer_stream_page(
                     Ok(_) => retained_announcements = retained_announcements.saturating_add(1),
                     Err(error) => {
                         if matches!(error, StoreError::InvalidSignature) {
-                            invalid_count = invalid_count.saturating_add(1);
-                            if invalid_count > MAX_PEER_INVALID_ENTRIES_PER_PAGE {
-                                return Err(DiscoveryPeerSyncFailure::new(
-                                    DiscoveryPeerSyncFailureKind::Flooding,
-                                    "peer stream flooded with invalid signatures",
-                                ));
-                            }
-                            // Single invalid signature is a hard failure for the page
-                            // (peer delivered forged Origin bytes).
+                            // A single invalid signature is a hard failure for
+                            // the page: the peer delivered forged Origin bytes.
                             return Err(DiscoveryPeerSyncFailure::new(
                                 DiscoveryPeerSyncFailureKind::InvalidSignature,
                                 "announcement signature verification failed",

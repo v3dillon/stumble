@@ -38,14 +38,15 @@ pub use advertise::{
 };
 pub use client::{
     apply_discovery_peer_stream_pages, discovery_status, ensure_discovery_peer_gossip_config,
-    fetch_discovery_peer_stream_pages, fetch_peer_advertisement_samples,
-    learn_discovery_peer_advertisement, learn_peers_from_sample_sources,
-    list_active_outbound_peers, max_outbound_peers, outbound_discovery_peer_statuses,
-    peer_gossip_is_enabled, peer_sample_request_is_public_only, peer_stream_request_is_public_only,
-    plan_discovery_peer_sync, retain_learned_samples_and_select, select_outbound_discovery_peers,
+    evict_if_advertisement_expired, fetch_discovery_peer_stream_pages,
+    fetch_peer_advertisement_samples, learn_discovery_peer_advertisement,
+    learn_peers_from_sample_sources, list_active_outbound_peers, max_outbound_peers,
+    outbound_discovery_peer_statuses, peer_gossip_is_enabled, peer_sample_request_is_public_only,
+    peer_stream_request_is_public_only, plan_discovery_peer_sync,
+    retain_learned_samples_and_select, select_outbound_discovery_peers,
     set_automatic_peer_gossip_enabled, sync_outbound_discovery_peers, DiscoveryPeerStreamClient,
     DiscoveryPeerSyncPlan, FetchedDiscoveryPeerStream, FetchedPeerAdvertisementSample,
-    PeerAdvertisementSampleClient, ScriptedDiscoveryPeerStreamClient,
+    PeerAdvertisementSampleClient, PeerLearnReport, ScriptedDiscoveryPeerStreamClient,
     ScriptedPeerAdvertisementSampleClient,
 };
 pub use endpoint::{normalize_discovery_peer_endpoint, EndpointPolicyError};

@@ -40,11 +40,7 @@ fn execute_discovery(
             .map_err(internal_error),
             DiscoveryServeWorkflow::Enable(args) => serde_json::to_value(
                 tools
-                    .enable_discovery_peer_service(
-                        actor,
-                        &args.public_endpoint,
-                        chrono::Utc::now(),
-                    )
+                    .enable_discovery_peer_service(actor, &args.public_endpoint, chrono::Utc::now())
                     .map_err(agent_tools_error)?,
             )
             .map_err(internal_error),
@@ -113,12 +109,20 @@ fn execute_discovery(
                     use rand_core::{OsRng, RngCore};
                     OsRng.next_u64()
                 };
-                let selected = tools
+                let learned = tools
                     .learn_and_select_discovery_peers(actor, &sample_client, now, selection_seed)
                     .map_err(agent_tools_error)?;
                 report.insert(
                     "selected".into(),
-                    serde_json::to_value(selected).map_err(internal_error)?,
+                    serde_json::to_value(&learned.selected).map_err(internal_error)?,
+                );
+                report.insert(
+                    "learn".into(),
+                    serde_json::json!({
+                        "retained": learned.retained,
+                        "skipped_invalid": learned.skipped_invalid,
+                        "failed_sources": learned.failed_sources,
+                    }),
                 );
             }
             if !args.no_sync {

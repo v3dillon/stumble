@@ -18,15 +18,13 @@ use crate::pod_announcement::{
     retain_verified_pod_announcement, retain_verified_pod_withdrawal, DeliveryProvenance,
 };
 use crate::store::{InMemoryStore, StoreError};
+use crate::stream_sync::{
+    apply_page_staged, drain_stream_pages, fetch_stream_pages, map_retain_error as classify_retain,
+    FetchedStream, RetainFailure,
+};
 use chrono::{DateTime, Utc};
 use std::collections::BTreeSet;
 use uuid::Uuid;
-
-/// Maximum pages fetched from one Bootstrap endpoint during a single sync pass.
-const MAX_PAGES_PER_ENDPOINT: usize = 32;
-
-/// Default page size requested by outbound Bootstrap stream sync.
-const DEFAULT_SYNC_PAGE_LIMIT: usize = 50;
 
 /// Transport port for fetching topic-neutral Announcement Stream pages.
 ///
@@ -208,15 +206,7 @@ pub struct BootstrapEndpointSyncPlan {
 }
 
 /// Pages fetched from one endpoint before any store mutation.
-#[derive(Debug, Clone)]
-pub struct FetchedBootstrapStream {
-    /// Successfully fetched pages in order (may be empty).
-    pub pages: Vec<AnnouncementStreamPage>,
-    /// Cursor used for the first page request.
-    pub start_cursor: Option<String>,
-    /// Transport/protocol failure after the last successful page, if any.
-    pub fetch_error: Option<BootstrapSyncFailure>,
-}
+pub type FetchedBootstrapStream = FetchedStream<BootstrapSyncFailure>;
 
 /// Builds the ordered plan of enabled endpoints and their cursors (read-only).
 #[must_use]
@@ -245,49 +235,11 @@ pub fn fetch_bootstrap_stream_pages(
     base_url: &str,
     start_cursor: Option<String>,
 ) -> FetchedBootstrapStream {
-    let mut pages = Vec::new();
-    let mut cursor = start_cursor.clone();
-
-    for _ in 0..MAX_PAGES_PER_ENDPOINT {
-        let request = BootstrapStreamRequest {
-            cursor: cursor.clone(),
-            limit: Some(DEFAULT_SYNC_PAGE_LIMIT),
-        };
+    fetch_stream_pages(start_cursor, |request| {
         // Privacy invariant: request serializes only cursor + limit.
-        debug_assert!(request_is_public_only(&request));
-
-        let page = match client.fetch_announcement_stream(base_url, &request) {
-            Ok(page) => page,
-            Err(error) => {
-                return FetchedBootstrapStream {
-                    pages,
-                    start_cursor,
-                    fetch_error: Some(error),
-                };
-            }
-        };
-
-        let next_cursor = page.next_cursor.clone();
-        pages.push(page);
-        match next_cursor {
-            Some(next) if next != cursor.clone().unwrap_or_default() => {
-                cursor = Some(next);
-            }
-            _ => {
-                return FetchedBootstrapStream {
-                    pages,
-                    start_cursor,
-                    fetch_error: None,
-                };
-            }
-        }
-    }
-
-    FetchedBootstrapStream {
-        pages,
-        start_cursor,
-        fetch_error: None,
-    }
+        debug_assert!(request_is_public_only(request));
+        client.fetch_announcement_stream(base_url, request)
+    })
 }
 
 /// Applies previously fetched stream pages and updates cursor / error state.
@@ -308,83 +260,39 @@ pub fn apply_bootstrap_stream_pages(
         .unwrap_or_else(|| empty_sync_state(endpoint.id));
     state.last_attempt_at = Some(now);
 
-    let mut cursor = fetched.start_cursor;
-    let mut pages_fetched = 0usize;
-    let mut retained_announcements = 0usize;
-    let mut retained_withdrawals = 0usize;
+    let drain = drain_stream_pages(
+        store,
+        fetched,
+        |cursor| state.cursor = cursor.clone(),
+        |store, page| apply_stream_page_staged(store, &endpoint.base_url, page, now),
+    );
 
-    for page in &fetched.pages {
-        match apply_stream_page_staged(store, &endpoint.base_url, page, now) {
-            Ok((announcements, withdrawals)) => {
-                retained_announcements = retained_announcements.saturating_add(announcements);
-                retained_withdrawals = retained_withdrawals.saturating_add(withdrawals);
-                pages_fetched = pages_fetched.saturating_add(1);
-                match &page.next_cursor {
-                    Some(next) if next != &cursor.clone().unwrap_or_default() => {
-                        cursor = Some(next.clone());
-                        state.cursor = cursor.clone();
-                    }
-                    _ => {
-                        state.cursor = cursor.clone();
-                        state.last_success_at = Some(now);
-                        state.last_error = None;
-                        store.bootstrap_sync_states.insert(endpoint.id, state);
-                        return endpoint_outcome(
-                            endpoint,
-                            true,
-                            pages_fetched,
-                            retained_announcements,
-                            retained_withdrawals,
-                            cursor,
-                            None,
-                        );
-                    }
-                }
-            }
-            Err(error) => {
-                // Cursor stays at the request cursor for this page; partial page not applied.
-                state.last_error = Some(error.clone());
-                store.bootstrap_sync_states.insert(endpoint.id, state);
-                return endpoint_outcome(
-                    endpoint,
-                    false,
-                    pages_fetched,
-                    retained_announcements,
-                    retained_withdrawals,
-                    cursor,
-                    Some(error),
-                );
-            }
-        }
-    }
-
-    if let Some(error) = fetched.fetch_error {
-        state.cursor = cursor.clone();
+    if let Some(error) = drain.failure {
+        // Cursor stays at the last applied page; the failed page was rolled back.
         state.last_error = Some(error.clone());
         store.bootstrap_sync_states.insert(endpoint.id, state);
         return endpoint_outcome(
             endpoint,
             false,
-            pages_fetched,
-            retained_announcements,
-            retained_withdrawals,
-            cursor,
+            drain.pages_applied,
+            drain.retained_announcements,
+            drain.retained_withdrawals,
+            drain.cursor,
             Some(error),
         );
     }
 
-    // Hit page cap with more data available, or zero-page success with no error.
-    state.cursor = cursor.clone();
+    state.cursor = drain.cursor.clone();
     state.last_success_at = Some(now);
     state.last_error = None;
     store.bootstrap_sync_states.insert(endpoint.id, state);
     endpoint_outcome(
         endpoint,
         true,
-        pages_fetched,
-        retained_announcements,
-        retained_withdrawals,
-        cursor,
+        drain.pages_applied,
+        drain.retained_announcements,
+        drain.retained_withdrawals,
+        drain.cursor,
         None,
     )
 }
@@ -446,24 +354,17 @@ fn endpoint_outcome(
 
 /// Maps store retain errors into skip-vs-hard-failure control flow.
 fn map_retain_error(error: StoreError, subject: &str) -> Result<(), BootstrapSyncFailure> {
-    match error {
-        StoreError::AnnouncementStale
-        | StoreError::AnnouncementExpired
-        | StoreError::AnnouncementWithdrawn
-        | StoreError::WithdrawalStale => Ok(()),
-        StoreError::InvalidSignature => Err(BootstrapSyncFailure::new(
-            BootstrapSyncFailureKind::InvalidSignature,
-            format!("{subject} signature verification failed"),
-        )),
-        StoreError::Validation(message) => Err(BootstrapSyncFailure::new(
-            BootstrapSyncFailureKind::Validation,
-            message,
-        )),
-        error => Err(BootstrapSyncFailure::new(
-            BootstrapSyncFailureKind::Protocol,
-            error.to_string(),
-        )),
-    }
+    classify_retain(error, subject).map_err(|failure| match failure {
+        RetainFailure::InvalidSignature(message) => {
+            BootstrapSyncFailure::new(BootstrapSyncFailureKind::InvalidSignature, message)
+        }
+        RetainFailure::Validation(message) => {
+            BootstrapSyncFailure::new(BootstrapSyncFailureKind::Validation, message)
+        }
+        RetainFailure::Protocol(message) => {
+            BootstrapSyncFailure::new(BootstrapSyncFailureKind::Protocol, message)
+        }
+    })
 }
 
 /// Applies one page atomically: hard failure restores pre-page announcement state.
@@ -473,16 +374,9 @@ fn apply_stream_page_staged(
     page: &AnnouncementStreamPage,
     now: DateTime<Utc>,
 ) -> Result<(usize, usize), BootstrapSyncFailure> {
-    let before_announcements = store.known_pod_announcements.clone();
-    let before_withdrawals = store.known_pod_withdrawals.clone();
-    match apply_stream_page(store, bootstrap_base_url, page, now) {
-        Ok(counts) => Ok(counts),
-        Err(error) => {
-            store.known_pod_announcements = before_announcements;
-            store.known_pod_withdrawals = before_withdrawals;
-            Err(error)
-        }
-    }
+    apply_page_staged(store, |store| {
+        apply_stream_page(store, bootstrap_base_url, page, now)
+    })
 }
 
 fn apply_stream_page(

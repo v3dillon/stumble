@@ -13,6 +13,7 @@ pub mod seeds;
 pub mod signing;
 pub mod skill_pack;
 pub mod store;
+mod stream_sync;
 
 pub use agent_tools::*;
 pub use bootstrap::{
@@ -49,12 +50,13 @@ pub use discovery_peer::{
     sync_outbound_discovery_peers, DiscoveryPeerProbe, DiscoveryPeerProbeError,
     DiscoveryPeerStreamClient, DiscoveryPeerSyncPlan, EndpointPolicyError,
     FetchedDiscoveryPeerStream, FetchedPeerAdvertisementSample, FixedDiscoveryPeerProbe,
-    PeerAdvertisementSampleClient, ScriptedDiscoveryPeerProbe, ScriptedDiscoveryPeerStreamClient,
-    ScriptedPeerAdvertisementSampleClient, SimpleMatchingDiscoveryPeerProbe,
-    UnreachableDiscoveryPeerProbe, DEFAULT_PEER_SAMPLE_LIMIT, DEFAULT_PEER_STREAM_PAGE_LIMIT,
-    MAX_PEER_ADVERTISEMENT_PAYLOAD_BYTES, MAX_PEER_NETWORK_ADMISSIONS_PER_WINDOW,
-    MAX_PEER_NODE_ADMISSIONS_PER_WINDOW, MAX_PEER_SAMPLE_LIMIT, MAX_PEER_STREAM_ENTRIES,
-    MAX_PEER_STREAM_PAGE_LIMIT, PEER_ADMISSION_RATE_WINDOW,
+    PeerAdvertisementSampleClient, PeerLearnReport, ScriptedDiscoveryPeerProbe,
+    ScriptedDiscoveryPeerStreamClient, ScriptedPeerAdvertisementSampleClient,
+    SimpleMatchingDiscoveryPeerProbe, UnreachableDiscoveryPeerProbe, DEFAULT_PEER_SAMPLE_LIMIT,
+    DEFAULT_PEER_STREAM_PAGE_LIMIT, MAX_PEER_ADVERTISEMENT_PAYLOAD_BYTES,
+    MAX_PEER_NETWORK_ADMISSIONS_PER_WINDOW, MAX_PEER_NODE_ADMISSIONS_PER_WINDOW,
+    MAX_PEER_SAMPLE_LIMIT, MAX_PEER_STREAM_ENTRIES, MAX_PEER_STREAM_PAGE_LIMIT,
+    PEER_ADMISSION_RATE_WINDOW,
 };
 pub use domain::*;
 pub use index::{

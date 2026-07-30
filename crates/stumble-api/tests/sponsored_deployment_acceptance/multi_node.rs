@@ -365,7 +365,8 @@ async fn sponsored_multi_node_publish_sync_peer_outage_and_subscribe() {
     })
     .await
     .unwrap()
-    .unwrap();
+    .unwrap()
+    .selected;
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0].public_endpoint, peer_base);
     // Learning never creates a Trusted Peer.

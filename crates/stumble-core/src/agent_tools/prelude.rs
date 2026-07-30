@@ -11,13 +11,14 @@ pub(super) use crate::bootstrap::{
 pub(super) use crate::discovery_peer::{
     admit_discovery_peer_advertisement, apply_discovery_peer_stream_pages,
     disable_discovery_peer_service, discovery_status, enable_discovery_peer_service,
-    ensure_discovery_peer_gossip_config, fetch_discovery_peer_stream_pages,
-    list_active_outbound_peers, outbound_discovery_peer_statuses, peer_gossip_is_enabled,
-    peer_service_is_enabled, plan_discovery_peer_sync, project_peer_serving_announcement,
-    read_peer_announcement_stream, renew_discovery_peer_advertisement,
-    sample_discovery_peer_advertisements, sample_known_discovery_peer_advertisements,
-    set_automatic_peer_gossip_enabled, DiscoveryPeerProbe, DiscoveryPeerStreamClient,
-    PeerAdvertisementSampleClient, UnreachableDiscoveryPeerProbe,
+    ensure_discovery_peer_gossip_config, evict_if_advertisement_expired,
+    fetch_discovery_peer_stream_pages, list_active_outbound_peers,
+    outbound_discovery_peer_statuses, peer_gossip_is_enabled, peer_service_is_enabled,
+    plan_discovery_peer_sync, project_peer_serving_announcement, read_peer_announcement_stream,
+    renew_discovery_peer_advertisement, sample_discovery_peer_advertisements,
+    sample_known_discovery_peer_advertisements, set_automatic_peer_gossip_enabled,
+    DiscoveryPeerProbe, DiscoveryPeerStreamClient, PeerAdvertisementSampleClient,
+    UnreachableDiscoveryPeerProbe,
 };
 pub(super) use crate::domain::*;
 pub(super) use crate::feed_mix::{
