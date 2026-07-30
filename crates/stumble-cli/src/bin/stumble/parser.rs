@@ -275,6 +275,61 @@ pub(super) enum SyncWorkflow {
         #[command(subcommand)]
         command: BootstrapWorkflow,
     },
+    /// Inspect discovery readiness and manage Discovery Peer relationships.
+    Discovery {
+        #[command(subcommand)]
+        command: DiscoveryWorkflow,
+    },
+}
+
+#[derive(Subcommand)]
+pub(super) enum DiscoveryWorkflow {
+    /// Report discovery readiness including Bootstrap-outage degraded mode.
+    Status,
+    /// Manage opt-in inbound Discovery Peer announcement serving.
+    Serve {
+        #[command(subcommand)]
+        command: DiscoveryServeWorkflow,
+    },
+    /// List the rotating outbound Discovery Peer set with health state.
+    Peers,
+    /// Enable or disable automatic outbound peer gossip.
+    Gossip(DiscoveryGossipArgs),
+    /// Learn Discovery Peers and synchronize their Announcement Streams.
+    Run(DiscoveryRunArgs),
+}
+
+#[derive(Subcommand)]
+pub(super) enum DiscoveryServeWorkflow {
+    /// Show the opt-in inbound serving state.
+    Show,
+    /// Enable inbound announcement serving after reachability verification.
+    Enable(DiscoveryServeEnableArgs),
+    /// Disable inbound serving without affecting outbound discovery.
+    Disable,
+}
+
+#[derive(Args)]
+pub(super) struct DiscoveryServeEnableArgs {
+    /// Publicly reachable endpoint to advertise for announcement serving
+    #[arg(long)]
+    pub(super) public_endpoint: String,
+}
+
+#[derive(Args)]
+pub(super) struct DiscoveryGossipArgs {
+    #[arg(long, required = true, action = clap::ArgAction::Set)]
+    pub(super) enabled: bool,
+}
+
+#[derive(Args)]
+pub(super) struct DiscoveryRunArgs {
+    /// Learn peer samples and rotate the outbound set before syncing
+    #[arg(long)]
+    pub(super) learn: bool,
+    /// Skip Announcement Stream synchronization (learn only)
+    #[arg(long, requires = "learn")]
+    pub(super) no_sync: bool,
 }
 
 #[derive(Subcommand)]

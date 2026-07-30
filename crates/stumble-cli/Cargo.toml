@@ -22,6 +22,7 @@ stumble-api = { path = "../stumble-api" }
 stumble-core = { path = "../stumble-core" }
 stumble-mcp = { path = "../stumble-mcp" }
 stumble-sync = { path = "../stumble-sync" }
+rand_core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

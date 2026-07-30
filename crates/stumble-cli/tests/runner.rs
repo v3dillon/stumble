@@ -94,12 +94,15 @@ fn unified_http_daemon_requires_the_callers_harness_token() {
 
     let unauthorized = initialize_request(address, None);
     assert!(unauthorized.starts_with("HTTP/1.1 401 Unauthorized"));
-    let node_ops = get_request(address, "/home/bootstrap/status", None);
+    let node_ops = post_request(
+        address,
+        "/discovery/announcements/produce",
+        r#"{"pod_slug":"x","public_pod_url":"https://x.example"}"#,
+        None,
+    );
     assert!(node_ops.starts_with("HTTP/1.1 401 Unauthorized"));
     let authorized = initialize_request(address, Some(&token));
     assert!(authorized.starts_with("HTTP/1.1 200 OK"));
-    let unauthorized_node_scope = get_request(address, "/home/bootstrap/status", Some(&token));
-    assert!(unauthorized_node_scope.starts_with("HTTP/1.1 403 Forbidden"));
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -141,17 +144,19 @@ fn initialize_request(address: SocketAddr, token: Option<&str>) -> String {
     response
 }
 
-fn get_request(address: SocketAddr, path: &str, token: Option<&str>) -> String {
+fn post_request(address: SocketAddr, path: &str, body: &str, token: Option<&str>) -> String {
     let authorization = token
         .map(|token| format!("Authorization: Bearer {token}\r\n"))
         .unwrap_or_default();
     let mut stream = TcpStream::connect(address).unwrap();
     write!(
         stream,
-        "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n{authorization}\r\n"
+        "POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nConnection: close\r\n{authorization}Content-Length: {}\r\n\r\n{body}",
+        body.len()
     )
     .unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     response
 }
+

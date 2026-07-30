@@ -2,7 +2,10 @@ use super::{
     agent_tools_error, internal_error, page, parse_id, peer_sync_error, peer_sync_failure_code,
     peer_sync_failure_is_retryable, resolve_pod, CliResult,
 };
-use crate::parser::{BootstrapWorkflow, PeerWorkflow, SyncPodWorkflow, SyncWorkflow};
+use crate::parser::{
+    BootstrapWorkflow, DiscoveryServeWorkflow, DiscoveryWorkflow, PeerWorkflow, SyncPodWorkflow,
+    SyncWorkflow,
+};
 use serde_json::json;
 use stumble_core::{
     AgentTools, AuthContext, BootstrapEndpointId, HarnessCapability, NodeInfo, PeerId,
@@ -14,6 +17,96 @@ pub(super) fn execute(command: SyncWorkflow, tools: &AgentTools, actor: &AuthCon
         SyncWorkflow::Peer { command } => execute_peer(command, tools, actor),
         SyncWorkflow::Pod { command } => execute_pod(command, tools, actor),
         SyncWorkflow::Bootstrap { command } => execute_bootstrap(command, tools, actor),
+        SyncWorkflow::Discovery { command } => execute_discovery(command, tools, actor),
+    }
+}
+
+fn execute_discovery(
+    command: DiscoveryWorkflow,
+    tools: &AgentTools,
+    actor: &AuthContext,
+) -> CliResult {
+    match command {
+        DiscoveryWorkflow::Status => {
+            serde_json::to_value(tools.discovery_status(actor).map_err(agent_tools_error)?)
+                .map_err(internal_error)
+        }
+        DiscoveryWorkflow::Serve { command } => match command {
+            DiscoveryServeWorkflow::Show => serde_json::to_value(
+                tools
+                    .discovery_peer_service_status(actor)
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error),
+            DiscoveryServeWorkflow::Enable(args) => serde_json::to_value(
+                tools
+                    .enable_discovery_peer_service(
+                        actor,
+                        &args.public_endpoint,
+                        chrono::Utc::now(),
+                    )
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error),
+            DiscoveryServeWorkflow::Disable => serde_json::to_value(
+                tools
+                    .disable_discovery_peer_service(actor, chrono::Utc::now())
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error),
+        },
+        DiscoveryWorkflow::Peers => serde_json::to_value(
+            tools
+                .outbound_discovery_peers(actor)
+                .map_err(agent_tools_error)?,
+        )
+        .map_err(internal_error),
+        DiscoveryWorkflow::Gossip(args) => serde_json::to_value(
+            tools
+                .set_automatic_peer_gossip_enabled(actor, args.enabled, chrono::Utc::now())
+                .map_err(agent_tools_error)?,
+        )
+        .map_err(internal_error),
+        DiscoveryWorkflow::Run(args) => {
+            // Multi-thread runtime so the HTTP clients can block_on off the
+            // store write path without nesting on a current_thread runtime.
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .map_err(internal_error)?;
+            let now = chrono::Utc::now();
+            let mut report = serde_json::Map::new();
+            if args.learn {
+                let sample_client = stumble_api::ReqwestPeerAdvertisementSampleClient::new(
+                    runtime.handle().clone(),
+                );
+                let selection_seed = {
+                    use rand_core::{OsRng, RngCore};
+                    OsRng.next_u64()
+                };
+                let selected = tools
+                    .learn_and_select_discovery_peers(actor, &sample_client, now, selection_seed)
+                    .map_err(agent_tools_error)?;
+                report.insert(
+                    "selected".into(),
+                    serde_json::to_value(selected).map_err(internal_error)?,
+                );
+            }
+            if !args.no_sync {
+                let stream_client =
+                    stumble_api::ReqwestDiscoveryPeerStreamClient::new(runtime.handle().clone());
+                let sync = tools
+                    .sync_outbound_discovery_peers(actor, &stream_client, now)
+                    .map_err(agent_tools_error)?;
+                report.insert(
+                    "sync".into(),
+                    serde_json::to_value(sync).map_err(internal_error)?,
+                );
+            }
+            drop(runtime);
+            Ok(serde_json::Value::Object(report))
+        }
     }
 }
 

@@ -27,7 +27,6 @@ stumble sync bootstrap disable <endpoint-id>
 stumble sync bootstrap remove <endpoint-id>
 ```
 
-HTTP equivalents: `GET/POST /home/bootstrap/endpoints`, `PATCH/DELETE /home/bootstrap/endpoints/:id`, `GET /home/bootstrap/status`, `POST /home/bootstrap/sync`.
 
 ## Multiple replacement Bootstraps
 
@@ -55,12 +54,11 @@ Automatic Discovery Peer **gossip** (learning peer samples and syncing their str
 
 If you want your node to help others after a Bootstrap outage, **explicitly** enable announcement serving:
 
-```http
-POST /home/discovery-peer
-{ "public_endpoint": "https://your-node.example" }
+```bash
+stumble sync discovery serve enable --public-endpoint https://your-node.example
 ```
 
-Enablement verifies identity, protocol, endpoint policy, and reachability, then issues a signed renewable Discovery Peer Advertisement (7-day lease). Disable with `DELETE /home/discovery-peer` without affecting outbound Bootstrap, Index Explore, or direct Pod subscriptions.
+Enablement verifies identity, protocol, endpoint policy, and reachability, then issues a signed renewable Discovery Peer Advertisement (7-day lease). Disable with `stumble sync discovery serve disable` without affecting outbound Bootstrap, Index Explore, or direct Pod subscriptions.
 
 Serving exposes only:
 
@@ -92,13 +90,13 @@ Loopback HTTP is allowed for local development; production Origins use HTTPS.
 |-----------|----------|
 | Established Home with viable Discovery Peers | Continues receiving new Origin-signed announcements through peer streams; previously verified catalog remains usable |
 | Established Home, peers and Bootstraps all down | Cached announcements and Subscriptions remain local; new automatic discovery pauses until a Bootstrap or peer recovers |
-| Fresh install, only sponsored Bootstrap configured and down | Discovery is **degraded** (`GET /home/discovery-status`); direct Pod URLs and any additional configured Bootstraps still work |
+| Fresh install, only sponsored Bootstrap configured and down | Discovery is **degraded** (`stumble sync discovery status`); direct Pod URLs and any additional configured Bootstraps still work |
 | Index-only outage | Intentional Explore can still rank locally known announcements; remote Index search fails through without poisoning local Trust Policy |
 
 Check readiness:
 
-```http
-GET /home/discovery-status
+```bash
+stumble sync discovery status
 ```
 
 Degraded messages preserve direct Pod URL guidance. They never claim the sponsor is protocol authority.

@@ -26,9 +26,8 @@ Public HTTP contracts (typed machine-readable `code` on failures):
 | `GET`  | `/bootstrap/peer-advertisements` | Bootstrap-open unranked sample of admitted peer advertisements |
 | `GET`  | `/discovery/peer/announcements/stream` | Opt-in Discovery Peer Announcement Stream pages |
 | `GET`  | `/discovery/peer/advertisements` | Opt-in randomized unranked peer-advertisement samples |
-| `GET/POST/DELETE` | `/home/discovery-peer` | Inspect / enable / disable Discovery Peer serving |
-| `GET/PATCH/POST` | `/home/discovery-peers` | Outbound peer set status / gossip toggle / learn+sync |
-| `GET`  | `/home/discovery-status` | Discovery readiness including Bootstrap-outage degraded mode |
+
+Node operations live in the CLI: `stumble sync discovery serve show|enable|disable` (inbound serving), `stumble sync discovery peers|gossip|run` (outbound peer set), and `stumble sync discovery status` (readiness including Bootstrap-outage degraded mode).
 
 Failure codes include `invalid_signature`, `announcement_expired`, `announcement_withdrawn`, `announcement_stale`, `withdrawal_stale`, and `validation_error`. Bootstrap open admission additionally returns stable codes: `malformed`, `invalid_identity`, `invalid_signature`, `unreachable_origin`, `incompatible_protocol`, `stale_lease`, `rate_limited`, `payload_too_large`, `manifest_mismatch`, `origin_quota_exceeded`, and `bootstrap_disabled`. Public Index search returns stable codes: `malformed`, `query_too_large`, `rate_limited`, `incompatible_protocol`, `index_disabled`, `transport`, and `protocol`.
 
@@ -58,11 +57,8 @@ Direct Pod URL validation and Subscription continue with every Bootstrap disable
 
 | Surface | Behavior |
 |---------|----------|
-| `stumble sync bootstrap list\|status\|add\|disable\|enable\|remove` | CLI inspect/mutate config and report cursor + typed failure |
-| `GET/POST /home/bootstrap/endpoints` | List or add endpoints |
-| `PATCH/DELETE /home/bootstrap/endpoints/:id` | Enable/disable or remove |
-| `GET /home/bootstrap/status` | Endpoints with cursor, last success, typed failure |
-| `POST /home/bootstrap/sync` | Outbound multi-endpoint stream synchronization |
+| `stumble sync bootstrap list\|status\|add\|disable\|enable\|remove` | Inspect/mutate config and report cursor + typed failure |
+| `stumble sync bootstrap run` | Outbound multi-endpoint stream synchronization |
 
 Focused temporary-SQLite coverage is in `crates/stumble-core/tests/bootstrap_home_node_sync.rs` and unit tests under `bootstrap::client`.
 
@@ -76,7 +72,7 @@ A Home Node may call configured Trust Policy Index Nodes **only** from an explic
 
 Import verifies each announcement, records multi-source `received_from_index_urls` provenance (accumulating Index base URLs across retains of the same signed announcement), discards remote ordering/scores, and recomputes eligibility and order locally via Trust Policy and `explore_public_pods` Pod Similarity. Delivery stays active when any recorded Index URL remains in Trust Policy. Multiple Indexes are supported in configuration order with fallthrough on transport failure. Removing an Index excludes sole-source results while independent copies (other Index, Bootstrap, peer, or local retain) remain eligible. Provenance and rate-limit timestamps survive SQLite restart. Short intentional Index query tokens (`ai`, `go`, `web`, …) are searchable; Index search does not apply Personal Discovery stop/short-token filtering.
 
-Domain contract: `ExploreRequest` / `ExploreResponse` for intentional Explore (HTTP `/home/discover-public-pods` and related surfaces, CLI `stumble pod explore`, Agent Harness tools share the same Core types). Focused coverage: unit tests in `crates/stumble-core/src/index/`, temporary-SQLite acceptance in `crates/stumble-core/tests/index_search.rs`, and Index aggregation in `crates/stumble-core/tests/discovery_substrate.rs`.
+Domain contract: `ExploreRequest` / `ExploreResponse` for intentional Explore (CLI `stumble pod explore` and Agent Harness tools share the same Core types). Focused coverage: unit tests in `crates/stumble-core/src/index/`, temporary-SQLite acceptance in `crates/stumble-core/tests/index_search.rs`, and Index aggregation in `crates/stumble-core/tests/discovery_substrate.rs`.
 
 Changes to trusted peers, configured Index Nodes, and local Pod, node, source, or topic blocks pass through Pending Proposal approval. `explore_public_pods` applies that User-owned Trust Policy and does not create a Subscription. For an unsubscribed remote Pod, the Origin may separately produce a bounded signed `PodExploreSamples` artifact; the Home Node accepts it only for the exact current announcement and filters its Content References locally. Signed Pod Endorsements likewise bind the exact known current announcements of both public Pods before adding bounded, inspectable local ranking evidence. Neither signatures nor endorsements establish a global quality or reputation score.
 
@@ -98,7 +94,7 @@ Focused coverage: unit tests in `pod_similarity` (including `agent_evidence`) an
 
 ## Opt-in Discovery Peer service
 
-Ordinary Home Nodes remain **outbound-only** for discovery by default (ADR-0044): they do not bind, advertise, or accept an inbound discovery service, and well-known metadata omits peer-serving endpoints. An authorized User enables announcement serving through operator surfaces (`AgentTools::enable_discovery_peer_service` / `disable_discovery_peer_service`, HTTP `POST|DELETE /home/discovery-peer`).
+Ordinary Home Nodes remain **outbound-only** for discovery by default (ADR-0044): they do not bind, advertise, or accept an inbound discovery service, and well-known metadata omits peer-serving endpoints. An authorized User enables announcement serving through operator surfaces (`stumble sync discovery serve enable|disable`, backed by `AgentTools::enable_discovery_peer_service` / `disable_discovery_peer_service`).
 
 Enabling requires a declared public endpoint and successful verification of node identity, protocol compatibility (`stumble/1.0`), HTTPS policy outside loopback (HTTP allowed only on loopback), and external reachability via the injectable `DiscoveryPeerProbe` port. Private/reserved literal IP hosts are rejected. A verified node produces a signed, renewable **Discovery Peer Advertisement** (7-day lease) containing only identity, endpoint, protocol version, `announcement_serving` capability, and expiry—never private state or rank assertions.
 
@@ -111,7 +107,8 @@ An enabled Discovery Peer serves:
 | `GET` | `/discovery/peer/announcements/stream` | Bounded Announcement Stream pages; Origin announcement bytes and signatures unchanged |
 | `GET` | `/discovery/peer/advertisements` | Small randomized bounded samples of current peer advertisements (no rank/trust) |
 | `POST` | `/bootstrap/peer-advertisements` | Open Bootstrap admission of peer advertisements (Bootstrap capability) |
-| `GET/POST/DELETE` | `/home/discovery-peer` | Inspect / enable / disable opt-in serving |
+
+Opt-in serving is inspected and toggled locally with `stumble sync discovery serve show|enable|disable`.
 
 Peer endpoints expose no Pod Events, Subscriptions, Taste Profiles, feedback, credentials, private projections, or administrative capability. Disabling service clears the renewable advertisement and stops inbound serving without affecting outbound Bootstrap configuration, Index Explore, or direct Pod synchronization. Opt-in state, advertisement lease, and peer serving stream sequence high-water (`next_stream_sequence`) persist in SQLite (`discovery_peer_service`, `known_discovery_peer_advertisements`, peer-local `discovery_peer_stream_entries`). Peer and Bootstrap streams use independent sequence allocators so combined-role nodes never overwrite each other's stream entries. Peer advertisement samples use server entropy (no client-supplied seed). Bootstrap peer-ad admission applies rate limits and identity-bound reachability probes.
 
@@ -125,15 +122,15 @@ Each selected peer persists a stream cursor, sample provenance (`learned_from`),
 
 Invalid signatures, flooding (too many invalid entries on one page), incompatible protocol, expired advertisements, or repeated transport failures cause bounded exponential backoff and automatic local eviction. Evicting a peer excludes sole-source announcements from Explore eligibility while independently learned copies (other peer, Bootstrap, Index, or local retain) stay usable; audit rows remain.
 
-When every configured Bootstrap is unavailable, an established Home Node continues receiving new announcements through viable outbound peers. A fresh node with no viable Bootstrap reports **degraded discovery** (`GET /home/discovery-status`) while direct Pod URL subscription continues. Users may disable automatic peer gossip (`PATCH /home/discovery-peers` / `set_automatic_peer_gossip_enabled`) without deleting cached advertisements, outbound audit state, cursors, Bootstrap config, or direct-address paths. Rotation, eviction, cursor resume, and outage behavior survive SQLite restart; network I/O never holds the store write lock across awaits.
+When every configured Bootstrap is unavailable, an established Home Node continues receiving new announcements through viable outbound peers. A fresh node with no viable Bootstrap reports **degraded discovery** (`stumble sync discovery status`) while direct Pod URL subscription continues. Users may disable automatic peer gossip (`stumble sync discovery gossip --enabled false`) without deleting cached advertisements, outbound audit state, cursors, Bootstrap config, or direct-address paths. Rotation, eviction, cursor resume, and outage behavior survive SQLite restart; network I/O never holds the store write lock across awaits.
 
 | Surface | Behavior |
 |---------|----------|
 | `GET /bootstrap/peer-advertisements` | Bootstrap-open unranked sample of admitted peer advertisements |
-| `GET /home/discovery-peers` | Outbound set with cursor, health, last-success |
-| `PATCH /home/discovery-peers` | Enable/disable automatic peer gossip (audit retained) |
-| `POST /home/discovery-peers` | Learn samples and/or sync outbound peer streams |
-| `GET /home/discovery-status` | Degraded discovery readiness (Bootstrap outage messaging) |
+| `stumble sync discovery peers` | Outbound set with cursor, health, last-success |
+| `stumble sync discovery gossip --enabled <bool>` | Enable/disable automatic peer gossip (audit retained) |
+| `stumble sync discovery run [--learn] [--no-sync]` | Learn samples and/or sync outbound peer streams |
+| `stumble sync discovery status` | Degraded discovery readiness (Bootstrap outage messaging) |
 
 Domain module: `crates/stumble-core/src/discovery_peer/client.rs`. Focused coverage: unit tests in that module and temporary-SQLite acceptance in `crates/stumble-core/tests/discovery_peer_rotation.rs`.
 

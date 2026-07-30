@@ -441,17 +441,11 @@ async fn sponsored_multi_node_publish_sync_peer_outage_and_subscribe() {
         .unwrap();
     assert_eq!(peer_ad.public_endpoint, peer_base);
 
-    // Public HTTP surfaces report the opt-in state.
-    let (status, peer_status) = client_json(
-        &client,
-        reqwest::Method::GET,
-        &format!("{peer_base}/home/discovery-peer"),
-        Some(&peer_admin.authorization),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "peer status: {peer_status}");
-    assert_eq!(peer_status["enabled"], true);
+    // Node ops are a CLI surface; confirm the opt-in state in-process.
+    let peer_status = peer
+        .discovery_peer_service_status(&peer_admin.ctx)
+        .unwrap();
+    assert!(peer_status.enabled);
 
     // Peer admits the Origin announcement (projects into peer stream).
     let (status, peer_admit) = client_json(
@@ -502,39 +496,22 @@ async fn sponsored_multi_node_publish_sync_peer_outage_and_subscribe() {
             HarnessCapability::PersonalDiscoveryExecution,
         ],
     );
-    let home_app = router(home.clone());
 
-    // Sponsored default is present and removable.
-    let (status, endpoints) = http_json(
-        &home_app,
-        "GET",
-        "/home/bootstrap/endpoints",
-        Some(&home_admin.authorization),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(endpoints.as_array().unwrap().len(), 1);
-    assert_eq!(
-        endpoints[0]["base_url"].as_str().unwrap(),
-        DEFAULT_SPONSORED_BOOTSTRAP_URL
-    );
-    assert!(endpoints[0]["is_sponsored_default"].as_bool().unwrap());
+    // Sponsored default is present and removable (node ops are a CLI surface).
+    let endpoints = home.list_bootstrap_endpoints(&home_admin.ctx).unwrap();
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0].base_url, DEFAULT_SPONSORED_BOOTSTRAP_URL);
+    assert!(endpoints[0].is_sponsored_default);
 
     // Replace sponsored default with the live multi-node sponsor.
     clear_default_bootstrap(&home, &home_admin.ctx);
-    let (status, added) = http_json(
-        &home_app,
-        "POST",
-        "/home/bootstrap/endpoints",
-        Some(&home_admin.authorization),
-        Some(json!({
-            "label": "test-sponsor",
-            "base_url": sponsor_base,
-        })),
+    home.add_bootstrap_endpoint(
+        &home_admin.ctx,
+        "test-sponsor",
+        &sponsor_base,
+        chrono::Utc::now(),
     )
-    .await;
-    assert_eq!(status, StatusCode::OK, "add bootstrap: {added}");
+    .unwrap();
 
     // Private evidence on Home must never leave the node.
     let mut taste = UpdateTasteProfileRequest::default();
@@ -600,16 +577,15 @@ async fn sponsored_multi_node_publish_sync_peer_outage_and_subscribe() {
         );
     }
 
-    // Local match + explain via public HTTP Explore.
-    let (status, explore) = http_json(
-        &home_app,
-        "GET",
-        "/home/discover-public-pods?q=distributed%20systems&limit=10&sample_size=5",
-        Some(&home_reader.authorization),
-        None,
+    // Local match + explain through the Explore surface (CLI `pod explore`).
+    let explore = serde_json::to_value(
+        home.explore_public_pods(
+            &home_reader.ctx,
+            ExploreRequest::new("distributed systems", 10, 5).unwrap(),
+        )
+        .unwrap(),
     )
-    .await;
-    assert_eq!(status, StatusCode::OK, "explore: {explore}");
+    .unwrap();
     let results = explore["results"].as_array().unwrap();
     assert!(
         !results.is_empty(),
@@ -1382,28 +1358,14 @@ async fn home_is_outbound_only_until_peer_serving_opt_in() {
     assert!(!endpoints.contains_key("discovery_peer_announcement_stream"));
     assert!(!endpoints.contains_key("discovery_peer_advertisement_sample"));
 
-    let (status, status_body) = http_json(
-        &app,
-        "GET",
-        "/home/discovery-peer",
-        Some(&admin.authorization),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(status_body["enabled"], false);
+    let status_body = home.discovery_peer_service_status(&admin.ctx).unwrap();
+    assert!(!status_body.enabled);
 
-    // Opt-in enables serving advertisement.
-    let (status, ad) = http_json(
-        &app,
-        "POST",
-        "/home/discovery-peer",
-        Some(&admin.authorization),
-        Some(json!({ "public_endpoint": "http://127.0.0.1:9" })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "opt-in: {ad}");
-    assert_eq!(ad["public_endpoint"], "http://127.0.0.1:9");
+    // Opt-in enables serving advertisement (CLI `sync discovery serve enable`).
+    let ad = home
+        .enable_discovery_peer_service(&admin.ctx, "http://127.0.0.1:9", Utc::now())
+        .unwrap();
+    assert_eq!(ad.public_endpoint, "http://127.0.0.1:9");
 
     let (status, wk) = http_json(&app, "GET", "/.well-known/stumble-node", None, None).await;
     assert_eq!(status, StatusCode::OK);

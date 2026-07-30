@@ -70,7 +70,7 @@ Public discovery surfaces require **no User account** and **no stable User ident
 - Bootstrap admit / stream / withdrawals / peer-ad samples
 - Index search (`GET /discovery/announcements?q=&limit=`)
 
-Do not introduce login, OAuth, or persistent client IDs for these paths. Home Nodes authenticate only for their own local operator surfaces (`/home/*`).
+Do not introduce login, OAuth, or persistent client IDs for these paths. Home Nodes perform their own node operations locally through the CLI (`stumble sync ...`).
 
 ## Minimized security logging
 

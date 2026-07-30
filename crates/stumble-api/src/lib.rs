@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, patch, post},
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -224,30 +224,6 @@ pub fn router_with_options(
             "/discovery/peer/advertisements",
             get(peer_advertisement_sample),
         )
-        .route(
-            "/home/discovery-peer",
-            get(discovery_peer_status)
-                .post(enable_discovery_peer)
-                .delete(disable_discovery_peer),
-        )
-        .route(
-            "/home/discovery-peers",
-            get(outbound_discovery_peers)
-                .patch(set_peer_gossip)
-                .post(sync_outbound_discovery_peers),
-        )
-        .route("/home/discovery-status", get(home_discovery_status))
-        .route(
-            "/home/bootstrap/endpoints",
-            get(list_bootstrap_endpoints).post(add_bootstrap_endpoint),
-        )
-        .route(
-            "/home/bootstrap/endpoints/:id",
-            patch(set_bootstrap_endpoint_enabled).delete(remove_bootstrap_endpoint),
-        )
-        .route("/home/bootstrap/status", get(bootstrap_status))
-        .route("/home/bootstrap/sync", post(sync_bootstrap_endpoints))
-        .route("/home/discover-public-pods", get(home_discover_public_pods))
         .route("/federation/node", get(federation_node))
         .route("/federation/pods", get(federation_pods))
         .route("/federation/pods/:slug/manifest", get(federation_manifest))
@@ -280,56 +256,6 @@ fn route_docs() -> Vec<ApiRouteDoc> {
             method: "GET",
             path: "/.well-known/stumble-node",
             description: "custom Stumble node metadata and endpoint discovery",
-        },
-        ApiRouteDoc {
-            method: "GET",
-            path: "/home/discover-public-pods",
-            description: "intentional Explore of verified public Pod announcements under local Trust Policy",
-        },
-        ApiRouteDoc {
-            method: "GET",
-            path: "/home/bootstrap/endpoints",
-            description: "list User-controlled Bootstrap endpoints in order",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/home/bootstrap/endpoints",
-            description: "add a replaceable Bootstrap endpoint",
-        },
-        ApiRouteDoc {
-            method: "PATCH",
-            path: "/home/bootstrap/endpoints/:id",
-            description: "enable or disable a Bootstrap endpoint",
-        },
-        ApiRouteDoc {
-            method: "DELETE",
-            path: "/home/bootstrap/endpoints/:id",
-            description: "remove a Bootstrap endpoint from configuration",
-        },
-        ApiRouteDoc {
-            method: "GET",
-            path: "/home/bootstrap/status",
-            description: "report Bootstrap endpoints with cursor, last success, and typed failure",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/home/bootstrap/sync",
-            description: "fetch Announcement Streams from enabled Bootstrap endpoints outbound",
-        },
-        ApiRouteDoc {
-            method: "GET",
-            path: "/home/discovery-peer",
-            description: "inspect Discovery Peer opt-in serving state",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/home/discovery-peer",
-            description: "explicitly enable Discovery Peer announcement serving after reachability verification",
-        },
-        ApiRouteDoc {
-            method: "DELETE",
-            path: "/home/discovery-peer",
-            description: "disable Discovery Peer serving without affecting outbound discovery",
         },
         ApiRouteDoc {
             method: "POST",
@@ -375,26 +301,6 @@ fn route_docs() -> Vec<ApiRouteDoc> {
             method: "GET",
             path: "/discovery/peer/advertisements",
             description: "small randomized unranked sample of current peer advertisements",
-        },
-        ApiRouteDoc {
-            method: "GET",
-            path: "/home/discovery-peers",
-            description: "list rotating outbound Discovery Peer set with cursor, health, and last-success",
-        },
-        ApiRouteDoc {
-            method: "PATCH",
-            path: "/home/discovery-peers",
-            description: "enable or disable automatic peer gossip without deleting audit state",
-        },
-        ApiRouteDoc {
-            method: "POST",
-            path: "/home/discovery-peers",
-            description: "learn peers from samples and/or sync Announcement Streams from outbound Discovery Peers",
-        },
-        ApiRouteDoc {
-            method: "GET",
-            path: "/home/discovery-status",
-            description: "report discovery readiness including Bootstrap-outage degraded mode",
         },
         ApiRouteDoc {
             method: "POST",
@@ -468,40 +374,6 @@ async fn well_known_node(
 ) -> Result<Json<WellKnownNode>, ApiError> {
     let ctx = state.tools.default_auth_context()?;
     Ok(Json(state.tools.well_known_node(&ctx, &state.base_url)?))
-}
-
-#[derive(Debug, Deserialize)]
-struct PublicPodDiscoveryQuery {
-    /// Explicit Explore query; `topics` is accepted as a comma-joined alias.
-    q: Option<String>,
-    topics: Option<String>,
-    limit: Option<usize>,
-    sample_size: Option<usize>,
-}
-
-async fn home_discover_public_pods(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Query(query): Query<PublicPodDiscoveryQuery>,
-) -> Result<Json<ExploreResponse>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    let query_text = query.q.unwrap_or_else(|| {
-        query
-            .topics
-            .unwrap_or_default()
-            .split(',')
-            .map(str::trim)
-            .filter(|topic| !topic.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")
-    });
-    let request = ExploreRequest::new(
-        query_text,
-        query.limit.unwrap_or(10),
-        query.sample_size.unwrap_or(0),
-    )
-    .map_err(AgentToolsError::from)?;
-    Ok(Json(state.tools.explore_public_pods(&ctx, request)?))
 }
 
 async fn federation_node(
@@ -703,235 +575,10 @@ async fn peer_advertisement_sample(
     Ok(Json(state.tools.peer_advertisement_sample(query.limit)?))
 }
 
-#[derive(Debug, Deserialize)]
-struct EnableDiscoveryPeerRequest {
-    public_endpoint: String,
-}
-
 /// Reports Discovery Peer opt-in state (admin).
-async fn discovery_peer_status(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<DiscoveryPeerServiceState>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.discovery_peer_service_status(&ctx)?))
-}
-
-/// Explicitly enables inbound Discovery Peer announcement serving.
-async fn enable_discovery_peer(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<EnableDiscoveryPeerRequest>,
-) -> Result<Json<DiscoveryPeerAdvertisement>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.enable_discovery_peer_service(
-        &ctx,
-        &request.public_endpoint,
-        chrono::Utc::now(),
-    )?))
-}
-
-/// Disables inbound Discovery Peer serving without affecting outbound discovery.
-async fn disable_discovery_peer(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<DiscoveryPeerServiceState>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.disable_discovery_peer_service(
-        &ctx,
-        chrono::Utc::now(),
-    )?))
-}
-
-/// Lists the rotating outbound Discovery Peer set (not Trusted Peers).
-async fn outbound_discovery_peers(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<OutboundDiscoveryPeerStatus>>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.outbound_discovery_peers(&ctx)?))
-}
-
-#[derive(Debug, Deserialize)]
-struct SetPeerGossipRequest {
-    automatic_gossip_enabled: bool,
-}
-
 /// Enables or disables automatic peer gossip without deleting audit state.
-async fn set_peer_gossip(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<SetPeerGossipRequest>,
-) -> Result<Json<DiscoveryPeerGossipConfig>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.set_automatic_peer_gossip_enabled(
-        &ctx,
-        request.automatic_gossip_enabled,
-        chrono::Utc::now(),
-    )?))
-}
-
-#[derive(Debug, Deserialize)]
-struct OutboundDiscoveryPeerAction {
-    /// When true, learn peer samples and rotate the outbound set before sync.
-    #[serde(default)]
-    learn: bool,
-    /// When true (default), sync Announcement Streams from outbound peers.
-    #[serde(default = "default_true")]
-    sync: bool,
-}
-
 /// Learns and/or syncs the rotating outbound Discovery Peer set.
-async fn sync_outbound_discovery_peers(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<OutboundDiscoveryPeerAction>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    let handle = tokio::runtime::Handle::current();
-    let sample_client = ReqwestPeerAdvertisementSampleClient::new(handle.clone());
-    let stream_client = ReqwestDiscoveryPeerStreamClient::new(handle);
-    Ok(Json(
-        tokio::task::spawn_blocking(move || {
-            let now = chrono::Utc::now();
-            let mut body = serde_json::Map::new();
-            if request.learn {
-                let selected = state.tools.learn_and_select_discovery_peers(
-                    &ctx,
-                    &sample_client,
-                    now,
-                    // Production rotation uses server entropy; HTTP clients cannot force seeds.
-                    {
-                        use rand_core::{OsRng, RngCore};
-                        OsRng.next_u64()
-                    },
-                )?;
-                body.insert(
-                    "selected".into(),
-                    serde_json::to_value(selected).unwrap_or_default(),
-                );
-            }
-            if request.sync {
-                let report =
-                    state
-                        .tools
-                        .sync_outbound_discovery_peers(&ctx, &stream_client, now)?;
-                body.insert(
-                    "sync".into(),
-                    serde_json::to_value(report).unwrap_or_default(),
-                );
-            }
-            Ok::<_, AgentToolsError>(serde_json::Value::Object(body))
-        })
-        .await
-        .map_err(|error| ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "internal",
-            message: error.to_string(),
-        })??,
-    ))
-}
-
-/// Home Node discovery readiness including degraded Bootstrap-outage mode.
-async fn home_discovery_status(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<DiscoveryStatus>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.discovery_status(&ctx)?))
-}
-
-#[derive(Debug, Deserialize)]
-struct AddBootstrapEndpointRequest {
-    label: String,
-    base_url: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SetBootstrapEndpointEnabledRequest {
-    enabled: bool,
-}
-
 /// Lists configured Bootstrap endpoints (Home Node owner/admin).
-async fn list_bootstrap_endpoints(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<BootstrapEndpointConfig>>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.list_bootstrap_endpoints(&ctx)?))
-}
-
-/// Adds a Bootstrap endpoint to the ordered User-controlled list.
-async fn add_bootstrap_endpoint(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(request): Json<AddBootstrapEndpointRequest>,
-) -> Result<Json<BootstrapEndpointConfig>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.add_bootstrap_endpoint(
-        &ctx,
-        &request.label,
-        &request.base_url,
-        chrono::Utc::now(),
-    )?))
-}
-
-/// Enables or disables one Bootstrap endpoint.
-async fn set_bootstrap_endpoint_enabled(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<BootstrapEndpointId>,
-    Json(request): Json<SetBootstrapEndpointEnabledRequest>,
-) -> Result<Json<BootstrapEndpointConfig>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.set_bootstrap_endpoint_enabled(
-        &ctx,
-        id,
-        request.enabled,
-    )?))
-}
-
-/// Removes a Bootstrap endpoint from configuration.
-async fn remove_bootstrap_endpoint(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<BootstrapEndpointId>,
-) -> Result<Json<BootstrapEndpointConfig>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.remove_bootstrap_endpoint(&ctx, id)?))
-}
-
-/// Reports Bootstrap endpoints with cursor and typed failure state.
-async fn bootstrap_status(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<BootstrapEndpointStatus>>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    Ok(Json(state.tools.bootstrap_status(&ctx)?))
-}
-
-/// Outbound sync against enabled Bootstrap endpoints using HTTP transport.
-async fn sync_bootstrap_endpoints(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<Json<BootstrapSyncReport>, ApiError> {
-    let ctx = auth_or_default(&state, &headers)?;
-    let client = ReqwestAnnouncementStreamClient::new(tokio::runtime::Handle::current());
-    Ok(Json(
-        tokio::task::spawn_blocking(move || {
-            state
-                .tools
-                .sync_bootstrap_endpoints(&ctx, &client, chrono::Utc::now())
-        })
-        .await
-        .map_err(|error| ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "internal_error",
-            message: error.to_string(),
-        })??,
-    ))
-}
-
 /// Production HTTP client for topic-neutral Announcement Stream pages.
 ///
 /// Uses a Tokio handle so the Core inject seam can stay synchronous without
@@ -1357,9 +1004,7 @@ mod tests {
                 "public route docs must not use Hub terminology: {blob}"
             );
         }
-        assert!(routes
-            .iter()
-            .any(|route| { route.method == "GET" && route.path == "/home/discover-public-pods" }));
+        assert!(routes.iter().all(|route| !route.path.starts_with("/home")));
         assert!(routes
             .iter()
             .any(|route| { route.method == "GET" && route.path == "/discovery/announcements" }));
