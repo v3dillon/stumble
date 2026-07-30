@@ -394,6 +394,7 @@ fn execute_pod(command: SyncPodWorkflow, tools: &AgentTools, actor: &AuthContext
                 "slug": pod.slug,
                 "subscription_id": subscription.id,
                 "origin_node_id": subscription.origin_node_id,
+                "public_pod_url": subscription.public_pod_url,
                 "cursor": subscription.last_event_hash,
                 "verification": verification,
                 "latest_event": subscription.last_event_hash,

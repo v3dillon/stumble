@@ -484,6 +484,54 @@ impl AgentTools {
         Ok(asset)
     }
 
+    /// Resolves the Origin-served cover for one accepted Content Item in a
+    /// local public Pod: only the node's own creations (generated or
+    /// user-provided files) are served — locally archived copies of
+    /// third-party page images never leave the node.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotFound` when the Pod is not local and public, the item is
+    /// not accepted in it, or no servable cover exists.
+    pub fn federation_cover_asset(
+        &self,
+        ctx: &AuthContext,
+        pod_slug: &str,
+        content_item_id: ContentItemId,
+    ) -> Result<SubmissionAsset, AgentToolsError> {
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let pod = store.pod_by_slug(pod_slug, ctx.tenant_id)?;
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        if pod.visibility != Visibility::Public
+            || pod.origin_node_id.is_some_and(|origin| origin != node.id)
+        {
+            return Err(StoreError::NotFound(format!("public Pod {pod_slug}")).into());
+        }
+        if !store
+            .accepted_placement_projections
+            .contains_key(&(content_item_id, pod.id))
+        {
+            return Err(StoreError::NotFound("accepted Content Item".into()).into());
+        }
+        store
+            .submission_assets
+            .values()
+            .filter(|asset| {
+                asset.submission_id == Uuid::from(content_item_id)
+                    && asset.local_path.is_some()
+                    && matches!(
+                        asset.source,
+                        SubmissionAssetSource::AiGenerated | SubmissionAssetSource::UserProvided
+                    )
+            })
+            .min_by_key(|asset| asset.created_at)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("cover asset".into()).into())
+    }
+
     pub fn assets_for_submission(
         &self,
         ctx: &AuthContext,

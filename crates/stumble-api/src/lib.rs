@@ -139,6 +139,10 @@ pub fn router_with_options(
             post(federation_explore_samples),
         )
         .route(
+            "/federation/pods/:slug/content/:content_item_id/cover",
+            get(federation_content_cover),
+        )
+        .route(
             "/federation/sync/:peer_id/:pod_slug",
             post(federation_sync_pod),
         )

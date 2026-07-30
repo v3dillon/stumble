@@ -59,6 +59,8 @@ impl From<AgentToolsError> for ApiError {
     fn from(value: AgentToolsError) -> Self {
         let status = if matches!(value, AgentToolsError::Forbidden { .. }) {
             StatusCode::FORBIDDEN
+        } else if matches!(value, AgentToolsError::Store(StoreError::NotFound(_))) {
+            StatusCode::NOT_FOUND
         } else if matches!(
             value,
             AgentToolsError::LockPoisoned | AgentToolsError::Persistence(_)

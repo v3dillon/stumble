@@ -125,6 +125,7 @@ Find, subscribe to, curate, and govern Pods.
 | `stumble pod content show` | Show one content item. |
 | `stumble pod content add` | Add content to a Pod. |
 | `stumble pod content remove` | Remove content from a Pod. |
+| `stumble pod content cover` | Store a local image as an item's cover (`--file`, `--source`, `--alt`). |
 | `stumble pod policy show` | Show the Pod curation policy. |
 | `stumble pod policy set` | Set the Pod curation policy. |
 | `stumble pod package show` | Show a Pod Package. |

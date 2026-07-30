@@ -65,9 +65,34 @@ the summary, save it to a file, and attach it:
 stumble add "<url>" --title "..." --summary "..."   --image "https://site/hero.png" --image "https://site/figure-2.png"   --cover /tmp/generated-cover.png        # --cover-source ai-generated is the default
 ```
 
-Covers are stored under the node's data directory and stay local — they never
-federate. Read them back (with `local_path`) via
-`stumble pod content show <pod> <content_item_id>`, which lists `assets`.
+Covers live under the node's data directory. Third-party page images never
+leave the node — but the user's *own* covers (generated or user-provided) are
+served over federation for public Pods, so subscribers can fetch them.
+
+**Link-rot resilience — images survive the source.** The summary always
+federates; images follow this ladder:
+
+1. *At save time*, alongside `--image` references, download the best page
+   image with your browser and store a local backup:
+   `--cover <file> --cover-source page-image` (or later:
+   `stumble pod content cover <pod> <item_id> --file <f> --source page-image`).
+   That copy is the user's private archive; it is never served to others.
+2. *When presenting an item* (yours or subscribed), try its
+   `media_references` first — fetch from the original source, and if it's a
+   subscribed item worth keeping, store your own backup as in step 1 while
+   the source is still alive.
+3. *If the source is gone* and the item came from a subscription, try the
+   origin's own cover: `GET <public_pod_url>/content/<content_item_id>/cover`
+   (the `public_pod_url` is in `stumble sync pod run` / `sync pod status`
+   output; the id must be from *your* node's listing).
+4. *If nothing remains*, generate a depiction from the federated summary with
+   your own image generation and attach it locally:
+   `stumble pod content cover <pod> <item_id> --file <generated> --alt "..."`.
+   Present it clearly as a generated depiction, not the original media.
+
+Use ids from your own node's output (`feed batch get`, `pod content list`) —
+subscribed items get local ids on your node. Assets are listed by
+`stumble pod content show <pod> <content_item_id>`.
 
 If the page can't be read (paywall, dead link, no browser available), still run
 `stumble add` with the URL and whatever the user told you — the URL is the only

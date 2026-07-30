@@ -164,6 +164,23 @@ pub(super) enum ContentWorkflow {
     Show(ContentItemArgs),
     Add(ContentAddArgs),
     Remove(ContentRemoveArgs),
+    /// Store a local image file as this item's cover (backup or generated)
+    Cover(ContentCoverArgs),
+}
+
+#[derive(Args)]
+pub(super) struct ContentCoverArgs {
+    pub(super) pod: String,
+    pub(super) content_item_id: String,
+    /// Local image file to store under the node's media directory
+    #[arg(long, value_hint = ValueHint::FilePath)]
+    pub(super) file: PathBuf,
+    /// Where the file came from
+    #[arg(long, value_enum, default_value_t = CoverSource::AiGenerated)]
+    pub(super) source: CoverSource,
+    /// Short description of the image
+    #[arg(long)]
+    pub(super) alt: Option<String>,
 }
 
 #[derive(Subcommand)]

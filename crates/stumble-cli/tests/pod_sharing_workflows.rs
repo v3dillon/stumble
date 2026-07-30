@@ -41,6 +41,27 @@ impl Environment {
     }
 }
 
+async fn http_get(url: &str) -> (String, Vec<u8>) {
+    let (host, path) = url
+        .strip_prefix("http://")
+        .unwrap()
+        .split_once('/')
+        .unwrap();
+    let mut stream = tokio::net::TcpStream::connect(host).await.unwrap();
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    stream
+        .write_all(format!("GET /{path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.unwrap();
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    (
+        String::from_utf8_lossy(&raw[..split]).to_string(),
+        raw[split + 4..].to_vec(),
+    )
+}
+
 impl Drop for Environment {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
@@ -61,7 +82,9 @@ async fn publish_share_subscribe_and_origin_resync_deliver_the_package_and_conte
         "--visibility",
         "private",
     ]);
-    alice.run(&[
+    let alice_cover = alice.root.join("generated-cover.png");
+    fs::write(&alice_cover, b"alice-generated-cover").unwrap();
+    let added = alice.run(&[
         "add",
         "https://example.com/rust-essay",
         "--pod",
@@ -72,7 +95,10 @@ async fn publish_share_subscribe_and_origin_resync_deliver_the_package_and_conte
         "Ownership explained",
         "--tag",
         "rust",
+        "--cover",
+        alice_cover.to_str().unwrap(),
     ]);
+    let essay_item_id = added["content_item"]["id"].as_str().unwrap().to_string();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
@@ -150,6 +176,63 @@ async fn publish_share_subscribe_and_origin_resync_deliver_the_package_and_conte
         skills_dir.to_str().unwrap(),
     ]);
     assert_eq!(reinstalled["package_version"], 1);
+
+    // Alice's own generated cover is served over federation for the public
+    // Pod; Bob's harness can fetch it when the source page has nothing usable.
+    let cover_url = format!("{base_url}/federation/pods/rust-craft/content/{essay_item_id}/cover");
+    let response = http_get(&cover_url).await;
+    assert!(
+        response.0.starts_with("HTTP/1.1 200"),
+        "{}\nbody: {}",
+        response.0,
+        String::from_utf8_lossy(&response.1)
+    );
+    assert_eq!(response.1, b"alice-generated-cover");
+    let missing = http_get(&format!(
+        "{base_url}/federation/pods/rust-craft/content/{}/cover",
+        uuid::Uuid::nil()
+    ))
+    .await;
+    assert!(missing.0.starts_with("HTTP/1.1 404"), "{}", missing.0);
+
+    // Bob's status output carries the origin URL his harness needs to build
+    // cover URLs later.
+    let status = bob.run(&["sync", "pod", "status", "rust-craft"]);
+    assert_eq!(
+        status["public_pod_url"].as_str().unwrap(),
+        format!("{base_url}/federation/pods/rust-craft")
+    );
+
+    // If the source ever dies, Bob generates his own depiction locally,
+    // keyed by his node's own id for the projected item.
+    let bob_items = bob.run(&["pod", "content", "list", "rust-craft"]);
+    let bob_item_id = bob_items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["content_item"]["title"] == "A Rust essay")
+        .map(|item| {
+            item["content_item"]["id"]
+                .as_str()
+                .unwrap_or_else(|| item["content_item"]["content_item_id"].as_str().unwrap())
+                .to_string()
+        })
+        .unwrap_or_else(|| panic!("essay in {bob_items}"));
+    let bob_cover = bob.root.join("bob-generated.png");
+    fs::write(&bob_cover, b"bob-depiction").unwrap();
+    let bob_asset = bob.run(&[
+        "pod",
+        "content",
+        "cover",
+        "rust-craft",
+        &bob_item_id,
+        "--file",
+        bob_cover.to_str().unwrap(),
+        "--alt",
+        "generated from the summary",
+    ]);
+    assert_eq!(bob_asset["source"], "ai_generated");
+    assert!(fs::read(bob_asset["local_path"].as_str().unwrap()).unwrap() == b"bob-depiction");
 
     // ── Alice adds more through the CLI while the server keeps running; the
     // long-lived server must observe the new store generation ────────────────

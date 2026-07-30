@@ -133,6 +133,11 @@ pub(crate) fn route_docs() -> Vec<ApiRouteDoc> {
             description: "bounded Origin-signed Explore samples for the exact current announcement",
         },
         ApiRouteDoc {
+            method: "GET",
+            path: "/federation/pods/:slug/content/:content_item_id/cover",
+            description: "Origin-created cover artwork for an accepted public Content Item (own creations only)",
+        },
+        ApiRouteDoc {
             method: "POST",
             path: "/federation/sync/:peer_id/:pod_slug",
             description: "synchronize signed events from a trusted peer",

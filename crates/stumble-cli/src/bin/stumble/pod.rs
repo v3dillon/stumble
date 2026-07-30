@@ -3,9 +3,10 @@ use super::{
     page, parse_id, pod_result, read_portable_package_directory, resolve_pod, CliResult,
 };
 use crate::parser::{
-    ContentWorkflow, CreatePodArgs, PackageWorkflow, PodWorkflow, PolicyMode, PolicyWorkflow,
-    AnnouncePodArgs, EndorsePodArgs, PublishPodArgs, RoleChangeArgs, RoleWorkflow,
-    SkillInstallArgs, SkillWorkflow, SubscriptionWorkflow, VisibilityWorkflow,
+    AnnouncePodArgs, ContentCoverArgs, ContentWorkflow, CoverSource, CreatePodArgs,
+    EndorsePodArgs, PackageWorkflow, PodWorkflow, PolicyMode, PolicyWorkflow, PublishPodArgs,
+    RoleChangeArgs, RoleWorkflow, SkillInstallArgs, SkillWorkflow, SubscriptionWorkflow,
+    VisibilityWorkflow,
 };
 use serde_json::json;
 use stumble_cli::{paginate, ErrorBody, ExitStatusCategory};
@@ -734,6 +735,7 @@ fn execute_content(command: ContentWorkflow, tools: &AgentTools, actor: &AuthCon
                 .map_err(agent_tools_error)?;
             Ok(json!({ "pod_id": pod.id, "slug": pod.slug, "placement": placement }))
         }
+        ContentWorkflow::Cover(args) => content_cover(&args, tools, actor),
         ContentWorkflow::Remove(args) => {
             let pod = resolve_pod(tools, actor, &args.pod)?;
             let content_item_id = parse_id::<ContentItemId>(&args.content_item_id)?;
@@ -755,6 +757,68 @@ fn execute_content(command: ContentWorkflow, tools: &AgentTools, actor: &AuthCon
             Ok(result)
         }
     }
+}
+
+/// Stores a local image as an item's cover under the node's media directory.
+/// This is how a node archives its own copy (backup while the source is
+/// alive) or attaches a locally generated depiction after the source died.
+fn content_cover(args: &ContentCoverArgs, tools: &AgentTools, actor: &AuthContext) -> CliResult {
+    let pod = resolve_pod(tools, actor, &args.pod)?;
+    let content_item_id = parse_id::<ContentItemId>(&args.content_item_id)?;
+    let _ = pod;
+    let data_dir = tools
+        .persistence_path()
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+        .ok_or_else(|| {
+            (
+                ErrorBody::new("internal_error", "node has no persistent data directory"),
+                ExitStatusCategory::Internal,
+            )
+        })?;
+    let extension = args
+        .file
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("png")
+        .to_lowercase();
+    let mime_type = match extension.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        _ => "image/png",
+    };
+    let media_dir = data_dir.join("media").join(content_item_id.to_string());
+    std::fs::create_dir_all(&media_dir).map_err(internal_error)?;
+    let stored = media_dir.join(format!("cover.{extension}"));
+    std::fs::copy(&args.file, &stored).map_err(|error| {
+        (
+            ErrorBody::new(
+                "invalid_cover",
+                format!("could not store cover {}: {error}", args.file.display()),
+            ),
+            ExitStatusCategory::ValidationOrConflict,
+        )
+    })?;
+    let source = match args.source {
+        CoverSource::AiGenerated => stumble_core::SubmissionAssetSource::AiGenerated,
+        CoverSource::PageImage => stumble_core::SubmissionAssetSource::PageImage,
+        CoverSource::UserProvided => stumble_core::SubmissionAssetSource::UserProvided,
+    };
+    let asset = tools
+        .add_submission_asset(
+            actor,
+            content_item_id.into(),
+            stumble_core::RepresentativeImageRequest {
+                source,
+                url: None,
+                local_path: Some(stored.display().to_string()),
+                mime_type: Some(mime_type.to_string()),
+                alt_text: args.alt.clone(),
+            },
+        )
+        .map_err(agent_tools_error)?;
+    Ok(serde_json::to_value(asset).map_err(internal_error)?)
 }
 
 fn execute_policy(command: PolicyWorkflow, tools: &AgentTools, actor: &AuthContext) -> CliResult {

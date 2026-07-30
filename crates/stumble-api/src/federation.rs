@@ -116,3 +116,26 @@ pub(crate) async fn federation_explore_samples(
         request.limit,
     )?))
 }
+
+/// Serves the Origin's own cover artwork for an accepted public Content Item.
+/// Third-party page-image archives are never served (reference-first, ADR-0010).
+pub(crate) async fn federation_content_cover(
+    State(state): State<ApiState>,
+    Path((slug, content_item_id)): Path<(String, ContentItemId)>,
+) -> Result<([(&'static str, String); 1], Vec<u8>), ApiError> {
+    let ctx = state.tools.default_auth_context()?;
+    let asset = state
+        .tools
+        .federation_cover_asset(&ctx, &slug, content_item_id)?;
+    let path = asset
+        .local_path
+        .ok_or_else(|| AgentToolsError::from(StoreError::NotFound("cover asset".into())))?;
+    let bytes = tokio::task::spawn_blocking(move || std::fs::read(&path))
+        .await
+        .map_err(|_| AgentToolsError::from(StoreError::NotFound("cover file".into())))?
+        .map_err(|_| AgentToolsError::from(StoreError::NotFound("cover file".into())))?;
+    let mime = asset
+        .mime_type
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    Ok(([("content-type", mime)], bytes))
+}
