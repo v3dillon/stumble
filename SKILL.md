@@ -167,7 +167,27 @@ stumble discover task claim <task_id> --lease-seconds 900
 
 Browse each planned neighborhood with your own browser — the user's logged-in
 X session, feeds, forums. Only use access the user legitimately has; never
-circumvent paywalls or scrape past permitted use. For each find worth keeping:
+circumvent paywalls or scrape past permitted use.
+
+**Judge as you scroll, in the browser.** For every post or link, reason
+against the plan before moving on: does it fit a planned neighborhood or
+topic? Would it clear the Pod's SKILL.md bar (artifacts, demos, durable
+ideas — not engagement bait)? Would *this user* stop scrolling for it, given
+the plan's rationales? Submit the few that clearly pass; skip liberally.
+A shortlist of six strong finds beats thirty maybes — the user reviews every
+item, and their rejections are tomorrow's training signal.
+
+**If a source needs a login you don't have** (X shows the signed-out wall, a
+session expired): don't stop the run, and never ask for or handle
+credentials. Tell the user plainly — "I couldn't read X because the browser
+isn't signed in; log in at x.com in my browser and I'll include it next
+time" — offer to open the login page for them, move on to the remaining
+planned sources, and declare the shortfall when you complete the batch (see
+below). Stumble reallocates the remaining quota, records the gap
+inspectably, and raises a one-shot authentication-needed notice instead of
+nagging.
+
+For each find worth keeping:
 
 ```bash
 echo '{
@@ -186,9 +206,17 @@ Match `allocation_role` to the neighborhood you found it in. Finish by
 completing the batch with the submission ids you collected:
 
 ```bash
-echo '{"task_id": "<task_id>", "submission_ids": ["<id>", ...]}' > /tmp/done.json
+echo '{"task_id": "<task_id>", "submission_ids": ["<id>", ...],
+      "source_availability": [
+        {"source": "x.com", "state": "authentication_required",
+         "reason": "browser not signed in to X"}
+      ]}' > /tmp/done.json
 stumble discover personal complete-batch --input /tmp/done.json
 ```
+
+Only include `source_availability` entries for planned sources you could not
+read — states: `authentication_required`, `session_expired`, `inaccessible`,
+`browser_grant_ineligible`. Facts only, never cookies or tokens.
 
 Results wait in a private shortlist — they never enter the Feed or Pods until
 the user decides. Pod-directed discovery works the same way through
