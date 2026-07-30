@@ -94,11 +94,12 @@ pub(crate) enum McpTool {
     GetPodPackage,
     SubscribePublicPod,
     SynchronizeSubscription,
+    AddReference,
 }
 
 #[cfg(test)]
 impl McpTool {
-    pub(crate) const VARIANT_COUNT: usize = Self::SynchronizeSubscription as usize + 1;
+    pub(crate) const VARIANT_COUNT: usize = Self::AddReference as usize + 1;
 }
 
 pub(crate) fn definitions() -> &'static [ToolDefinition] {
@@ -153,7 +154,7 @@ pub(crate) fn definitions() -> &'static [ToolDefinition] {
         d(Tool::GetPodPackage, "get_pod_package", Public, string_schema("pod_slug"), Blocking, published(1, "Read Pod Package", "Read the versioned context, curation instructions, and Source Rules for one Pod.", true, false)),
         d(Tool::SubscribePublicPod, "subscribe_public_pod", CapabilityOnly(Capability::SubscriptionManagement), object_schema(json!({"public_pod_url": {"type": "string", "format": "uri"}}), &["public_pod_url"]), Async, published(9, "Subscribe to Public Pod", "Subscribe to a canonical public Pod URL and import its verified signed history from the Origin Node.", false, false)),
         d(Tool::SynchronizeSubscription, "synchronize_subscription", CapabilityOnly(Capability::SubscriptionManagement), uuid_schema("subscription_id"), Async, published(10, "Synchronize Subscription", "Fetch and apply signed Pod Events from the Origin Node after the Subscription's verified cursor.", false, false)),
-    
+        d(Tool::AddReference, "add_reference", CapabilityOnly(Capability::PodCuration), add_reference_schema(), Blocking, published(40, "Add Shared Link", "Add a link the User shared into a Pod and their Feed in one step. Creates the default private saved Pod on first use and returns the Accepted Placement.", false, false)),
     ])
 }
 
@@ -221,6 +222,20 @@ fn published(
 
 fn empty_schema() -> Value {
     object_schema(json!({}), &[])
+}
+fn add_reference_schema() -> Value {
+    object_schema(
+        json!({
+            "url": {"type": "string", "format": "uri"},
+            "pod": {"type": "string"},
+            "title": {"type": "string"},
+            "summary": {"type": "string"},
+            "excerpt": {"type": "string"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "note": {"type": "string"}
+        }),
+        &["url"],
+    )
 }
 fn uuid() -> Value {
     json!({"type": "string", "format": "uuid"})

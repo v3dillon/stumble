@@ -15,6 +15,8 @@ stumble --data-dir ~/.stumble/nodes/home node init
 stumble --data-dir ~/.stumble/nodes/home node show
 ```
 
+The core loop is `stumble add <url>` to save a link (one step, Feed-eligible immediately) and `stumble feed batch get` to read the Feed. See the repository root `SKILL.md` for the full harness workflow, including browsing shared links with the harness's own browser tools.
+
 Start the local HTTP API only when the User asks to run it:
 
 ```bash

@@ -9,12 +9,25 @@ Install [Rust](https://rustup.rs), clone this repository, then run:
 ```bash
 cargo install --path crates/stumble-cli --locked
 stumble node init
-stumble node show
+stumble add "https://example.com/something-worth-keeping"
+stumble feed batch get
 ```
 
-Stumble stores its Home Node under `~/.stumble/nodes/home` by default. Set `STUMBLE_DATA_DIR` or pass `--data-dir` to use another directory. `node init` also records the local Owner credential in the operating system's credential store; later local commands detect its presence automatically.
+That is the whole loop: initialize once, add links as you find them, read your Feed when you want it. `stumble add` creates a private `saved` Pod on first use, places the link in it, and makes it Feed-eligible in one step.
 
-The CLI is JSON-first and organized into five workflow families. Add `--help` at any command level for arguments and defaults.
+Stumble stores its Home Node under `~/.stumble/nodes/home` by default. Set `STUMBLE_DATA_DIR` or pass `--data-dir` to use another directory. `stumble node init` also records the local Owner credential in the operating system's credential store; later local commands detect its presence automatically. Pass `--demo` to `node init` for throwaway fixture data.
+
+### Use it from an AI harness
+
+Stumble is designed to be driven by an agent harness (Claude Code, Codex, Hermes, Pi, ...). The harness owns the browser — it reads pages with your logged-in sessions — and Stumble owns the collection and the Feed. Install the [`SKILL.md`](SKILL.md) at the repository root into your harness's skills directory and it will know the loop: open a shared link, understand it, `stumble add` it, and read your Feed back on request.
+
+## Quick actions
+
+| Command | Description |
+| --- | --- |
+| `stumble add <url>` | Add a link to a Pod and your Feed in one step (`--pod`, `--title`, `--summary`, `--tag`, `--note`). |
+
+The rest of the CLI is JSON-first and organized into five workflow families. Add `--help` at any command level for arguments and defaults.
 
 ## `node`
 
@@ -22,7 +35,7 @@ Manage the Home Node, Agent Harnesses, and approval proposals.
 
 | Command | Description |
 | --- | --- |
-| `stumble node init` | Initialize the Home Node. |
+| `stumble node init` | Initialize the Home Node (`--demo` seeds fixtures). |
 | `stumble node show` | Show Home Node identity and status. |
 | `stumble node harness list` | List registered Agent Harnesses. |
 | `stumble node harness show` | Show one Agent Harness. |

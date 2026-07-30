@@ -1,3 +1,7 @@
+## Using Stumble from a harness
+
+If you are operating Stumble for a User (not developing it), read the root `SKILL.md`. The short version: the harness owns the browser, Stumble owns the collection — `stumble node init` once, `stumble add <url>` to save what the User shares, `stumble feed batch get` to read their Feed back.
+
 ## Agent skills
 
 ### Issue tracker

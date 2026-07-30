@@ -65,6 +65,25 @@ fn dispatch(
     owner_authority: &dyn OwnerAuthorityStore,
 ) -> CliResult {
     match workflow {
+        Workflow::Add(args) => {
+            let (_, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
+            let added = tools
+                .add_reference(
+                    &actor,
+                    stumble_core::AddReferenceRequest {
+                        url: args.url,
+                        pod: args.pod,
+                        title: args.title,
+                        summary: args.summary,
+                        excerpt: args.excerpt,
+                        tags: args.tags,
+                        note: args.note,
+                    },
+                    chrono::Utc::now(),
+                )
+                .map_err(agent_tools_error)?;
+            serde_json::to_value(added).map_err(internal_error)
+        }
         Workflow::Node { command } => {
             node_workflow::execute(command, selected_data_dir, owner_authority)
         }

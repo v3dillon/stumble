@@ -834,46 +834,6 @@ mod tests {
         assert!(!brief.items.is_empty());
     }
 
-    #[test]
-    fn crawler_candidate_promotion_does_not_federate_an_unaccepted_submission() {
-        let mut store = seed_store();
-        add_beautiful_interfaces(&mut store);
-        let tools = AgentTools::new(store.clone());
-        let context = ctx(&store);
-        let source = tools
-            .add_source_to_pod(
-                &context,
-                "beautiful-interfaces",
-                CrawlerSourceType::Rss,
-                "https://example.com/feed.xml".to_string(),
-            )
-            .unwrap();
-        let candidate = tools
-            .create_crawl_candidate(
-                &context,
-                "beautiful-interfaces",
-                source.id,
-                SubmitLinkRequest {
-                    url: "https://example.org/candidate".to_string(),
-                    title: Some("Candidate".to_string()),
-                    description: None,
-                    note: None,
-                    tags: vec!["working".to_string(), "demo".to_string()],
-                    discovered_by_crawler: true,
-                },
-            )
-            .unwrap();
-        let submission = tools
-            .promote_crawl_candidate(&context, candidate.id)
-            .unwrap();
-        assert!(submission.discovered_by_crawler);
-        let events = tools
-            .export_pod_events(&context, "beautiful-interfaces")
-            .unwrap();
-        assert!(!events
-            .iter()
-            .any(|event| event.event_type == "link_submitted"));
-    }
 
     #[test]
     fn representative_image_asset_storage_dedupes() {

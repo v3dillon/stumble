@@ -22,6 +22,8 @@ pub(super) struct Cli {
 
 #[derive(Subcommand)]
 pub(super) enum Workflow {
+    /// Add a shared link to a Pod and your Feed in one step
+    Add(AddArgs),
     Node {
         #[command(subcommand)]
         command: NodeWorkflow,
@@ -317,6 +319,30 @@ pub(super) enum PeerWorkflow {
 pub(super) enum SyncPodWorkflow {
     Run(SyncPodRunArgs),
     Status(PodArgs),
+}
+
+#[derive(Args)]
+pub(super) struct AddArgs {
+    /// Source URL to add
+    pub(super) url: String,
+    /// Target Pod slug; the default private `saved` Pod is used when omitted
+    #[arg(long)]
+    pub(super) pod: Option<String>,
+    /// Source title when known
+    #[arg(long)]
+    pub(super) title: Option<String>,
+    /// Short generated understanding of the source
+    #[arg(long)]
+    pub(super) summary: Option<String>,
+    /// Excerpt that source policy permits Stumble to retain
+    #[arg(long)]
+    pub(super) excerpt: Option<String>,
+    /// Descriptive subject tag; repeatable
+    #[arg(long = "tag")]
+    pub(super) tags: Vec<String>,
+    /// Why this belongs in the Pod
+    #[arg(long)]
+    pub(super) note: Option<String>,
 }
 
 #[derive(Args)]

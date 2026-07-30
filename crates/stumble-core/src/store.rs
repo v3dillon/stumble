@@ -157,7 +157,6 @@ pub struct InMemoryStore {
     pub submission_pods: Vec<SubmissionPod>,
     pub submission_assets: HashMap<Uuid, SubmissionAsset>,
     pub crawler_sources: HashMap<Uuid, CrawlerSource>,
-    pub crawl_candidates: HashMap<Uuid, CrawlCandidate>,
     pub user_preferences: HashMap<(UserId, Option<TenantId>), UserPreferences>,
     pub feedback_events: Vec<FeedbackEvent>,
     pub(crate) taste_learning_evidence: Vec<TasteLearningEvidence>,
@@ -271,7 +270,6 @@ struct PersistedStore {
     submission_pods: Vec<SubmissionPod>,
     submission_assets: Vec<SubmissionAsset>,
     crawler_sources: Vec<CrawlerSource>,
-    crawl_candidates: Vec<CrawlCandidate>,
     user_preferences: Vec<UserPreferences>,
     feedback_events: Vec<FeedbackEvent>,
     #[serde(default)]
@@ -544,7 +542,6 @@ impl From<&InMemoryStore> for PersistedStore {
             submission_pods: store.submission_pods.clone(),
             submission_assets: store.submission_assets.values().cloned().collect(),
             crawler_sources: store.crawler_sources.values().cloned().collect(),
-            crawl_candidates: store.crawl_candidates.values().cloned().collect(),
             user_preferences: store.user_preferences.values().cloned().collect(),
             feedback_events: store.feedback_events.clone(),
             taste_learning_evidence: store.taste_learning_evidence.clone(),
@@ -840,11 +837,6 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .into_iter()
                 .map(|source| (source.id, source))
                 .collect(),
-            crawl_candidates: snapshot
-                .crawl_candidates
-                .into_iter()
-                .map(|candidate| (candidate.id, candidate))
-                .collect(),
             user_preferences: snapshot
                 .user_preferences
                 .into_iter()
@@ -995,7 +987,6 @@ const STORE_COLLECTIONS: &[&str] = &[
     "submission_pods",
     "submission_assets",
     "crawler_sources",
-    "crawl_candidates",
     "user_preferences",
     "feedback_events",
     "taste_learning_evidence",

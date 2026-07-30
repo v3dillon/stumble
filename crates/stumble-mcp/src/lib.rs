@@ -181,6 +181,14 @@ impl McpToolRouter {
                 let request = serde_json::from_value(call.arguments)?;
                 Ok(json!(self.tools.submit_candidate(&self.ctx, request)?))
             }
+            AddReference => {
+                let request = serde_json::from_value(call.arguments)?;
+                Ok(json!(self.tools.add_reference(
+                    &self.ctx,
+                    request,
+                    chrono::Utc::now(),
+                )?))
+            }
             InspectCandidate => {
                 let candidate_id = arg_string(&call.arguments, "candidate_id")?.parse()?;
                 Ok(json!(self
