@@ -360,7 +360,7 @@ impl AgentTools {
         let node = store.node_for_tenant(ctx.tenant_id)?;
         let event = sign_public_event(
             &node,
-            "link_removed",
+            PodEventType::LegacyLinkRemoved,
             &pod.slug,
             json!({"submission_id": submission_id, "submission_purged": purged}),
             store.latest_event_hash(&pod.slug),

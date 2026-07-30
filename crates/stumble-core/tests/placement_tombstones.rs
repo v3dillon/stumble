@@ -304,7 +304,7 @@ fn signed_tombstones_stop_origin_delivery_without_erasing_local_curation() {
         incremental
             .events
             .iter()
-            .filter(|event| event.event_type == "placement_tombstoned")
+            .filter(|event| event.event_type == PodEventType::PlacementTombstoned)
             .count(),
         2
     );
@@ -385,14 +385,14 @@ fn signed_tombstones_stop_origin_delivery_without_erasing_local_curation() {
 
     // Phase 6 — Assert acceptance and withdrawal history are both append-only.
     assert!(origin_history.events.iter().any(|event| {
-        event.event_type == "content_item_placed"
+        event.event_type == PodEventType::ContentItemPlaced
             && event
                 .payload_json
                 .to_string()
                 .contains(&saved_origin_id.to_string())
     }));
     assert!(origin_history.events.iter().any(|event| {
-        event.event_type == "placement_tombstoned"
+        event.event_type == PodEventType::PlacementTombstoned
             && event
                 .payload_json
                 .to_string()

@@ -202,7 +202,7 @@ fn insert_seed_pod(
     store.pod_skill_packs.insert(pod.id, package.clone());
     if let Ok(event) = crate::signing::sign_public_event(
         node,
-        "pod_created",
+        PodEventType::PodCreated,
         &pod.slug,
         serde_json::json!({"pod": pod.clone(), "package": package}),
         store.latest_event_hash(&pod.slug),

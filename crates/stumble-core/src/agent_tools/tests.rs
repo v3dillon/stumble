@@ -59,7 +59,7 @@ mod federation_projection_tests {
         EventLog {
             event_id: Uuid::now_v7(),
             tenant_id: None,
-            event_type: "content_item_placed".to_string(),
+            event_type: PodEventType::ContentItemPlaced,
             pod_slug: pod.slug.clone(),
             author_node_id: origin_node_id,
             author_display_name: None,
@@ -109,9 +109,7 @@ mod federation_projection_tests {
         EventLog {
             event_id: Uuid::now_v7(),
             tenant_id: None,
-            event_type: FederatedPodEventType::PlacementTombstoned
-                .as_wire()
-                .to_string(),
+            event_type: PodEventType::PlacementTombstoned,
             pod_slug: pod.slug.clone(),
             author_node_id: origin_node_id,
             author_display_name: None,

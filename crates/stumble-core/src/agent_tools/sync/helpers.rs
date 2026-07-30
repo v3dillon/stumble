@@ -14,7 +14,7 @@ pub(crate) fn discard_replayed_events(
         if event.author_node_id != snapshot.node.node_id
             || event.pod_slug != snapshot.manifest.pod.slug
             || event.previous_event_hash != previous_hash
-            || !is_subscription_projection_event(&event.event_type)
+            || !event.event_type.is_subscription_projection()
             || !verify_event(event, &snapshot.node.public_key)?
         {
             return Err(StoreError::InvalidSignature.into());
@@ -84,13 +84,13 @@ pub(crate) fn validate_federation_snapshot(
         snapshot
             .events
             .first()
-            .filter(|event| event.event_type == "pod_published")
+            .filter(|event| event.event_type == PodEventType::PodPublished)
             .and_then(|event| event.previous_event_hash.clone())
     });
     for event in &snapshot.events {
         if event.pod_slug != pod.slug
             || event.author_node_id != snapshot.node.node_id
-            || !is_subscription_projection_event(&event.event_type)
+            || !event.event_type.is_subscription_projection()
         {
             return Err(StoreError::Validation(
                 "event is outside the subscribed public Pod stream".to_string(),
@@ -235,37 +235,40 @@ pub(crate) fn normalized_package_value(
 }
 
 pub(crate) fn validate_imported_event_payload(event: &EventLog) -> Result<(), AgentToolsError> {
-    let event_type = FederatedPodEventType::from_wire(&event.event_type)
-        .ok_or_else(|| StoreError::Validation("event is not synchronization-safe".to_string()))?;
-    match event_type {
-        FederatedPodEventType::PodCreated => {
+    if !event.event_type.is_subscription_projection()
+        && event.event_type != PodEventType::LegacyLinkRemoved
+    {
+        return Err(StoreError::Validation("event is not synchronization-safe".to_string()).into());
+    }
+    match event.event_type {
+        PodEventType::PodCreated => {
             imported_event_payload::<Pod>(event, "pod")?;
             imported_event_payload::<PodPackage>(event, "package")?;
         }
-        FederatedPodEventType::PodPublished => {
+        PodEventType::PodPublished => {
             imported_event_payload::<Pod>(event, "pod")?;
             imported_event_payload::<PodPackage>(event, "package")?;
         }
-        FederatedPodEventType::PodSkillPackUpdated
-        | FederatedPodEventType::PodPackageImported
-        | FederatedPodEventType::PodPackageForked => {
+        PodEventType::PodSkillPackUpdated
+        | PodEventType::PodPackageImported
+        | PodEventType::PodPackageForked => {
             imported_event_payload::<PodPackage>(event, "package")?;
         }
-        FederatedPodEventType::ContentItemPlaced => {
+        PodEventType::ContentItemPlaced => {
             imported_event_payload::<ContentItem>(event, "content_item")?;
             imported_event_payload::<AcceptedPlacementProjection>(event, "accepted_placement")?;
         }
-        FederatedPodEventType::ContentItemMetadataUpdated => {
+        PodEventType::ContentItemMetadataUpdated => {
             let payload = imported_event_body::<ContentItemMetadataUpdatedPayload>(event)?;
             resolve_media_for_store(&payload.metadata_update.media_references)?;
         }
-        FederatedPodEventType::PlacementTombstoned => {
+        PodEventType::PlacementTombstoned => {
             imported_event_payload::<PlacementTombstone>(event, "placement_tombstone")?;
         }
-        FederatedPodEventType::LegacyLinkRemoved => {
+        PodEventType::LegacyLinkRemoved => {
             imported_event_payload::<SubmissionId>(event, "submission_id")?;
         }
-        FederatedPodEventType::LegacyLinkSubmitted => {
+        PodEventType::PrivatePodPackageCreated | PodEventType::LegacyLinkSubmitted => {
             return Err(
                 StoreError::Validation("event is not synchronization-safe".to_string()).into(),
             )
@@ -290,7 +293,7 @@ pub(crate) fn project_snapshot_events(
         imported_event.tenant_id = ctx.tenant_id;
         imported_event.imported_from_peer_id = None;
         imported_event.verified = true;
-        if is_subscription_projection_event(&imported_event.event_type) {
+        if imported_event.event_type.is_subscription_projection() {
             project_imported_public_event(store, ctx, &imported_event)?;
         }
         store.event_log.push(imported_event);
@@ -299,55 +302,36 @@ pub(crate) fn project_snapshot_events(
     Ok(imported)
 }
 
-pub(crate) fn is_subscription_projection_event(event_type: &str) -> bool {
-    matches!(
-        FederatedPodEventType::from_wire(event_type),
-        Some(
-            FederatedPodEventType::PodCreated
-                | FederatedPodEventType::PodPublished
-                | FederatedPodEventType::PodSkillPackUpdated
-                | FederatedPodEventType::PodPackageImported
-                | FederatedPodEventType::PodPackageForked
-                | FederatedPodEventType::ContentItemPlaced
-                | FederatedPodEventType::ContentItemMetadataUpdated
-                | FederatedPodEventType::PlacementTombstoned
-        )
-    )
-}
-
 pub(crate) fn project_imported_public_event(
     store: &mut InMemoryStore,
     ctx: &AuthContext,
     event: &EventLog,
 ) -> Result<(), AgentToolsError> {
-    let Some(event_type) = FederatedPodEventType::from_wire(&event.event_type) else {
-        return Ok(());
-    };
-    match event_type {
-        FederatedPodEventType::PodCreated => {
+    match event.event_type {
+        PodEventType::PodCreated => {
             let pod = imported_event_payload::<Pod>(event, "pod")?;
             let local_pod_id = project_imported_pod(store, ctx, event.author_node_id, pod)?;
             let mut package = imported_event_payload::<PodPackage>(event, "package")?;
             project_imported_package(store, local_pod_id, &mut package)?;
         }
-        FederatedPodEventType::PodPublished => {
+        PodEventType::PodPublished => {
             let pod = imported_event_payload::<Pod>(event, "pod")?;
             let local_pod_id = project_imported_pod(store, ctx, event.author_node_id, pod)?;
             let mut package = imported_event_payload::<PodPackage>(event, "package")?;
             project_imported_package(store, local_pod_id, &mut package)?;
         }
-        FederatedPodEventType::PodSkillPackUpdated
-        | FederatedPodEventType::PodPackageImported
-        | FederatedPodEventType::PodPackageForked => {
+        PodEventType::PodSkillPackUpdated
+        | PodEventType::PodPackageImported
+        | PodEventType::PodPackageForked => {
             let mut package = imported_event_payload::<PodPackage>(event, "package")?;
             let local_pod_id = synchronized_origin_pod_id(store, ctx, event)?;
             project_imported_package(store, local_pod_id, &mut package)?;
         }
-        FederatedPodEventType::LegacyLinkSubmitted => {
+        PodEventType::LegacyLinkSubmitted => {
             let submission = imported_event_payload::<Submission>(event, "submission")?;
             project_imported_submission(store, ctx, event, submission)?;
         }
-        FederatedPodEventType::ContentItemPlaced => {
+        PodEventType::ContentItemPlaced => {
             let content_item = imported_event_payload::<ContentItem>(event, "content_item")?;
             let content_item_id =
                 project_imported_submission(store, ctx, event, content_item.into_legacy_record())?;
@@ -361,7 +345,7 @@ pub(crate) fn project_imported_public_event(
                 .accepted_placement_projections
                 .insert((content_item_id, local_pod_id), projection);
         }
-        FederatedPodEventType::ContentItemMetadataUpdated => {
+        PodEventType::ContentItemMetadataUpdated => {
             let payload = imported_event_body::<ContentItemMetadataUpdatedPayload>(event)?;
             let update = payload.metadata_update;
             let media_references = resolve_media_for_store(&update.media_references)?;
@@ -408,7 +392,7 @@ pub(crate) fn project_imported_public_event(
             item.media_references =
                 resolve_media_for_store(item.media_references.iter().chain(&media_references))?;
         }
-        FederatedPodEventType::PlacementTombstoned => {
+        PodEventType::PlacementTombstoned => {
             let mut tombstone =
                 imported_event_payload::<PlacementTombstone>(event, "placement_tombstone")?;
             if tombstone.origin_placement.origin_node_id != event.author_node_id
@@ -482,7 +466,7 @@ pub(crate) fn project_imported_public_event(
                 store.placement_tombstones.push(tombstone);
             }
         }
-        FederatedPodEventType::LegacyLinkRemoved => {}
+        PodEventType::LegacyLinkRemoved | PodEventType::PrivatePodPackageCreated => {}
     }
     Ok(())
 }

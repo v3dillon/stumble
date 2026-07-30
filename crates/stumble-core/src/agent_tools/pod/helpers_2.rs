@@ -106,7 +106,7 @@ pub(crate) fn enrich_accepted_content_item(
         };
         let event = sign_public_event(
             &node,
-            FederatedPodEventType::ContentItemMetadataUpdated.as_wire(),
+            PodEventType::ContentItemMetadataUpdated,
             &pod.slug,
             serde_json::to_value(payload).map_err(|error| {
                 StoreError::Validation(format!("metadata update cannot be signed: {error}"))
@@ -160,7 +160,7 @@ pub(crate) fn accept_placement(
         .insert((content_item_id, placement.pod_id), projection.clone());
     let event = sign_public_event(
         &node,
-        "content_item_placed",
+        PodEventType::ContentItemPlaced,
         &pod.slug,
         json!({
             "content_item": ContentItem::from(&item),
@@ -449,10 +449,10 @@ pub(crate) enum PodCreationMode {
 }
 
 impl PodCreationMode {
-    const fn event_type(self) -> &'static str {
+    const fn event_type(self) -> PodEventType {
         match self {
-            Self::PrivatePackage => "private_pod_package_created",
-            Self::Canonical | Self::SimpleCreate | Self::LegacyPublic => "pod_created",
+            Self::PrivatePackage => PodEventType::PrivatePodPackageCreated,
+            Self::Canonical | Self::SimpleCreate | Self::LegacyPublic => PodEventType::PodCreated,
         }
     }
 

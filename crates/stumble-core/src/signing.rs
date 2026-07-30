@@ -1,6 +1,6 @@
 use crate::domain::{
     DiscoveryPeerAdvertisement, EventLog, NodeIdentity, PodAnnouncement, PodEndorsement,
-    PodExploreSamples, PodWithdrawal,
+    PodEventType, PodExploreSamples, PodWithdrawal,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use chrono::Utc;
@@ -66,18 +66,17 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 pub fn sign_public_event(
     node: &NodeIdentity,
-    event_type: impl Into<String>,
+    event_type: PodEventType,
     pod_slug: impl Into<String>,
     payload_json: Value,
     previous_event_hash: Option<String>,
 ) -> Result<EventLog, SigningError> {
     let event_id = Uuid::now_v7();
-    let event_type = event_type.into();
     let pod_slug = pod_slug.into();
     let created_at = Utc::now();
     let bytes = canonical_event_bytes(
         event_id,
-        &event_type,
+        event_type.as_wire(),
         &pod_slug,
         node.id,
         &payload_json,
@@ -111,7 +110,7 @@ pub fn sign_public_event(
 pub fn verify_event(event: &EventLog, public_key: &str) -> Result<bool, SigningError> {
     let bytes = canonical_event_bytes(
         event.event_id,
-        &event.event_type,
+        event.event_type.as_wire(),
         &event.pod_slug,
         event.author_node_id,
         &event.payload_json,

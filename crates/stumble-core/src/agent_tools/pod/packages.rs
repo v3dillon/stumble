@@ -143,7 +143,7 @@ impl AgentTools {
         let node = store.node_for_tenant(ctx.tenant_id)?;
         let event = sign_public_event(
             &node,
-            "pod_skill_pack_updated",
+            PodEventType::PodSkillPackUpdated,
             &pod.slug,
             json!({"package": package}),
             store.latest_event_hash(&pod.slug),
@@ -197,7 +197,7 @@ impl AgentTools {
         let node = store.node_for_tenant(ctx.tenant_id)?;
         let event = sign_public_event(
             &node,
-            "pod_skill_pack_updated",
+            PodEventType::PodSkillPackUpdated,
             &pod.slug,
             json!({"package": pack}),
             store.latest_event_hash(&pod.slug),
@@ -280,7 +280,7 @@ impl AgentTools {
         let node = store.node_for_tenant(ctx.tenant_id)?;
         let event = sign_public_event(
             &node,
-            "pod_package_imported",
+            PodEventType::PodPackageImported,
             &pod.slug,
             json!({"package": pack}),
             store.latest_event_hash(&pod.slug),
@@ -321,7 +321,7 @@ impl AgentTools {
         let node = store.node_for_tenant(ctx.tenant_id)?;
         let event = sign_public_event(
             &node,
-            "pod_package_forked",
+            PodEventType::PodPackageForked,
             &target_pod.slug,
             json!({"package": forked}),
             store.latest_event_hash(&target_pod.slug),

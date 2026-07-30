@@ -135,7 +135,7 @@ fn subscribed_home_node_synchronizes_incrementally_and_reads_remote_content_offl
         snapshot
             .events
             .iter()
-            .find(|event| event.event_type == "content_item_placed")
+            .find(|event| event.event_type == PodEventType::ContentItemPlaced)
             .unwrap()
             .payload_json["content_item"]
             .clone(),
@@ -381,7 +381,7 @@ fn later_canonical_evidence_enriches_accepted_content_and_synchronizes_after_res
     assert_eq!(enrichment.events.len(), 1);
     assert_eq!(
         enrichment.events[0].event_type,
-        "content_item_metadata_updated"
+        PodEventType::ContentItemMetadataUpdated
     );
     assert_eq!(
         home.synchronize_subscription(&subscriber, subscribed.subscription.id, enrichment)

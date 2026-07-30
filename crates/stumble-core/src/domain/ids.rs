@@ -81,211 +81,96 @@ pub type SubmissionId = Uuid;
 pub type PeerId = Uuid;
 pub type NodeIdentityId = Uuid;
 
-/// Stable local identity of a User's [`Subscription`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SubscriptionId(Uuid);
+/// Uuid-backed identity newtype: serde-transparent, with `From<Uuid>`,
+/// `From<Id> for Uuid`, `Display`, and `FromStr`.
+macro_rules! uuid_id {
+    ($(#[$doc:meta])* $name:ident) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(Uuid);
+        uuid_id!(@impls $name);
+    };
+    (default $(#[$doc:meta])* $name:ident) => {
+        $(#[$doc])*
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+            Default,
+        )]
+        #[serde(transparent)]
+        pub struct $name(Uuid);
+        uuid_id!(@impls $name);
+    };
+    (@impls $name:ident) => {
+        impl From<Uuid> for $name {
+            fn from(value: Uuid) -> Self {
+                Self(value)
+            }
+        }
 
-impl From<Uuid> for SubscriptionId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
+        impl From<$name> for Uuid {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.fmt(formatter)
+            }
+        }
+
+        impl std::str::FromStr for $name {
+            type Err = uuid::Error;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                value.parse().map(Self)
+            }
+        }
+    };
 }
 
-impl std::fmt::Display for SubscriptionId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl std::str::FromStr for SubscriptionId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse().map(Self)
-    }
-}
-
-/// Stable canonical identity of a [`ContentItem`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ContentItemId(Uuid);
-
-impl From<Uuid> for ContentItemId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-impl From<ContentItemId> for Uuid {
-    fn from(value: ContentItemId) -> Self {
-        value.0
-    }
-}
-
-impl std::fmt::Display for ContentItemId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl std::str::FromStr for ContentItemId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse().map(Self)
-    }
-}
-
-/// Stable local identity of a private [`Candidate`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct CandidateId(Uuid);
-
-impl From<Uuid> for CandidateId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-impl std::fmt::Display for CandidateId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl std::str::FromStr for CandidateId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse().map(Self)
-    }
-}
-
-/// Stable local identity of one provenance-bearing Candidate Submission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct CandidateSubmissionId(Uuid);
-
-impl From<Uuid> for CandidateSubmissionId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-impl std::fmt::Display for CandidateSubmissionId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl std::str::FromStr for CandidateSubmissionId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse().map(Self)
-    }
-}
-/// Stable local identity of a [`DiscoveryTask`].
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
-)]
-#[serde(transparent)]
-pub struct DiscoveryTaskId(Uuid);
-
-impl From<Uuid> for DiscoveryTaskId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-/// Stable local identity of an immutable private Discovery Plan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct DiscoveryPlanId(Uuid);
-
-impl From<Uuid> for DiscoveryPlanId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-impl std::fmt::Display for DiscoveryPlanId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl std::str::FromStr for DiscoveryPlanId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse().map(Self)
-    }
-}
-
-impl std::fmt::Display for DiscoveryTaskId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl std::str::FromStr for DiscoveryTaskId {
-    type Err = uuid::Error;
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse().map(Self)
-    }
-}
-
-/// Stable local identity of a private Discovery Result Batch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct DiscoveryResultBatchId(Uuid);
-
-impl From<Uuid> for DiscoveryResultBatchId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-impl std::fmt::Display for DiscoveryResultBatchId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl std::str::FromStr for DiscoveryResultBatchId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse().map(Self)
-    }
-}
-
-/// Stable local identity of a private Personal Discovery schedule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct PersonalDiscoveryScheduleId(Uuid);
-
-impl From<Uuid> for PersonalDiscoveryScheduleId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-impl std::fmt::Display for PersonalDiscoveryScheduleId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl std::str::FromStr for PersonalDiscoveryScheduleId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse().map(Self)
-    }
-}
+uuid_id!(
+    /// Stable local identity of a User's [`Subscription`].
+    SubscriptionId
+);
+uuid_id!(
+    /// Stable canonical identity of a [`ContentItem`].
+    ContentItemId
+);
+uuid_id!(
+    /// Stable local identity of a private [`Candidate`].
+    CandidateId
+);
+uuid_id!(
+    /// Stable local identity of one provenance-bearing Candidate Submission.
+    CandidateSubmissionId
+);
+uuid_id!(
+    default
+    /// Stable local identity of a [`DiscoveryTask`].
+    DiscoveryTaskId
+);
+uuid_id!(
+    /// Stable local identity of an immutable private Discovery Plan.
+    DiscoveryPlanId
+);
+uuid_id!(
+    /// Stable local identity of a private Discovery Result Batch.
+    DiscoveryResultBatchId
+);
+uuid_id!(
+    /// Stable local identity of a private Personal Discovery schedule.
+    PersonalDiscoveryScheduleId
+);
+uuid_id!(
+    /// Stable local identity of an [`AgentHarness`].
+    AgentHarnessId
+);
+uuid_id!(
+    /// Stable local identity of a sensitive-change proposal.
+    PendingProposalId
+);
 
 /// Positive, bounded duration of a Discovery Task lease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -386,52 +271,3 @@ impl TryFrom<i32> for PackageVersion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("Package Version must be positive, got {0}")]
 pub struct PackageVersionError(i32);
-/// Stable local identity of an [`AgentHarness`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct AgentHarnessId(Uuid);
-
-impl From<Uuid> for AgentHarnessId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-impl std::fmt::Display for AgentHarnessId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl std::str::FromStr for AgentHarnessId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse().map(Self)
-    }
-}
-
-/// Stable local identity of a sensitive-change proposal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct PendingProposalId(Uuid);
-
-impl From<Uuid> for PendingProposalId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-impl std::fmt::Display for PendingProposalId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl std::str::FromStr for PendingProposalId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse().map(Self)
-    }
-}

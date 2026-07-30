@@ -318,7 +318,14 @@ fn removing_a_submission_unlinks_then_purges_when_orphaned() {
 #[test]
 fn node_identity_creation_and_event_signing_verify() {
     let node = create_node_identity("test node", None);
-    let event = sign_public_event(&node, "pod_created", "test", json!({"ok": true}), None).unwrap();
+    let event = sign_public_event(
+        &node,
+        PodEventType::PodCreated,
+        "test",
+        json!({"ok": true}),
+        None,
+    )
+    .unwrap();
     assert!(verify_event(&event, &node.public_key).unwrap());
 }
 
@@ -387,7 +394,7 @@ fn duplicate_event_rejection_and_trusted_peer_rules() {
     };
     let event = sign_public_event(
         &peer_node,
-        "link_submitted",
+        PodEventType::LegacyLinkSubmitted,
         "trusted-peer-pod",
         json!({"submission": submission}),
         None,
@@ -696,7 +703,7 @@ fn imported_peer_events_materialize_remote_pod_links_for_briefs() {
     };
     let created_event = sign_public_event(
         &remote_node,
-        "pod_created",
+        PodEventType::PodCreated,
         &remote_pod.slug,
         json!({
             "pod": remote_pod.clone(),
@@ -731,7 +738,7 @@ fn imported_peer_events_materialize_remote_pod_links_for_briefs() {
     };
     let submitted_event = sign_public_event(
         &remote_node,
-        "link_submitted",
+        PodEventType::LegacyLinkSubmitted,
         &remote_pod.slug,
         json!({"submission": remote_submission.clone()}),
         Some(created_event.content_hash.clone()),

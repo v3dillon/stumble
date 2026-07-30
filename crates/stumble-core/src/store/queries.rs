@@ -109,12 +109,12 @@ impl InMemoryStore {
         let events: Vec<EventLog> = self
             .event_log
             .iter()
-            .filter(|event| event.pod_slug == pod_slug && is_federated_pod_event(&event.event_type))
+            .filter(|event| event.pod_slug == pod_slug && event.event_type.is_federated())
             .cloned()
             .collect();
         let publication_start = events
             .iter()
-            .rposition(|event| event.event_type == "pod_published");
+            .rposition(|event| event.event_type == PodEventType::PodPublished);
         match publication_start {
             Some(start) => events[start..].to_vec(),
             None => events,
@@ -124,17 +124,7 @@ impl InMemoryStore {
     pub fn portable_package_events_for_pod(&self, pod_slug: &str) -> Vec<EventLog> {
         self.event_log
             .iter()
-            .filter(|event| {
-                event.pod_slug == pod_slug
-                    && matches!(
-                        event.event_type.as_str(),
-                        "pod_created"
-                            | "private_pod_package_created"
-                            | "pod_skill_pack_updated"
-                            | "pod_package_imported"
-                            | "pod_package_forked"
-                    )
-            })
+            .filter(|event| event.pod_slug == pod_slug && event.event_type.is_portable_package())
             .cloned()
             .collect()
     }
@@ -143,7 +133,7 @@ impl InMemoryStore {
         self.event_log
             .iter()
             .rev()
-            .find(|event| event.pod_slug == pod_slug && is_federated_pod_event(&event.event_type))
+            .find(|event| event.pod_slug == pod_slug && event.event_type.is_federated())
             .map(|event| event.content_hash.clone())
     }
 
@@ -154,8 +144,4 @@ impl InMemoryStore {
             .find(|event| event.pod_slug == pod_slug)
             .map(|event| event.content_hash.clone())
     }
-}
-
-fn is_federated_pod_event(event_type: &str) -> bool {
-    FederatedPodEventType::from_wire(event_type).is_some_and(FederatedPodEventType::is_federated)
 }

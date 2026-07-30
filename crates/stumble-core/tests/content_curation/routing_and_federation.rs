@@ -201,7 +201,7 @@ fn accepted_content_item_events_project_on_a_subscribing_home_node() {
     let events = origin.export_pod_events(&curator, &pod.slug).unwrap();
     let placement_event = events
         .iter()
-        .find(|event| event.event_type == "content_item_placed")
+        .find(|event| event.event_type == PodEventType::ContentItemPlaced)
         .unwrap();
     let public_payload = serde_json::to_string(&placement_event.payload_json).unwrap();
     for private_field in [

@@ -462,7 +462,7 @@ pub(crate) fn apply_expand_pod_visibility(
             .ok_or_else(|| StoreError::NotFound("Pod Package".to_string()))?;
         let event = sign_public_event(
             &node,
-            "pod_published",
+            PodEventType::PodPublished,
             &pod.slug,
             json!({"pod": pod, "package": package}),
             store.latest_event_hash(&pod.slug),
@@ -486,7 +486,7 @@ pub(crate) fn apply_expand_pod_visibility(
                 .ok_or_else(|| StoreError::NotFound("Content Item".to_string()))?;
             let event = sign_public_event(
                 &node,
-                "content_item_placed",
+                PodEventType::ContentItemPlaced,
                 &pod.slug,
                 json!({
                     "content_item": item,
@@ -555,7 +555,7 @@ pub(crate) fn apply_sensitive_change(
                 .ok_or_else(|| StoreError::NotFound("Pod Package".to_string()))?;
             let event = sign_public_event(
                 &node,
-                "pod_published",
+                PodEventType::PodPublished,
                 &pod.slug,
                 json!({"pod": pod, "package": package}),
                 store.latest_event_hash(&pod.slug),
@@ -684,7 +684,7 @@ pub(crate) fn apply_sensitive_change(
             let node = store.node_for_tenant(ctx.tenant_id)?;
             let event = sign_public_event(
                 &node,
-                "pod_skill_pack_updated",
+                PodEventType::PodSkillPackUpdated,
                 &pod.slug,
                 json!({"package": package}),
                 store.latest_event_hash(&pod.slug),
@@ -770,7 +770,7 @@ pub(crate) fn apply_sensitive_change(
                 store.placement_tombstones.push(tombstone.clone());
                 sign_public_event(
                     &node,
-                    FederatedPodEventType::PlacementTombstoned.as_wire(),
+                    PodEventType::PlacementTombstoned,
                     &pod.slug,
                     json!({"placement_tombstone": tombstone}),
                     store.latest_event_hash(&pod.slug),
@@ -778,7 +778,7 @@ pub(crate) fn apply_sensitive_change(
             } else {
                 sign_public_event(
                     &node,
-                    FederatedPodEventType::LegacyLinkRemoved.as_wire(),
+                    PodEventType::LegacyLinkRemoved,
                     &pod.slug,
                     json!({"submission_id": submission_id, "submission_purged": false}),
                     store.latest_event_hash(&pod.slug),

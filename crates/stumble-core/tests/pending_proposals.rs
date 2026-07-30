@@ -143,7 +143,7 @@ fn legacy_public_creation_contract_uses_the_canonical_pod_lifecycle() {
     assert_eq!(package.proposer_harness_id, proposer.harness_id);
     assert_eq!(
         tools.federation_pod_events(&owner, &pod.slug).unwrap()[0].event_type,
-        "pod_created"
+        PodEventType::PodCreated
     );
     assert!(!tools
         .list_harness_write_audit(&owner)
@@ -739,7 +739,7 @@ fn public_content_removal_requires_approval_and_foreign_tenant_cannot_decide() {
         .federation_pod_events(&owner, &pod.slug)
         .unwrap()
         .iter()
-        .any(|event| event.event_type == "link_removed"));
+        .any(|event| event.event_type == PodEventType::LegacyLinkRemoved));
 }
 
 #[test]

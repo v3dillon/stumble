@@ -77,7 +77,7 @@ impl AgentTools {
             let node = store.node_for_tenant(ctx.tenant_id)?;
             let event = sign_public_event(
                 &node,
-                "link_submitted",
+                PodEventType::LegacyLinkSubmitted,
                 &pod.slug,
                 json!({"submission": submission.clone()}),
                 store.latest_event_hash(&pod.slug),

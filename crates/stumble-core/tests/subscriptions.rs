@@ -88,7 +88,7 @@ fn malformed_but_validly_signed_event_is_rejected_before_projection() {
     let node = origin.store().read().unwrap().default_node().unwrap();
     let malformed = sign_public_event(
         &node,
-        "content_item_placed",
+        PodEventType::ContentItemPlaced,
         &pod.slug,
         serde_json::json!({
             "content_item": "not a Content Item",
@@ -508,7 +508,7 @@ fn invalid_package_version_rejects_the_whole_increment_before_projection() {
     let node = origin.store().read().unwrap().default_node().unwrap();
     let invalid_event = sign_public_event(
         &node,
-        "pod_skill_pack_updated",
+        PodEventType::PodSkillPackUpdated,
         &pod.slug,
         serde_json::json!({"package": invalid_package}),
         incremental.manifest.latest_known_event_hash.clone(),
@@ -573,7 +573,7 @@ fn a_changed_package_cannot_reuse_an_immutable_version() {
     let node = origin.store().read().unwrap().default_node().unwrap();
     let event = sign_public_event(
         &node,
-        "pod_skill_pack_updated",
+        PodEventType::PodSkillPackUpdated,
         &pod.slug,
         serde_json::json!({"package": changed}),
         subscribed.subscription.last_event_hash.clone(),
@@ -625,13 +625,13 @@ fn publication_boundary_hides_private_history_but_reemits_accepted_content() {
     let store = origin.store();
     let store = store.read().unwrap();
     let served = store.public_events_for_pod(&pod.slug);
-    assert_eq!(served[0].event_type, "pod_published");
+    assert_eq!(served[0].event_type, PodEventType::PodPublished);
     assert!(served
         .iter()
-        .all(|event| event.event_type != "pod_created"));
+        .all(|event| event.event_type != PodEventType::PodCreated));
     assert!(served
         .iter()
-        .any(|event| event.event_type == "content_item_placed"));
+        .any(|event| event.event_type == PodEventType::ContentItemPlaced));
     drop(store);
 
     // The private-era creation event stays in the local log.
@@ -640,7 +640,7 @@ fn publication_boundary_hides_private_history_but_reemits_accepted_content() {
     assert!(store
         .event_log
         .iter()
-        .any(|event| event.pod_slug == pod.slug && event.event_type == "pod_created"));
+        .any(|event| event.pod_slug == pod.slug && event.event_type == PodEventType::PodCreated));
     drop(store);
 
     // A subscriber imports the served suffix and receives the content.
@@ -651,7 +651,10 @@ fn publication_boundary_hides_private_history_but_reemits_accepted_content() {
     let subscriber = register_authenticated_harness(
         &home,
         "post-publication subscriber",
-        vec![HarnessCapability::SubscriptionManagement, HarnessCapability::FeedRead],
+        vec![
+            HarnessCapability::SubscriptionManagement,
+            HarnessCapability::FeedRead,
+        ],
     );
     let synchronized = home
         .subscribe_public_pod(

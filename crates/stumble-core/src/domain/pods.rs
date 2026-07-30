@@ -106,9 +106,19 @@ pub enum PodPackageRevisionOutcome {
     PendingApproval(Box<PendingProposal>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FederatedPodEventType {
+/// Closed set of Pod event kinds recorded on the local event log and, for the
+/// federated subset, on the public subscription stream.
+///
+/// Wire form is a snake_case string (with two legacy renames kept for
+/// pre-release compatibility). Serde and [`Self::as_wire`] share that contract
+/// so signed hashes stay stable across the typed refactor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PodEventType {
     PodCreated,
+    /// Local-only creation of a private Pod Package (not federated).
+    PrivatePodPackageCreated,
     PodPublished,
     PodSkillPackUpdated,
     PodPackageImported,
@@ -116,14 +126,39 @@ pub(crate) enum FederatedPodEventType {
     ContentItemPlaced,
     ContentItemMetadataUpdated,
     PlacementTombstoned,
+    /// Pre-release removal event; wire name stays `link_removed`.
+    #[serde(rename = "link_removed")]
     LegacyLinkRemoved,
+    /// Pre-release submission event; wire name stays `link_submitted`. Local-only.
+    #[serde(rename = "link_submitted")]
     LegacyLinkSubmitted,
 }
 
-impl FederatedPodEventType {
-    pub(crate) fn from_wire(value: &str) -> Option<Self> {
+impl PodEventType {
+    /// Stable wire / signature string for this event kind.
+    #[must_use]
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::PodCreated => "pod_created",
+            Self::PrivatePodPackageCreated => "private_pod_package_created",
+            Self::PodPublished => "pod_published",
+            Self::PodSkillPackUpdated => "pod_skill_pack_updated",
+            Self::PodPackageImported => "pod_package_imported",
+            Self::PodPackageForked => "pod_package_forked",
+            Self::ContentItemPlaced => "content_item_placed",
+            Self::ContentItemMetadataUpdated => "content_item_metadata_updated",
+            Self::PlacementTombstoned => "placement_tombstoned",
+            Self::LegacyLinkRemoved => "link_removed",
+            Self::LegacyLinkSubmitted => "link_submitted",
+        }
+    }
+
+    /// Parse a wire string into a known event kind.
+    #[must_use]
+    pub fn from_wire(value: &str) -> Option<Self> {
         match value {
             "pod_created" => Some(Self::PodCreated),
+            "private_pod_package_created" => Some(Self::PrivatePodPackageCreated),
             "pod_published" => Some(Self::PodPublished),
             "pod_skill_pack_updated" => Some(Self::PodSkillPackUpdated),
             "pod_package_imported" => Some(Self::PodPackageImported),
@@ -137,22 +172,9 @@ impl FederatedPodEventType {
         }
     }
 
-    pub(crate) const fn as_wire(self) -> &'static str {
-        match self {
-            Self::PodCreated => "pod_created",
-            Self::PodPublished => "pod_published",
-            Self::PodSkillPackUpdated => "pod_skill_pack_updated",
-            Self::PodPackageImported => "pod_package_imported",
-            Self::PodPackageForked => "pod_package_forked",
-            Self::ContentItemPlaced => "content_item_placed",
-            Self::ContentItemMetadataUpdated => "content_item_metadata_updated",
-            Self::PlacementTombstoned => "placement_tombstoned",
-            Self::LegacyLinkRemoved => "link_removed",
-            Self::LegacyLinkSubmitted => "link_submitted",
-        }
-    }
-
-    pub(crate) const fn is_federated(self) -> bool {
+    /// Whether this kind is eligible for the public Pod federation stream.
+    #[must_use]
+    pub const fn is_federated(self) -> bool {
         match self {
             Self::PodCreated
             | Self::PodPublished
@@ -163,8 +185,51 @@ impl FederatedPodEventType {
             | Self::ContentItemMetadataUpdated
             | Self::PlacementTombstoned
             | Self::LegacyLinkRemoved => true,
-            Self::LegacyLinkSubmitted => false,
+            Self::PrivatePodPackageCreated | Self::LegacyLinkSubmitted => false,
         }
+    }
+
+    /// Whether a subscription import should project this event into local state.
+    #[must_use]
+    pub const fn is_subscription_projection(self) -> bool {
+        matches!(
+            self,
+            Self::PodCreated
+                | Self::PodPublished
+                | Self::PodSkillPackUpdated
+                | Self::PodPackageImported
+                | Self::PodPackageForked
+                | Self::ContentItemPlaced
+                | Self::ContentItemMetadataUpdated
+                | Self::PlacementTombstoned
+        )
+    }
+
+    /// Whether this kind participates in portable package export history.
+    #[must_use]
+    pub const fn is_portable_package(self) -> bool {
+        matches!(
+            self,
+            Self::PodCreated
+                | Self::PrivatePodPackageCreated
+                | Self::PodSkillPackUpdated
+                | Self::PodPackageImported
+                | Self::PodPackageForked
+        )
+    }
+}
+
+impl std::fmt::Display for PodEventType {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_wire())
+    }
+}
+
+impl std::str::FromStr for PodEventType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::from_wire(value).ok_or_else(|| format!("unknown pod event type: {value}"))
     }
 }
 
@@ -172,7 +237,7 @@ impl FederatedPodEventType {
 pub struct EventLog {
     pub event_id: Uuid,
     pub tenant_id: Option<TenantId>,
-    pub event_type: String,
+    pub event_type: PodEventType,
     pub pod_slug: String,
     pub author_node_id: NodeIdentityId,
     pub author_display_name: Option<String>,
