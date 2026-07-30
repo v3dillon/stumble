@@ -53,7 +53,9 @@ Pods can vouch for each other: `stumble pod endorse <slug> --from <your-pod> --r
 
 ```bash
 sudo ./scripts/deploy-bootstrap-vps.sh bootstrap.example.com
-``` Point your own node at an Index with `stumble sync discovery index add --label <name> --base-url <url>` — explore then fans explicit queries out to it and still ranks everything locally.
+```
+
+Point your own node at an Index with `stumble sync discovery index add --label <name> --base-url <url>` — explore then fans explicit queries out to it and still ranks everything locally.
 
 ### The morning brief
 
@@ -61,7 +63,7 @@ Stumble plans, your harness browses, you wake up to a shortlist. A daily Persona
 
 ### Onboard a friend
 
-[`ONBOARDING.md`](ONBOARDING.md) is a paste-able script for a friend's AI harness: it installs Stumble, connects to your Bootstrap, has them log into X in the harness browser, learns their taste from "send me something cool," runs their first discovery scroll, and offers their first Pod. Fill in your Bootstrap URL at the top and send them the file (or a raw GitHub link to your fork).
+[`llms.txt`](llms.txt) is a paste-able onboarding script for a friend's AI harness: it installs Stumble, connects to your Bootstrap, has them log into X in the harness browser, learns their taste from "send me something cool," runs their first discovery scroll, and offers their first Pod. Fill in your Bootstrap URL at the top and send them the file (or a raw GitHub link to your fork).
 
 ### Use it from an AI harness
 
