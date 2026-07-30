@@ -1,6 +1,6 @@
 ---
 name: stumble
-description: Save links into the user's Stumble feed, read the feed back, and run discovery for them. Use when the user shares a URL worth keeping ("add this to stumble", "save this"), pastes a bare link with little or no comment, asks for their feed ("what's in my stumble", "drip", "anything new"), wants a morning brief or new content found ("go find me stuff", "scroll X for me"), or wants to curate or share Pods. Runs the local stumble CLI; browsing stays in this harness's own browser tools.
+description: Save links into the user's Stumble feed, read the feed back, and run discovery for them. Use when the user shares a URL worth keeping ("add this to stumble", "save this"), pastes a bare link with little or no comment, asks for their feed ("what's in my stumble", "drip", "anything new"), wants one thing on demand ("stumble", "stumble me", "hit the button"), wants a morning brief or new content found ("go find me stuff", "scroll X for me"), or wants to curate or share Pods. Runs the local stumble CLI; browsing stays in this harness's own browser tools.
 ---
 
 # Stumble
@@ -20,6 +20,28 @@ Errors are JSON on stderr. Add `--help` at any level for the full surface.
 stumble node show   # errors with node_not_initialized if there is no Home Node
 stumble node init   # one-time setup; add --demo only for throwaway fixture data
 ```
+
+## The button
+
+Bare `stumble` is the StumbleUpon button: every press shows **one** new item —
+link, summary, cover — and never repeats until the pool runs dry.
+
+```bash
+stumble                 # human press: renders a text card
+stumble --format json   # harness press: same envelope as every other command
+```
+
+A press walks the current Feed Batch one unseen item at a time, completes the
+batch when it is fully walked, and rolls into a fresh one. When the local Feed
+is caught up it falls back to the network: a clearly labeled, Origin-signed
+sample from an unsubscribed public Pod (`kind: "network_sample"`, with the
+subscribe URL in `hints`). Nothing new anywhere returns `kind: "caught_up"`
+with next steps.
+
+Use the press when the user wants *one* thing ("stumble", "hit me", "show me
+something"); use `feed batch get` below when they want to browse the batch.
+Presses record delivery only — reactions still go through
+`stumble feed feedback record`, so relay them as usual.
 
 ## Saving a link (the main loop)
 
@@ -71,20 +93,38 @@ and reference-first image URLs pointing at the original source. Every node
 decides its own visuals; a user who wants no generated imagery simply never
 gets any.
 
-**Link-rot resilience — images survive the source.** Follow this ladder:
+**Archive the text.** While the page is still open, extract its readable
+content — the article text as Markdown, without ads or chrome — save it to a
+file, and attach it as the item's snapshot:
+
+```bash
+stumble add "<url>" --title "..." --summary "..." --snapshot /tmp/page.md
+```
+
+The snapshot is what keeps the page readable after the link dies. Like all
+asset bytes it is strictly local: it never federates and never appears in any
+shared surface — it is the user's private on-device archive. Use
+`--snapshot-source user-provided` when the user pasted the text themselves
+(there is deliberately no ai-generated snapshot source: a snapshot records
+what the page said, never a retelling).
+
+**Link-rot resilience — the content survives the source.** Follow this ladder:
 
 1. *At save time*, alongside `--image` references, download the best page
    image with your browser and store a local backup:
    `--cover <file> --cover-source page-image` (or later:
-   `stumble pod content cover <pod> <item_id> --file <f> --source page-image`).
-   That copy is the user's private archive; it is never served to others.
+   `stumble pod content cover <pod> <item_id> --file <f> --source page-image`),
+   and archive the readable text with `--snapshot <file>` (or later:
+   `stumble pod content snapshot <pod> <item_id> --file <f>`).
+   Those copies are the user's private archive; they are never served to others.
 2. *When presenting an item* (yours or subscribed), try its
    `media_references` first — fetch from the original source, and if it's a
-   subscribed item worth keeping, store your own backup as in step 1 while
+   subscribed item worth keeping, store your own backups as in step 1 while
    the source is still alive.
-3. *If the source is gone* — and only if the user wants imagery at all —
-   generate a depiction from the federated summary with your own image
-   generation and attach it locally:
+3. *If the source is gone*, present from the archived snapshot — its path is
+   listed in the item's assets. Re-attaching a snapshot replaces the old copy
+   in place. For imagery only — and only if the user wants imagery at all —
+   generate a depiction from the federated summary and attach it locally:
    `stumble pod content cover <pod> <item_id> --file <generated> --alt "..."`.
    Present it clearly as a generated depiction, not the original media.
 

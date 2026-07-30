@@ -10,10 +10,10 @@ Install [Rust](https://rustup.rs), clone this repository, then run:
 cargo install --path crates/stumble-cli --locked
 stumble node init
 stumble add "https://example.com/something-worth-keeping"
-stumble feed batch get
+stumble
 ```
 
-That is the whole loop: initialize once, add links as you find them, read your Feed when you want it. `stumble add` creates a private `saved` Pod on first use, places the link in it, and makes it Feed-eligible in one step.
+That is the whole loop: initialize once, add links as you find them, and press `stumble` when you want something. Every bare press shows one new item — link, summary, cover — from your Feed, rolling into a fresh batch when the current one is walked; when your Feed is caught up it reaches out to the network for a clearly labeled sample from an unsubscribed public Pod. `stumble add` creates a private `saved` Pod on first use, places the link in it, and makes it Feed-eligible in one step. (`stumble feed batch get` reads the Feed as a batch instead of one press at a time.)
 
 Stumble stores its Home Node under `~/.stumble/nodes/home` by default. Set `STUMBLE_DATA_DIR` or pass `--data-dir` to use another directory. `stumble node init` also records the local Owner credential in the operating system's credential store; later local commands detect its presence automatically. Pass `--demo` to `node init` for throwaway fixture data.
 
@@ -80,7 +80,8 @@ Your harness then knows the loop: open a shared link, understand it, `stumble ad
 
 | Command | Description |
 | --- | --- |
-| `stumble add <url>` | Add a link to a Pod and your Feed in one step (`--pod`, `--title`, `--summary`, `--tag`, `--note`, `--image`, `--cover`). |
+| `stumble` | Press the button: one new item per press — from your Feed, or from the network when caught up. Prints a text card; `--format json` for harnesses. |
+| `stumble add <url>` | Add a link to a Pod and your Feed in one step (`--pod`, `--title`, `--summary`, `--tag`, `--note`, `--image`, `--cover`, `--snapshot`). |
 
 The rest of the CLI is JSON-first and organized into five workflow families. Add `--help` at any command level for arguments and defaults.
 
@@ -126,6 +127,7 @@ Find, subscribe to, curate, and govern Pods.
 | `stumble pod content add` | Add content to a Pod. |
 | `stumble pod content remove` | Remove content from a Pod. |
 | `stumble pod content cover` | Store a local image as an item's cover (`--file`, `--source`, `--alt`). |
+| `stumble pod content snapshot` | Archive a reader-mode text copy of an item's page (`--file`, `--source`). |
 | `stumble pod policy show` | Show the Pod curation policy. |
 | `stumble pod policy set` | Set the Pod curation policy. |
 | `stumble pod package show` | Show a Pod Package. |

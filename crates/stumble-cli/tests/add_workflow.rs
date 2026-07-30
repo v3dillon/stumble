@@ -164,3 +164,62 @@ fn add_stores_page_images_and_a_generated_cover() {
     ]);
     assert_eq!(shown["assets"].as_array().unwrap().len(), 2);
 }
+
+#[test]
+fn add_archives_a_readable_snapshot_and_replaces_it_in_place() {
+    let environment = Environment::new();
+    let snapshot = environment.root.join("attention.md");
+    fs::write(&snapshot, "# On Attention\n\nThe full readable text.").unwrap();
+
+    let added = environment.run(&[
+        "add",
+        "https://example.com/essays/attention",
+        "--title",
+        "On Attention",
+        "--snapshot",
+        snapshot.to_str().unwrap(),
+    ]);
+    let assets = added["assets"].as_array().unwrap();
+    assert_eq!(assets.len(), 1);
+    assert_eq!(assets[0]["asset_type"], "readable_snapshot");
+    assert_eq!(assets[0]["source"], "page_text");
+    assert_eq!(assets[0]["mime_type"], "text/markdown");
+    let stored = assets[0]["local_path"].as_str().unwrap();
+    assert!(stored.contains("/media/"), "{stored}");
+    assert!(stored.ends_with("snapshot.md"), "{stored}");
+    assert_eq!(
+        fs::read_to_string(stored).unwrap(),
+        "# On Attention\n\nThe full readable text."
+    );
+
+    // Re-archiving replaces the one snapshot instead of stacking assets,
+    // even when the replacement arrives under a different extension.
+    let revised = environment.root.join("attention.txt");
+    fs::write(&revised, "The revised readable text.").unwrap();
+    let item_id = added["content_item"]["id"].as_str().unwrap();
+    let replaced = environment.run(&[
+        "pod",
+        "content",
+        "snapshot",
+        "saved",
+        item_id,
+        "--file",
+        revised.to_str().unwrap(),
+        "--source",
+        "user-provided",
+    ]);
+    assert_eq!(replaced["asset_type"], "readable_snapshot");
+    assert_eq!(replaced["source"], "user_provided");
+    assert_eq!(replaced["mime_type"], "text/plain");
+    let replaced_path = replaced["local_path"].as_str().unwrap();
+    assert!(replaced_path.ends_with("snapshot.txt"), "{replaced_path}");
+    assert_eq!(
+        fs::read_to_string(replaced_path).unwrap(),
+        "The revised readable text."
+    );
+    assert!(!PathBuf::from(stored).exists(), "stale {stored} lingers");
+
+    let shown = environment.run(&["pod", "content", "show", "saved", item_id]);
+    let shown_assets = shown["assets"].as_array().unwrap();
+    assert_eq!(shown_assets.len(), 1, "{shown_assets:?}");
+}

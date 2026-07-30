@@ -419,33 +419,7 @@ impl AgentTools {
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
-        let submission = store
-            .submissions
-            .get(&submission_id)
-            .ok_or_else(|| StoreError::NotFound("submission".to_string()))?;
-        store.assert_tenant(submission.tenant_id, ctx.tenant_id)?;
-        for pod_id in store
-            .submission_pods
-            .iter()
-            .filter(|placement| placement.submission_id == submission_id)
-            .map(|placement| placement.pod_id)
-        {
-            authorize_harness_pod_scope(&store, ctx, pod_id)?;
-        }
-        let pod_ids = store
-            .submission_pods
-            .iter()
-            .filter(|placement| placement.submission_id == submission_id)
-            .map(|placement| placement.pod_id)
-            .collect::<Vec<_>>();
-        for pod_id in &pod_ids {
-            authorize_harness(
-                &store,
-                ctx,
-                HarnessCapability::CandidateSubmission,
-                Some(*pod_id),
-            )?;
-        }
+        Self::authorize_submission_asset_write(&store, ctx, submission_id)?;
         if request.url.is_none() && request.local_path.is_none() {
             return Err(StoreError::Validation(
                 "representative image requires url or local_path".to_string(),
@@ -482,6 +456,101 @@ impl AgentTools {
         );
         self.persist_locked(&mut store)?;
         Ok(asset)
+    }
+
+    /// Archives or replaces the one Readable Snapshot kept for a Content
+    /// Reference. Snapshots are strictly local: never federated, never in a
+    /// Pod Package, never served by any endpoint (ADR-0052).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the submission is missing, the tenant does not
+    /// match, harness authorization is denied, or persistence fails.
+    pub fn add_readable_snapshot(
+        &self,
+        ctx: &AuthContext,
+        submission_id: SubmissionId,
+        request: ReadableSnapshotRequest,
+    ) -> Result<SubmissionAsset, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let submission = store
+            .submissions
+            .get(&submission_id)
+            .ok_or_else(|| StoreError::NotFound("submission".to_string()))?;
+        store.assert_tenant(submission.tenant_id, ctx.tenant_id)?;
+        Self::authorize_submission_asset_write(&store, ctx, submission_id)?;
+        let existing_id = store.submission_assets.iter().find_map(|(id, asset)| {
+            (asset.submission_id == submission_id
+                && asset.asset_type == SubmissionAssetType::ReadableSnapshot)
+                .then_some(*id)
+        });
+        let asset = match existing_id {
+            Some(id) => {
+                let asset = store
+                    .submission_assets
+                    .get_mut(&id)
+                    .expect("asset id was just found in the map");
+                asset.source = request.source.into();
+                asset.local_path = Some(request.local_path);
+                asset.mime_type = request.mime_type;
+                asset.created_at = Utc::now();
+                asset.clone()
+            }
+            None => {
+                let asset = SubmissionAsset {
+                    id: Uuid::now_v7(),
+                    tenant_id: ctx.tenant_id,
+                    submission_id,
+                    asset_type: SubmissionAssetType::ReadableSnapshot,
+                    source: request.source.into(),
+                    url: None,
+                    local_path: Some(request.local_path),
+                    mime_type: request.mime_type,
+                    alt_text: None,
+                    created_at: Utc::now(),
+                };
+                store.submission_assets.insert(asset.id, asset.clone());
+                asset
+            }
+        };
+        record_harness_write(
+            &mut store,
+            ctx,
+            HarnessWriteOperation::AddSubmissionAsset,
+            None,
+        );
+        self.persist_locked(&mut store)?;
+        Ok(asset)
+    }
+
+    /// Requires harness Pod scope and Candidate Submission capability for
+    /// every Pod the submission is placed in.
+    fn authorize_submission_asset_write(
+        store: &InMemoryStore,
+        ctx: &AuthContext,
+        submission_id: SubmissionId,
+    ) -> Result<(), AgentToolsError> {
+        let pod_ids = store
+            .submission_pods
+            .iter()
+            .filter(|placement| placement.submission_id == submission_id)
+            .map(|placement| placement.pod_id)
+            .collect::<Vec<_>>();
+        for pod_id in &pod_ids {
+            authorize_harness_pod_scope(store, ctx, *pod_id)?;
+        }
+        for pod_id in &pod_ids {
+            authorize_harness(
+                store,
+                ctx,
+                HarnessCapability::CandidateSubmission,
+                Some(*pod_id),
+            )?;
+        }
+        Ok(())
     }
 
     pub fn assets_for_submission(

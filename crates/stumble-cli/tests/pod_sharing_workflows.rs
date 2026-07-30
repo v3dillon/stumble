@@ -84,6 +84,8 @@ async fn publish_share_subscribe_and_origin_resync_deliver_the_package_and_conte
     ]);
     let alice_cover = alice.root.join("generated-cover.png");
     fs::write(&alice_cover, b"alice-generated-cover").unwrap();
+    let alice_snapshot = alice.root.join("rust-essay.md");
+    fs::write(&alice_snapshot, "# A Rust essay\n\nOwnership, in full.").unwrap();
     let added = alice.run(&[
         "add",
         "https://example.com/rust-essay",
@@ -97,6 +99,8 @@ async fn publish_share_subscribe_and_origin_resync_deliver_the_package_and_conte
         "rust",
         "--cover",
         alice_cover.to_str().unwrap(),
+        "--snapshot",
+        alice_snapshot.to_str().unwrap(),
     ]);
     let essay_item_id = added["content_item"]["id"].as_str().unwrap().to_string();
 
@@ -206,6 +210,30 @@ async fn publish_share_subscribe_and_origin_resync_deliver_the_package_and_conte
                 .to_string()
         })
         .unwrap_or_else(|| panic!("essay in {bob_items}"));
+    // Alice's archived cover and snapshot never federate: Bob's projected
+    // copy of the item arrives with no local assets at all.
+    let bob_shown = bob.run(&["pod", "content", "show", "rust-craft", &bob_item_id]);
+    assert_eq!(bob_shown["assets"].as_array().unwrap().len(), 0);
+
+    // While the source is alive, Bob archives his own private snapshot.
+    let bob_snapshot = bob.root.join("bob-archive.md");
+    fs::write(&bob_snapshot, "# A Rust essay\n\nBob's own archive.").unwrap();
+    let bob_snapshot_asset = bob.run(&[
+        "pod",
+        "content",
+        "snapshot",
+        "rust-craft",
+        &bob_item_id,
+        "--file",
+        bob_snapshot.to_str().unwrap(),
+    ]);
+    assert_eq!(bob_snapshot_asset["asset_type"], "readable_snapshot");
+    assert_eq!(bob_snapshot_asset["source"], "page_text");
+    assert_eq!(
+        fs::read_to_string(bob_snapshot_asset["local_path"].as_str().unwrap()).unwrap(),
+        "# A Rust essay\n\nBob's own archive."
+    );
+
     let bob_cover = bob.root.join("bob-generated.png");
     fs::write(&bob_cover, b"bob-depiction").unwrap();
     let bob_asset = bob.run(&[

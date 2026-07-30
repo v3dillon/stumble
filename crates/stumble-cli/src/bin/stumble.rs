@@ -20,12 +20,16 @@ use stumble_core::{
 mod discover_workflow;
 #[path = "stumble/feed.rs"]
 mod feed_workflow;
+#[path = "stumble/media.rs"]
+mod media_workflow;
 #[path = "stumble/node.rs"]
 mod node_workflow;
 #[path = "stumble/parser.rs"]
 mod parser;
 #[path = "stumble/pod.rs"]
 mod pod_workflow;
+#[path = "stumble/press.rs"]
+mod press_workflow;
 #[path = "stumble/sync.rs"]
 mod sync_workflow;
 use parser::{Cli, Workflow};
@@ -47,161 +51,79 @@ fn main() -> ExitCode {
         }
     };
 
-    let format = cli.format;
+    let pressed = cli.workflow.is_none();
+    let format = cli
+        .format
+        .unwrap_or_else(|| if pressed { "text" } else { "json" }.to_string());
     let data_dir = match selected_data_dir(cli.data_dir.as_deref()) {
         Ok(data_dir) => data_dir,
         Err(error) => return fail(error, ExitStatusCategory::Internal),
     };
     let owner_authority = owner_authority_store();
     match dispatch(cli.workflow, &data_dir, owner_authority.as_ref()) {
+        Ok(data) if pressed && format == "text" => {
+            print!("{}", press_workflow::render_card(&data));
+            ExitCode::SUCCESS
+        }
         Ok(data) => succeed(data, &format),
         Err((error, category)) => fail(error, category),
     }
 }
 
 fn dispatch(
-    workflow: Workflow,
+    workflow: Option<Workflow>,
     selected_data_dir: &Path,
     owner_authority: &dyn OwnerAuthorityStore,
 ) -> CliResult {
     match workflow {
-        Workflow::Add(args) => {
+        None => {
+            let (data_dir, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
+            press_workflow::execute(&data_dir, &tools, &actor)
+        }
+        Some(Workflow::Add(args)) => {
             let (data_dir, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
             let added = tools
                 .add_reference(
                     &actor,
                     stumble_core::AddReferenceRequest {
-                        url: args.url,
-                        pod: args.pod,
+                        url: args.url.clone(),
+                        pod: args.pod.clone(),
                         title: args.title.clone(),
-                        summary: args.summary,
-                        excerpt: args.excerpt,
-                        tags: args.tags,
-                        note: args.note,
+                        summary: args.summary.clone(),
+                        excerpt: args.excerpt.clone(),
+                        tags: args.tags.clone(),
+                        note: args.note.clone(),
                         images: args.images.clone(),
                     },
                     chrono::Utc::now(),
                 )
                 .map_err(agent_tools_error)?;
-            let assets = attach_cover_assets(
-                &tools,
-                &actor,
-                &data_dir,
-                &added,
-                &args.images,
-                args.cover.as_deref(),
-                args.cover_source,
-                args.title.as_deref(),
-            )?;
+            let assets =
+                media_workflow::attach_add_assets(&tools, &actor, &data_dir, &added, &args)?;
             let mut result = serde_json::to_value(added).map_err(internal_error)?;
             result["assets"] = serde_json::to_value(assets).map_err(internal_error)?;
             Ok(result)
         }
-        Workflow::Node { command } => {
+        Some(Workflow::Node { command }) => {
             node_workflow::execute(command, selected_data_dir, owner_authority)
         }
-        Workflow::Pod { command } => {
+        Some(Workflow::Pod { command }) => {
             let (_, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
             pod_workflow::execute(command, &tools, &actor)
         }
-        Workflow::Discover { command } => {
+        Some(Workflow::Discover { command }) => {
             let (_, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
             discover_workflow::execute(command, &tools, &actor)
         }
-        Workflow::Feed { command } => {
+        Some(Workflow::Feed { command }) => {
             let (_, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
             feed_workflow::execute(command, &tools, &actor)
         }
-        Workflow::Sync { command } => {
+        Some(Workflow::Sync { command }) => {
             let (_, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
             sync_workflow::execute(command, &tools, &actor)
         }
     }
-}
-
-/// Records cover assets for a freshly added reference: the first page image
-/// becomes a reference-only cover, and a local file (typically a generated
-/// cover) is copied under the node's media directory so it survives temp
-/// cleanup. Both stay local — assets never federate.
-#[allow(clippy::too_many_arguments)]
-fn attach_cover_assets(
-    tools: &AgentTools,
-    actor: &AuthContext,
-    data_dir: &Path,
-    added: &stumble_core::AddedReference,
-    images: &[String],
-    cover: Option<&Path>,
-    cover_source: parser::CoverSource,
-    alt_text: Option<&str>,
-) -> Result<Vec<stumble_core::SubmissionAsset>, (ErrorBody, ExitStatusCategory)> {
-    let submission_id = stumble_core::SubmissionId::from(added.content_item.id());
-    let mut assets = Vec::new();
-    if let Some(url) = images.first() {
-        assets.push(
-            tools
-                .add_submission_asset(
-                    actor,
-                    submission_id,
-                    stumble_core::RepresentativeImageRequest {
-                        source: stumble_core::SubmissionAssetSource::PageImage,
-                        url: Some(url.clone()),
-                        local_path: None,
-                        mime_type: None,
-                        alt_text: alt_text.map(str::to_string),
-                    },
-                )
-                .map_err(agent_tools_error)?,
-        );
-    }
-    if let Some(cover) = cover {
-        let extension = cover
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("png")
-            .to_lowercase();
-        let mime_type = match extension.as_str() {
-            "jpg" | "jpeg" => "image/jpeg",
-            "webp" => "image/webp",
-            "gif" => "image/gif",
-            "svg" => "image/svg+xml",
-            _ => "image/png",
-        };
-        let media_dir = data_dir
-            .join("media")
-            .join(added.content_item.id().to_string());
-        std::fs::create_dir_all(&media_dir).map_err(internal_error)?;
-        let stored = media_dir.join(format!("cover.{extension}"));
-        std::fs::copy(cover, &stored).map_err(|error| {
-            (
-                ErrorBody::new(
-                    "invalid_cover",
-                    format!("could not store cover {}: {error}", cover.display()),
-                ),
-                ExitStatusCategory::ValidationOrConflict,
-            )
-        })?;
-        let source = match cover_source {
-            parser::CoverSource::AiGenerated => stumble_core::SubmissionAssetSource::AiGenerated,
-            parser::CoverSource::PageImage => stumble_core::SubmissionAssetSource::PageImage,
-            parser::CoverSource::UserProvided => stumble_core::SubmissionAssetSource::UserProvided,
-        };
-        assets.push(
-            tools
-                .add_submission_asset(
-                    actor,
-                    submission_id,
-                    stumble_core::RepresentativeImageRequest {
-                        source,
-                        url: None,
-                        local_path: Some(stored.display().to_string()),
-                        mime_type: Some(mime_type.to_string()),
-                        alt_text: alt_text.map(str::to_string),
-                    },
-                )
-                .map_err(agent_tools_error)?,
-        );
-    }
-    Ok(assets)
 }
 
 fn open_home_node(

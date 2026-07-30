@@ -8,16 +8,18 @@ use stumble_core::{
 #[derive(Parser)]
 #[command(
     name = "stumble",
-    about = "Operate a local Stumble Home Node",
+    about = "Operate a local Stumble Home Node. Bare `stumble` is the button: \
+             one new item from your Feed, or from the network when caught up.",
     disable_help_subcommand = true
 )]
 pub(super) struct Cli {
-    #[arg(long, global = true, default_value = "json", value_parser = ["json", "text"])]
-    pub(super) format: String,
+    /// Output format; the bare button defaults to text, every command to json
+    #[arg(long, global = true, value_parser = ["json", "text"])]
+    pub(super) format: Option<String>,
     #[arg(long, global = true, env = "STUMBLE_DATA_DIR", value_hint = ValueHint::DirPath)]
     pub(super) data_dir: Option<PathBuf>,
     #[command(subcommand)]
-    pub(super) workflow: Workflow,
+    pub(super) workflow: Option<Workflow>,
 }
 
 #[derive(Subcommand)]
@@ -166,6 +168,8 @@ pub(super) enum ContentWorkflow {
     Remove(ContentRemoveArgs),
     /// Store a local image file as this item's cover (backup or generated)
     Cover(ContentCoverArgs),
+    /// Archive a local reader-mode text file as this item's snapshot
+    Snapshot(ContentSnapshotArgs),
 }
 
 #[derive(Args)]
@@ -181,6 +185,18 @@ pub(super) struct ContentCoverArgs {
     /// Short description of the image
     #[arg(long)]
     pub(super) alt: Option<String>,
+}
+
+#[derive(Args)]
+pub(super) struct ContentSnapshotArgs {
+    pub(super) pod: String,
+    pub(super) content_item_id: String,
+    /// Local readable text file (Markdown, plain text, or HTML) to archive
+    #[arg(long, value_hint = ValueHint::FilePath)]
+    pub(super) file: PathBuf,
+    /// Where the snapshot text came from
+    #[arg(long, value_enum, default_value_t = SnapshotSource::PageText)]
+    pub(super) source: SnapshotSource,
 }
 
 #[derive(Subcommand)]
@@ -478,12 +494,26 @@ pub(super) struct AddArgs {
     /// Where the cover file came from
     #[arg(long, value_enum, default_value_t = CoverSource::AiGenerated, requires = "cover")]
     pub(super) cover_source: CoverSource,
+    /// Local reader-mode text file to archive as this page's snapshot
+    #[arg(long, value_hint = ValueHint::FilePath)]
+    pub(super) snapshot: Option<PathBuf>,
+    /// Where the snapshot text came from
+    #[arg(long, value_enum, default_value_t = SnapshotSource::PageText, requires = "snapshot")]
+    pub(super) snapshot_source: SnapshotSource,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
 pub(super) enum CoverSource {
     AiGenerated,
     PageImage,
+    UserProvided,
+}
+
+/// A snapshot is an archive of what the page said — never AI-generated
+/// (ADR-0052), so only honest archive sources are offered.
+#[derive(Clone, Copy, ValueEnum)]
+pub(super) enum SnapshotSource {
+    PageText,
     UserProvided,
 }
 

@@ -1515,12 +1515,15 @@ pub struct FeedBatch {
 #[serde(rename_all = "snake_case")]
 pub enum SubmissionAssetType {
     RepresentativeImage,
+    /// Reader-mode text copy of the source page, strictly local (ADR-0052).
+    ReadableSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubmissionAssetSource {
     PageImage,
+    PageText,
     AiGenerated,
     UserProvided,
 }
@@ -6808,6 +6811,31 @@ pub struct RepresentativeImageRequest {
     pub local_path: Option<String>,
     pub mime_type: Option<String>,
     pub alt_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadableSnapshotRequest {
+    pub source: ReadableSnapshotSource,
+    pub local_path: String,
+    pub mime_type: Option<String>,
+}
+
+/// Origin of a Readable Snapshot's text. A snapshot is an archive of what
+/// the page said, so an AI-generated source does not exist here (ADR-0052).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadableSnapshotSource {
+    PageText,
+    UserProvided,
+}
+
+impl From<ReadableSnapshotSource> for SubmissionAssetSource {
+    fn from(source: ReadableSnapshotSource) -> Self {
+        match source {
+            ReadableSnapshotSource::PageText => Self::PageText,
+            ReadableSnapshotSource::UserProvided => Self::UserProvided,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
