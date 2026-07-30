@@ -417,6 +417,51 @@ pub(crate) fn validate_structured_diff(
     Ok(())
 }
 
+/// Expands a Pod's visibility, signing the `pod_published` federation event
+/// when it becomes public. Shared by proposal approval and direct Owner action.
+pub(crate) fn apply_expand_pod_visibility(
+    store: &mut InMemoryStore,
+    ctx: &AuthContext,
+    pod_id: &PodId,
+    visibility: &Visibility,
+) -> Result<(), AgentToolsError> {
+    let tenant_id = store
+        .pods
+        .get(pod_id)
+        .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?
+        .tenant_id;
+    store.assert_tenant(tenant_id, ctx.tenant_id)?;
+    let pod = store
+        .pods
+        .get_mut(pod_id)
+        .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+    if visibility_exposure(visibility) <= visibility_exposure(&pod.visibility) {
+        return Err(StoreError::Validation("approved visibility must expand exposure".into()).into());
+    }
+    pod.visibility = visibility.clone();
+    let pod = pod.clone();
+    if let Some(rules) = store.pod_rules.get_mut(pod_id) {
+        rules.federate_sources = *visibility == Visibility::Public;
+    }
+    if *visibility == Visibility::Public {
+        let node = store.node_for_tenant(ctx.tenant_id)?;
+        let package = store
+            .pod_skill_packs
+            .get(pod_id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("Pod Package".to_string()))?;
+        let event = sign_public_event(
+            &node,
+            "pod_published",
+            &pod.slug,
+            json!({"pod": pod, "package": package}),
+            store.latest_event_hash(&pod.slug),
+        )?;
+        store.event_log.push(event);
+    }
+    Ok(())
+}
+
 pub(crate) fn apply_sensitive_change(
     store: &mut InMemoryStore,
     ctx: &AuthContext,
@@ -480,43 +525,7 @@ pub(crate) fn apply_sensitive_change(
             store.event_log.push(event);
         }
         SensitiveChange::ExpandPodVisibility { pod_id, visibility } => {
-            let tenant_id = store
-                .pods
-                .get(pod_id)
-                .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?
-                .tenant_id;
-            store.assert_tenant(tenant_id, ctx.tenant_id)?;
-            let pod = store
-                .pods
-                .get_mut(pod_id)
-                .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
-            if visibility_exposure(visibility) <= visibility_exposure(&pod.visibility) {
-                return Err(StoreError::Validation(
-                    "approved visibility must expand exposure".into(),
-                )
-                .into());
-            }
-            pod.visibility = visibility.clone();
-            let pod = pod.clone();
-            if let Some(rules) = store.pod_rules.get_mut(pod_id) {
-                rules.federate_sources = *visibility == Visibility::Public;
-            }
-            if *visibility == Visibility::Public {
-                let node = store.node_for_tenant(ctx.tenant_id)?;
-                let package = store
-                    .pod_skill_packs
-                    .get(pod_id)
-                    .cloned()
-                    .ok_or_else(|| StoreError::NotFound("Pod Package".to_string()))?;
-                let event = sign_public_event(
-                    &node,
-                    "pod_published",
-                    &pod.slug,
-                    json!({"pod": pod, "package": package}),
-                    store.latest_event_hash(&pod.slug),
-                )?;
-                store.event_log.push(event);
-            }
+            apply_expand_pod_visibility(store, ctx, pod_id, visibility)?;
         }
         SensitiveChange::ExpandHarnessGrant {
             harness_id,

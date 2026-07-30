@@ -27,8 +27,17 @@ enum Mode {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let data_dir = args.data_dir.unwrap_or_else(|| PathBuf::from(".stumble"));
-    let tools = AgentTools::open_initialized_home_node(data_dir)?;
+    // Match the `stumble` CLI default so serving never opens a different node.
+    let data_dir = match args.data_dir {
+        Some(path) => path,
+        None => {
+            let home = std::env::var_os("HOME")
+                .ok_or_else(|| anyhow::anyhow!("HOME is not set; pass --data-dir"))?;
+            PathBuf::from(home).join(".stumble/nodes/home")
+        }
+    };
+    let tools = AgentTools::open_initialized_home_node(&data_dir)
+        .map_err(|error| anyhow::anyhow!("open Home Node at {}: {error}", data_dir.display()))?;
     let bind = bind_with_port(args.bind, args.port);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let base_url = args

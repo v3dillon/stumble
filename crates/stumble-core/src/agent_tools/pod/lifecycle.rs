@@ -99,19 +99,42 @@ impl AgentTools {
             return Err(StoreError::Validation("Pod already has that visibility".into()).into());
         }
         if visibility_exposure(&visibility) > visibility_exposure(&current) {
-            return self
-                .create_pending_proposal_from_request(
-                    ctx,
-                    CreatePendingProposalRequest {
-                        requested_change: SensitiveChange::ExpandPodVisibility {
-                            pod_id,
-                            visibility,
+            // Agent Harnesses need an independent approver (ADR-0033); the Home
+            // Node Owner acting directly is that approver, so apply immediately.
+            if ctx.harness_id.is_some() {
+                return self
+                    .create_pending_proposal_from_request(
+                        ctx,
+                        CreatePendingProposalRequest {
+                            requested_change: SensitiveChange::ExpandPodVisibility {
+                                pod_id,
+                                visibility,
+                            },
+                            expires_in_seconds: DEFAULT_PENDING_PROPOSAL_SECONDS,
                         },
-                        expires_in_seconds: DEFAULT_PENDING_PROPOSAL_SECONDS,
-                    },
-                    now,
-                )
-                .map(|proposal| PodVisibilityOutcome::PendingApproval(Box::new(proposal)));
+                        now,
+                    )
+                    .map(|proposal| PodVisibilityOutcome::PendingApproval(Box::new(proposal)));
+            }
+            let mut store = self
+                .store
+                .write()
+                .map_err(|_| AgentToolsError::LockPoisoned)?;
+            authorize_pod_role_owner(&store, ctx, pod_id)?;
+            apply_expand_pod_visibility(&mut store, ctx, &pod_id, &visibility)?;
+            record_harness_write(
+                &mut store,
+                ctx,
+                HarnessWriteOperation::CreatePod,
+                Some(pod_id),
+            );
+            self.persist_locked(&mut store)?;
+            let pod = store
+                .pods
+                .get(&pod_id)
+                .cloned()
+                .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+            return Ok(PodVisibilityOutcome::Updated(pod));
         }
         let mut store = self
             .store

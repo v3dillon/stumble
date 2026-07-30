@@ -17,6 +17,23 @@ That is the whole loop: initialize once, add links as you find them, read your F
 
 Stumble stores its Home Node under `~/.stumble/nodes/home` by default. Set `STUMBLE_DATA_DIR` or pass `--data-dir` to use another directory. `stumble node init` also records the local Owner credential in the operating system's credential store; later local commands detect its presence automatically. Pass `--demo` to `node init` for throwaway fixture data.
 
+### Share a Pod with a friend
+
+A Pod travels with its context: subscribing pulls the accepted content *and* the Pod Package (`CONTEXT.md` + `SKILL.md`), so your friend's harness immediately understands the Pod's subject and curation rules.
+
+```bash
+# You: publish and serve
+stumble pod publish rust-craft --base-url https://your-node.example
+stumble-api --bind 0.0.0.0:8787          # keep running while friends sync
+
+# Friend: subscribe by the URL you sent, read, and re-sync any time
+stumble pod subscribe https://your-node.example/federation/pods/rust-craft
+stumble feed batch get
+stumble sync pod run rust-craft          # pulls new items from your node
+```
+
+`pod publish` makes the Pod public (as the node owner you approve your own change; an agent harness gets a Pending Proposal for you to approve instead) and issues the discovery announcement when `--base-url` is given.
+
 ### Use it from an AI harness
 
 Stumble is designed to be driven by an agent harness (Claude Code, Codex, Hermes, Pi, ...). The harness owns the browser — it reads pages with your logged-in sessions — and Stumble owns the collection and the Feed. Install the [`SKILL.md`](SKILL.md) at the repository root into your harness's skills directory and it will know the loop: open a shared link, understand it, `stumble add` it, and read your Feed back on request.
@@ -56,7 +73,8 @@ Find, subscribe to, curate, and govern Pods.
 | `stumble pod show` | Show one Pod. |
 | `stumble pod create` | Create a Pod. |
 | `stumble pod explore` | Explore public Pods. |
-| `stumble pod subscribe` | Subscribe to a Pod. |
+| `stumble pod publish` | Make a Pod public and print its shareable URL. |
+| `stumble pod subscribe` | Subscribe to a local Pod by slug or a public Pod by URL. |
 | `stumble pod unsubscribe` | Unsubscribe from a Pod. |
 | `stumble pod subscription set` | Set subscription priority. |
 | `stumble pod visibility set` | Change Pod visibility. |

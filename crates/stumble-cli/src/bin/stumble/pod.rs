@@ -4,7 +4,7 @@ use super::{
 };
 use crate::parser::{
     ContentWorkflow, CreatePodArgs, PackageWorkflow, PodWorkflow, PolicyMode, PolicyWorkflow,
-    RoleChangeArgs, RoleWorkflow, SubscriptionWorkflow, VisibilityWorkflow,
+    PublishPodArgs, RoleChangeArgs, RoleWorkflow, SubscriptionWorkflow, VisibilityWorkflow,
 };
 use serde_json::json;
 use stumble_cli::{paginate, ErrorBody, ExitStatusCategory};
@@ -86,6 +86,7 @@ pub(super) fn execute(command: PodWorkflow, tools: &AgentTools, actor: &AuthCont
                 "next_cursor": results.next_cursor,
             }))
         }
+        PodWorkflow::Publish(args) => publish(&args, tools, actor),
         PodWorkflow::Subscribe(args) => subscribe(&args.pod, tools, actor),
         PodWorkflow::Unsubscribe(args) => {
             let pod = resolve_pod(tools, actor, &args.pod)?;
@@ -171,6 +172,54 @@ fn create_pod(args: CreatePodArgs, tools: &AgentTools, actor: &AuthContext) -> C
             "result": proposal,
         })),
     }
+}
+
+fn publish(args: &PublishPodArgs, tools: &AgentTools, actor: &AuthContext) -> CliResult {
+    let pod = resolve_pod(tools, actor, &args.pod)?;
+    let now = chrono::Utc::now();
+    if pod.visibility != stumble_core::Visibility::Public {
+        let outcome = tools
+            .request_set_pod_visibility(actor, pod.id, stumble_core::Visibility::Public, now)
+            .map_err(agent_tools_error)?;
+        if let stumble_core::PodVisibilityOutcome::PendingApproval(proposal) = outcome {
+            // Only Agent Harness actors reach here; the direct Owner path
+            // applies immediately. A harness cannot approve its own proposal.
+            return Ok(json!({
+                "pod_id": pod.id,
+                "slug": pod.slug,
+                "status": "pending_approval",
+                "proposal": proposal,
+                "hint": format!(
+                    "an authorized approver must run: stumble node proposal approve {}",
+                    proposal.id
+                ),
+            }));
+        }
+    }
+    let share_url = args.base_url.as_ref().map(|base| {
+        format!(
+            "{}/federation/pods/{}",
+            base.trim_end_matches('/'),
+            pod.slug
+        )
+    });
+    let announcement = share_url
+        .as_ref()
+        .map(|url| {
+            tools
+                .pod_announcement(actor, &pod.slug, url)
+                .map_err(agent_tools_error)
+        })
+        .transpose()?;
+    Ok(json!({
+        "pod_id": pod.id,
+        "slug": pod.slug,
+        "status": "published",
+        "share_url": share_url,
+        "share_url_template": "<base-url>/federation/pods/<slug>",
+        "announcement": announcement,
+        "serve_hint": "friends can subscribe once this node is reachable: stumble-api --bind <addr>",
+    }))
 }
 
 fn subscribe(reference: &str, tools: &AgentTools, actor: &AuthContext) -> CliResult {

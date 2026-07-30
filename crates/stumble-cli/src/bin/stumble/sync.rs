@@ -1,6 +1,6 @@
 use super::{
-    agent_tools_error, internal_error, page, parse_id, peer_sync_error, peer_sync_failure_code,
-    peer_sync_failure_is_retryable, resolve_pod, CliResult,
+    agent_tools_error, direct_subscription_error, internal_error, page, parse_id, peer_sync_error,
+    peer_sync_failure_code, peer_sync_failure_is_retryable, resolve_pod, CliResult,
 };
 use crate::parser::{
     BootstrapWorkflow, DiscoveryServeWorkflow, DiscoveryWorkflow, PeerWorkflow, SyncPodWorkflow,
@@ -220,6 +220,60 @@ fn execute_peer(command: PeerWorkflow, tools: &AgentTools, actor: &AuthContext) 
     }
 }
 
+fn run_origin_sync(
+    tools: &AgentTools,
+    actor: &AuthContext,
+    pod: &stumble_core::Pod,
+    subscription_id: stumble_core::SubscriptionId,
+) -> CliResult {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(internal_error)?;
+    let result = match runtime.block_on(stumble_sync::synchronize_subscription_from_origin(
+        tools,
+        actor,
+        subscription_id,
+    )) {
+        Ok(result) => result,
+        Err(error) => {
+            let retryable = !matches!(
+                error,
+                stumble_sync::DirectSubscriptionError::InvalidUrl { .. }
+                    | stumble_sync::DirectSubscriptionError::InvalidAddress(_)
+            );
+            let code = match &error {
+                stumble_sync::DirectSubscriptionError::UnknownCursor => "unknown_cursor",
+                stumble_sync::DirectSubscriptionError::Request { .. } => "origin_unreachable",
+                _ => "synchronization_failed",
+            };
+            tools
+                .record_subscription_sync_failure(
+                    actor,
+                    subscription_id,
+                    code,
+                    error.to_string(),
+                    retryable,
+                    chrono::Utc::now(),
+                )
+                .map_err(agent_tools_error)?;
+            return Err(direct_subscription_error(error));
+        }
+    };
+    Ok(json!({
+        "pod_id": pod.id,
+        "slug": pod.slug,
+        "peer_id": null,
+        "subscription_id": result.subscription.id,
+        "cursor": result.subscription.last_event_hash,
+        "verification": "verified",
+        "latest_event": result.subscription.last_event_hash,
+        "last_success": result.subscription.synchronized_at,
+        "failure": null,
+        "imported_events": result.imported_events,
+    }))
+}
+
 fn execute_pod(command: SyncPodWorkflow, tools: &AgentTools, actor: &AuthContext) -> CliResult {
     match command {
         SyncPodWorkflow::Run(args) => {
@@ -227,7 +281,10 @@ fn execute_pod(command: SyncPodWorkflow, tools: &AgentTools, actor: &AuthContext
             let subscription = tools
                 .subscription_for_pod(actor, pod.id)
                 .map_err(agent_tools_error)?;
-            let peer_id = parse_id::<PeerId>(&args.peer)?;
+            let Some(peer) = args.peer.as_deref() else {
+                return run_origin_sync(tools, actor, &pod, subscription.id);
+            };
+            let peer_id = parse_id::<PeerId>(peer)?;
             let peer = tools
                 .trusted_peer(actor, peer_id)
                 .map_err(agent_tools_error)?;

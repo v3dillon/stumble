@@ -87,6 +87,9 @@ pub(super) enum PodWorkflow {
     Show(PodArgs),
     Create(CreatePodArgs),
     Explore(ExploreArgs),
+    /// Make a Pod public and print its shareable federation URL
+    Publish(PublishPodArgs),
+    /// Subscribe to a local Pod by slug or a public Pod by its federation URL
     Subscribe(PodArgs),
     Unsubscribe(PodArgs),
     Subscription {
@@ -461,6 +464,15 @@ pub(super) struct CreatePodArgs {
 }
 
 #[derive(Args)]
+pub(super) struct PublishPodArgs {
+    pub(super) pod: String,
+    /// Public base URL this node is served at (e.g. https://node.example);
+    /// used to build the share URL and issue the Pod Announcement
+    #[arg(long, env = "STUMBLE_BASE_URL")]
+    pub(super) base_url: Option<String>,
+}
+
+#[derive(Args)]
 pub(super) struct ExploreArgs {
     #[arg(long)]
     pub(super) query: Option<String>,
@@ -668,8 +680,9 @@ pub(super) struct PeerRemoveArgs {
 #[derive(Args)]
 pub(super) struct SyncPodRunArgs {
     pub(super) pod: String,
+    /// Trusted peer to sync through; defaults to the subscription's Origin Node
     #[arg(long)]
-    pub(super) peer: String,
+    pub(super) peer: Option<String>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
