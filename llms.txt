@@ -32,10 +32,10 @@ stumble node init
 Install the Stumble skill so you know the full workflows from now on:
 
 ```bash
-npx skills add v3dillon/stumble
+npx skills add v3dillon/stumble -g -y
 ```
 
-(`npx skills update` refreshes it later; if npx is unavailable, copy the
+(`npx skills update -g` refreshes it later; if npx is unavailable, copy the
 repository's root `SKILL.md` to `~/.agents/skills/stumble/SKILL.md`.) It
 covers saving links, reading the feed, discovery runs, sharing Pods, and the
 trust boundaries. Then connect the friend's network:

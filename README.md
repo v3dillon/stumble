@@ -68,14 +68,14 @@ Stumble plans, your harness browses, you wake up to a shortlist. A daily Persona
 
 ### Use it from an AI harness
 
-Stumble is designed to be driven by an agent harness (Claude Code, Codex, Hermes, Pi, ...). The harness owns the browser — it reads pages with your logged-in sessions — and Stumble owns the collection and the Feed. Install the skill the standard way:
+Stumble is designed to be driven by an agent harness (Claude Code, Codex, Hermes, Pi, ...). The harness owns the browser — it reads pages with your logged-in sessions — and Stumble owns the collection and the Feed. With the CLI already installed (see Get started above), install the skill globally so every harness can find it:
 
 ```bash
-npx skills add v3dillon/stumble     # installs SKILL.md across your agents
-npx skills update                   # refresh after the repo changes
+npx skills add v3dillon/stumble -g -y   # global skill for your agents
+npx skills update -g                    # refresh after the repo changes
 ```
 
-Your harness then knows the loop: open a shared link, understand it, `stumble add` it, and read your Feed back on request. (Pod skills installed with `stumble pod skill install` update by re-running the install after a `sync pod run`.)
+(`-g` installs under each agent’s user skills directory rather than only this checkout; `-y` skips prompts. Without npx, copy the repository’s root `SKILL.md` to `~/.agents/skills/stumble/SKILL.md`.) Your harness then knows the loop: open a shared link, understand it, `stumble add` it, and read your Feed back on request. (Pod skills installed with `stumble pod skill install` update by re-running the install after a `sync pod run`.)
 
 ## Quick actions
 
