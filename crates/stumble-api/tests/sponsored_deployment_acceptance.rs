@@ -73,7 +73,6 @@ impl Drop for EphemeralHttpServer {
 
 struct AuthLike {
     ctx: AuthContext,
-    authorization: String,
 }
 
 fn register_harness(
@@ -98,7 +97,6 @@ fn register_harness(
             .authenticate_token(issued.token.expose())
             .unwrap()
             .unwrap(),
-        authorization: format!("Bearer {}", issued.token.expose()),
     }
 }
 
@@ -1256,7 +1254,6 @@ async fn browser_candidates_remain_in_result_batches_not_feed() {
                 .authenticate_token(issued.token.expose())
                 .unwrap()
                 .unwrap(),
-            authorization: format!("Bearer {}", issued.token.expose()),
         }
     };
     // The Personal Discovery workflow is a Harness surface (CLI/MCP); drive it

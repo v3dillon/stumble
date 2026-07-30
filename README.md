@@ -136,3 +136,17 @@ Manage trusted peers and synchronize Pod state.
 | `stumble sync peer remove` | Propose removing a trusted peer. |
 | `stumble sync pod run` | Synchronize a Pod from a peer. |
 | `stumble sync pod status` | Show Pod synchronization status. |
+| `stumble sync bootstrap list` | List configured Bootstrap endpoints. |
+| `stumble sync bootstrap status` | Report Bootstrap endpoints with cursor and failure state. |
+| `stumble sync bootstrap run` | Synchronize Announcement Streams from enabled Bootstrap endpoints. |
+| `stumble sync bootstrap add` | Add a replaceable Bootstrap endpoint. |
+| `stumble sync bootstrap enable` | Re-enable a Bootstrap endpoint. |
+| `stumble sync bootstrap disable` | Disable a Bootstrap endpoint. |
+| `stumble sync bootstrap remove` | Remove a Bootstrap endpoint. |
+| `stumble sync discovery status` | Report discovery readiness, including degraded mode. |
+| `stumble sync discovery serve show` | Show the inbound Discovery Peer serving state. |
+| `stumble sync discovery serve enable` | Enable inbound announcement serving. |
+| `stumble sync discovery serve disable` | Disable inbound announcement serving. |
+| `stumble sync discovery peers` | List the rotating outbound Discovery Peer set. |
+| `stumble sync discovery gossip` | Enable or disable automatic peer gossip. |
+| `stumble sync discovery run` | Learn Discovery Peers and synchronize their streams. |
