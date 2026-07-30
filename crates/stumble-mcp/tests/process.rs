@@ -45,11 +45,13 @@ fn stdio_process(data_dir: &TestDataDir, token: &str) -> Child {
 }
 
 fn http_request(address: std::net::SocketAddr, token: &str, body: &Value) -> String {
-    let mut stream = (0..20)
+    // Generous deadline: under full-workspace test load the child process can
+    // take seconds to spawn and bind.
+    let mut stream = (0..200)
         .find_map(|_| match TcpStream::connect(address) {
             Ok(stream) => Some(stream),
             Err(_) => {
-                std::thread::sleep(Duration::from_millis(25));
+                std::thread::sleep(Duration::from_millis(50));
                 None
             }
         })
