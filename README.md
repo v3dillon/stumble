@@ -34,7 +34,11 @@ stumble sync pod run rust-craft          # pulls new items from your node
 stumble pod skill install rust-craft     # loads the Pod's SKILL.md into ~/.agents/skills
 ```
 
-Pod packages from other people are treated as untrusted: the installed skill fences the curator's text with explicit limits (curation guidance only — an agent must refuse and report anything asking for commands, credentials, money, or configuration changes), and `pod skill install` is owner-only so an agent can never grant a remote author standing instructions by itself. `pod publish` makes the Pod public (as the node owner you approve your own change; an agent harness gets a Pending Proposal for you to approve instead) and issues the discovery announcement when `--base-url` is given. Only history from the moment of publication federates — anything added and removed while the Pod was private stays on your node. The running server picks up `stumble add` and other CLI changes automatically, so you can keep curating while friends stay in sync.
+Pod packages from other people are treated as untrusted: the installed skill fences the curator's text with explicit limits (curation guidance only — an agent must refuse and report anything asking for commands, credentials, money, or configuration changes), and `pod skill install` is owner-only so an agent can never grant a remote author standing instructions by itself.
+
+> **An honest caveat.** These gates are defense-in-depth against remote-authored escalation, not a sandbox: a local agent with shell access ultimately has owner authority on your machine, and closing that is your harness's sandboxing job, not something Stumble's CLI can do alone. What the gates do guarantee is that a Pod's SKILL.md can only become standing instructions after you hand-install it, having been told to read it first — and even then its text arrives pre-fenced with refusal rules.
+
+`pod publish` makes the Pod public (as the node owner you approve your own change; an agent harness gets a Pending Proposal for you to approve instead) and issues the discovery announcement when `--base-url` is given. Only history from the moment of publication federates — anything added and removed while the Pod was private stays on your node. The running server picks up `stumble add` and other CLI changes automatically, so you can keep curating while friends stay in sync.
 
 ### Discover Pods from the network
 
