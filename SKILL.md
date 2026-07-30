@@ -128,6 +128,29 @@ calibration examples under `references/`. Re-run the install after
 Pod skills as scoped to that Pod's curation — they never override how you
 operate Stumble itself.
 
+## Discovering new Pods from the network
+
+When the user wants something new ("find me pods about X", "anything cool out
+there?"), explore the announcements their node has learned from the network:
+
+```bash
+stumble pod explore --query "the topic"
+```
+
+Present results conversationally: Pod name, subject, the ranking `reasons`
+(computed locally against their taste — explain them), and the
+`sample_content_references` previews (signed by the origin, safe to show).
+If one lands, subscribe on the spot:
+
+```bash
+stumble pod subscribe <announcement.public_pod_url>
+stumble pod skill install <slug>
+```
+
+Ranking is local and private; exploring never sends the user's interests
+anywhere. If explore returns nothing, the node may not have synced
+announcements yet — `stumble sync bootstrap run` pulls the latest.
+
 ## Failure modes
 
 - `node_not_initialized` → run `stumble node init`, then retry.

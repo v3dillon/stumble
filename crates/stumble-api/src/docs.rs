@@ -119,6 +119,11 @@ pub(crate) fn route_docs() -> Vec<ApiRouteDoc> {
         },
         ApiRouteDoc {
             method: "POST",
+            path: "/federation/pods/:slug/explore-samples",
+            description: "bounded Origin-signed Explore samples for the exact current announcement",
+        },
+        ApiRouteDoc {
+            method: "POST",
             path: "/federation/sync/:peer_id/:pod_slug",
             description: "synchronize signed events from a trusted peer",
         },

@@ -258,3 +258,197 @@ impl IndexSearchClient for ReqwestIndexSearchClient {
         })
     }
 }
+
+/// Runs a small isolated runtime on a fresh OS thread so probes stay safe to
+/// call from both async request handlers and synchronous CLI paths.
+fn probe_on_own_thread<T: Send + 'static>(
+    work: impl std::future::Future<Output = T> + Send + 'static,
+) -> Option<T> {
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()
+            .map(|runtime| runtime.block_on(work))
+    })
+    .join()
+    .ok()
+    .flatten()
+}
+
+/// Production HTTP [`OriginProbe`]: verifies a live public manifest at the
+/// announced canonical Pod URL before Bootstrap admission.
+#[derive(Debug, Default)]
+pub struct ReqwestOriginProbe;
+
+impl OriginProbe for ReqwestOriginProbe {
+    fn probe_public_manifest(
+        &self,
+        public_pod_url: &str,
+        pod_slug: &str,
+    ) -> Result<OriginPublicManifestView, OriginProbeError> {
+        let manifest_url = format!("{}/manifest", public_pod_url.trim_end_matches('/'));
+        let node_url = public_pod_url
+            .split("/federation/pods/")
+            .next()
+            .map(|base| format!("{base}/federation/node"))
+            .ok_or(OriginProbeError::Unreachable)?;
+        let expected_slug = pod_slug.to_string();
+        probe_on_own_thread(async move {
+            let client = reqwest::Client::new();
+            let manifest: PodManifest = client
+                .get(&manifest_url)
+                .send()
+                .await
+                .map_err(|_| OriginProbeError::Unreachable)?
+                .error_for_status()
+                .map_err(|_| OriginProbeError::ManifestUnavailable)?
+                .json()
+                .await
+                .map_err(|_| OriginProbeError::ManifestUnavailable)?;
+            let node: NodeInfo = client
+                .get(&node_url)
+                .send()
+                .await
+                .map_err(|_| OriginProbeError::Unreachable)?
+                .error_for_status()
+                .map_err(|_| OriginProbeError::ManifestUnavailable)?
+                .json()
+                .await
+                .map_err(|_| OriginProbeError::ManifestUnavailable)?;
+            if manifest.pod.slug != expected_slug {
+                return Err(OriginProbeError::ManifestUnavailable);
+            }
+            Ok(OriginPublicManifestView {
+                protocol_version: node.supported_protocol_version,
+                pod_slug: manifest.pod.slug.clone(),
+                pod_name: manifest.pod.name.clone(),
+                subject: manifest.pod.description.clone(),
+                package_version: manifest.skill_pack_version,
+                latest_event_hash: manifest.latest_known_event_hash,
+                visibility_public: manifest.pod.visibility == Visibility::Public,
+                origin_node_id: manifest.pod.origin_node_id,
+            })
+        })
+        .unwrap_or(Err(OriginProbeError::Unreachable))
+    }
+}
+
+/// Production HTTP [`DiscoveryPeerProbe`]: reads the peer's well-known identity.
+#[derive(Debug, Default)]
+pub struct ReqwestDiscoveryPeerProbe;
+
+impl DiscoveryPeerProbe for ReqwestDiscoveryPeerProbe {
+    fn probe_peer_endpoint(
+        &self,
+        public_endpoint: &str,
+    ) -> Result<DiscoveryPeerIdentityView, DiscoveryPeerProbeError> {
+        let url = format!(
+            "{}/.well-known/stumble-node",
+            public_endpoint.trim_end_matches('/')
+        );
+        probe_on_own_thread(async move {
+            let well_known: WellKnownNode = reqwest::Client::new()
+                .get(&url)
+                .send()
+                .await
+                .map_err(|_| DiscoveryPeerProbeError::Unreachable)?
+                .error_for_status()
+                .map_err(|_| DiscoveryPeerProbeError::Unreachable)?
+                .json()
+                .await
+                .map_err(|_| DiscoveryPeerProbeError::Unreachable)?;
+            Ok(DiscoveryPeerIdentityView::new(
+                well_known.node.node_id,
+                well_known.node.public_key,
+                well_known.protocol,
+            ))
+        })
+        .unwrap_or(Err(DiscoveryPeerProbeError::Unreachable))
+    }
+}
+
+/// Submits a signed Pod Announcement to one Bootstrap endpoint's open
+/// admission route. Used by `stumble pod publish` to push announcements out.
+pub async fn submit_pod_announcement_to_bootstrap(
+    base_url: &str,
+    announcement: &PodAnnouncement,
+) -> Result<serde_json::Value, String> {
+    let url = format!(
+        "{}/bootstrap/announcements",
+        base_url.trim_end_matches('/')
+    );
+    let response = reqwest::Client::new()
+        .post(&url)
+        .json(announcement)
+        .send()
+        .await
+        .map_err(|error| format!("bootstrap unreachable: {error}"))?;
+    let status = response.status();
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .unwrap_or_else(|_| serde_json::json!({"status": status.as_u16()}));
+    if status.is_success() {
+        Ok(body)
+    } else {
+        Err(body
+            .get("code")
+            .and_then(|code| code.as_str())
+            .map_or_else(
+                || format!("bootstrap admission HTTP {status}"),
+                ToString::to_string,
+            ))
+    }
+}
+
+/// Production HTTP [`OriginExploreSampleClient`]: fetches bounded signed
+/// samples from the Origin named in a verified announcement.
+pub struct ReqwestOriginExploreSampleClient {
+    client: reqwest::Client,
+    handle: tokio::runtime::Handle,
+}
+
+impl ReqwestOriginExploreSampleClient {
+    /// Builds a client that drives HTTP on `handle`.
+    #[must_use]
+    pub fn new(handle: tokio::runtime::Handle) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            handle,
+        }
+    }
+}
+
+impl OriginExploreSampleClient for ReqwestOriginExploreSampleClient {
+    fn fetch_explore_samples(
+        &self,
+        announcement: &PodAnnouncement,
+        limit: usize,
+    ) -> Result<PodExploreSamples, SampleFetchError> {
+        let url = format!(
+            "{}/explore-samples",
+            announcement.public_pod_url.trim_end_matches('/')
+        );
+        let body = serde_json::json!({ "announcement": announcement, "limit": limit });
+        let client = self.client.clone();
+        self.handle.block_on(async move {
+            let response = client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|error| SampleFetchError::Transport(error.to_string()))?;
+            if !response.status().is_success() {
+                return Err(SampleFetchError::Transport(format!(
+                    "origin explore samples HTTP {}",
+                    response.status()
+                )));
+            }
+            response
+                .json()
+                .await
+                .map_err(|error| SampleFetchError::Verification(error.to_string()))
+        })
+    }
+}

@@ -1,4 +1,6 @@
 version: 1
+# Passive network sync interval (Bootstrap + Discovery Peer streams); 0 disables.
+network_sync_every_seconds: 900
 data_dir: /Users/you/.stumble/nodes/home
 bind: 127.0.0.1:8790
 

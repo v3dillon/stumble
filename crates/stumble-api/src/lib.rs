@@ -11,8 +11,9 @@ mod error;
 mod federation;
 
 pub use clients::{
-    ReqwestAnnouncementStreamClient, ReqwestDiscoveryPeerStreamClient, ReqwestIndexSearchClient,
-    ReqwestPeerAdvertisementSampleClient,
+    submit_pod_announcement_to_bootstrap, ReqwestAnnouncementStreamClient,
+    ReqwestDiscoveryPeerProbe, ReqwestDiscoveryPeerStreamClient, ReqwestIndexSearchClient,
+    ReqwestOriginExploreSampleClient, ReqwestOriginProbe, ReqwestPeerAdvertisementSampleClient,
 };
 pub use docs::ApiRouteDoc;
 pub use error::ApiError;
@@ -126,6 +127,10 @@ pub fn router_with_options(
         .route(
             "/federation/pods/:slug/events",
             get(federation_events).post(federation_import_events),
+        )
+        .route(
+            "/federation/pods/:slug/explore-samples",
+            post(federation_explore_samples),
         )
         .route(
             "/federation/sync/:peer_id/:pod_slug",

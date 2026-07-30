@@ -5979,6 +5979,22 @@ pub struct DiscoveryPeerIdentityView {
     pub protocol_version: String,
 }
 
+impl DiscoveryPeerIdentityView {
+    /// Builds the live identity view a probe observed at a peer endpoint.
+    #[must_use]
+    pub const fn new(
+        node_id: NodeIdentityId,
+        public_key: String,
+        protocol_version: String,
+    ) -> Self {
+        Self {
+            node_id,
+            public_key,
+            protocol_version,
+        }
+    }
+}
+
 /// Bounded randomized sample of current peer advertisements (unranked).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

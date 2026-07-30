@@ -1,7 +1,11 @@
 use clap::{Parser, ValueEnum};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use stumble_api::{bind_with_port, router_with_options, RouterOptions};
+use std::sync::Arc;
+use stumble_api::{
+    bind_with_port, router_with_options, ReqwestDiscoveryPeerProbe, ReqwestOriginProbe,
+    RouterOptions,
+};
 use stumble_core::AgentTools;
 
 #[derive(Debug, Parser)]
@@ -14,6 +18,12 @@ struct Args {
     port: Option<u16>,
     #[arg(long, env = "STUMBLE_BASE_URL")]
     base_url: Option<String>,
+    /// Serve open Bootstrap admission and Announcement Streams (network role)
+    #[arg(long, env = "STUMBLE_BOOTSTRAP")]
+    bootstrap: bool,
+    /// Serve public Index search over admitted announcements (network role)
+    #[arg(long, env = "STUMBLE_INDEX")]
+    index: bool,
     #[arg(long, env = "STUMBLE_DATA_DIR")]
     data_dir: Option<PathBuf>,
 }
@@ -37,7 +47,10 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let tools = AgentTools::open_initialized_home_node(&data_dir)
-        .map_err(|error| anyhow::anyhow!("open Home Node at {}: {error}", data_dir.display()))?;
+        .map_err(|error| anyhow::anyhow!("open Home Node at {}: {error}", data_dir.display()))?
+        .with_discovery_peer_probe(Arc::new(ReqwestDiscoveryPeerProbe))
+        .with_bootstrap_capability(args.bootstrap, Arc::new(ReqwestOriginProbe))
+        .with_index_capability(args.index);
     let bind = bind_with_port(args.bind, args.port);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let base_url = args
@@ -49,6 +62,12 @@ async fn main() -> anyhow::Result<()> {
         listener.local_addr()?
     );
     eprintln!("stumble-api public base URL {}", base_url);
+    if args.bootstrap {
+        eprintln!("stumble-api serving the open Bootstrap role");
+    }
+    if args.index {
+        eprintln!("stumble-api serving the public Index role");
+    }
     if let Some(path) = tools.persistence_path() {
         eprintln!("stumble-api durable store at {}", path.display());
     }

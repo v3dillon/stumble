@@ -36,6 +36,17 @@ stumble pod skill install rust-craft     # loads the Pod's SKILL.md into ~/.agen
 
 `pod publish` makes the Pod public (as the node owner you approve your own change; an agent harness gets a Pending Proposal for you to approve instead) and issues the discovery announcement when `--base-url` is given. Only history from the moment of publication federates — anything added and removed while the Pod was private stays on your node. The running server picks up `stumble add` and other CLI changes automatically, so you can keep curating while friends stay in sync.
 
+### Discover Pods from the network
+
+Home Nodes passively learn about published Pods: `stumble-runner serve` pulls Bootstrap Announcement Streams and Discovery Peer streams on an interval (`network_sync_every_seconds`, default 15 minutes), and `stumble pod publish` pushes your announcement to every enabled Bootstrap endpoint automatically. Then:
+
+```bash
+stumble pod explore --query "distributed systems"   # ranked against your private taste, with signed content previews
+stumble pod subscribe <public_pod_url>              # from the explore result
+```
+
+Ranking happens entirely on your node — queries and taste never leave it. To help the network, run a Bootstrap or Index role: `stumble-api --bootstrap` (open announcement admission + streams) or `stumble-api --index` (public search over admitted announcements).
+
 ### Use it from an AI harness
 
 Stumble is designed to be driven by an agent harness (Claude Code, Codex, Hermes, Pi, ...). The harness owns the browser — it reads pages with your logged-in sessions — and Stumble owns the collection and the Feed. Install the [`SKILL.md`](SKILL.md) at the repository root into your harness's skills directory and it will know the loop: open a shared link, understand it, `stumble add` it, and read your Feed back on request.

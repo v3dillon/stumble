@@ -121,7 +121,11 @@ fn open_home_node(
             ExitStatusCategory::ValidationOrConflict,
         ));
     }
-    let tools = AgentTools::open_initialized_home_node(&data_dir).map_err(agent_tools_error)?;
+    let tools = AgentTools::open_initialized_home_node(&data_dir)
+        .map_err(agent_tools_error)?
+        .with_discovery_peer_probe(std::sync::Arc::new(
+            stumble_api::ReqwestDiscoveryPeerProbe,
+        ));
     let actor = authenticate_actor(&tools, &data_dir, owner_authority)?;
     Ok((data_dir, tools, actor))
 }

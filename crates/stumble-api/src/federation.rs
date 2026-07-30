@@ -84,3 +84,35 @@ pub(crate) async fn federation_sync_pod(
     ))
 }
 
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ExploreSamplesRequest {
+    announcement: PodAnnouncement,
+    #[serde(default = "default_sample_limit")]
+    limit: usize,
+}
+
+fn default_sample_limit() -> usize {
+    3
+}
+
+/// Serves bounded Origin-signed Explore samples for the current announcement.
+pub(crate) async fn federation_explore_samples(
+    State(state): State<ApiState>,
+    _headers: HeaderMap,
+    Path(slug): Path<String>,
+    Json(request): Json<ExploreSamplesRequest>,
+) -> Result<Json<PodExploreSamples>, ApiError> {
+    if request.announcement.pod_slug != slug {
+        return Err(AgentToolsError::from(StoreError::Validation(
+            "announcement does not describe the requested Pod".into(),
+        ))
+        .into());
+    }
+    let ctx = state.tools.default_auth_context()?;
+    Ok(Json(state.tools.pod_explore_samples(
+        &ctx,
+        &request.announcement,
+        request.limit,
+    )?))
+}

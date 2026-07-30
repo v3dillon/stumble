@@ -46,35 +46,64 @@ pub(super) fn execute(command: PodWorkflow, tools: &AgentTools, actor: &AuthCont
         }
         PodWorkflow::Create(args) => create_pod(args, tools, actor),
         PodWorkflow::Explore(args) => {
-            let request = ExploreRequest::new(
-                args.query.unwrap_or_default(),
-                50,
-                usize::from(args.sample_size),
-            )
-            .map_err(|error| agent_tools_error(error.into()))?;
+            let sample_size = usize::from(args.sample_size);
+            let request =
+                ExploreRequest::new(args.query.unwrap_or_default(), 50, sample_size)
+                    .map_err(|error| agent_tools_error(error.into()))?;
             // When Indexes are configured, fan out explicit query via HTTP transport
             // then rank locally. Empty/local-only Explore stays on the Home Node.
             let has_indexes = tools
                 .trust_policy(actor)
                 .map(|policy| !policy.index_nodes.is_empty())
                 .unwrap_or(false);
-            let explored = if has_indexes {
-                let runtime = tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(1)
-                    .enable_all()
-                    .build()
-                    .map_err(internal_error)?;
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .map_err(internal_error)?;
+            let mut explored = if has_indexes {
                 let client = stumble_api::ReqwestIndexSearchClient::new(runtime.handle().clone());
-                let explored = tools
-                    .explore_public_pods_with_indexes(actor, request, &client)
-                    .map_err(agent_tools_error)?;
-                drop(runtime);
-                explored
+                tools
+                    .explore_public_pods_with_indexes(actor, request.clone(), &client)
+                    .map_err(agent_tools_error)?
             } else {
                 tools
-                    .explore_public_pods(actor, request)
+                    .explore_public_pods(actor, request.clone())
                     .map_err(agent_tools_error)?
             };
+            // Fetch verified Origin samples for the top unsubscribed results
+            // that lack previews, then re-rank so samples are included.
+            // Best-effort: unreachable Origins never fail Explore.
+            if sample_size > 0 {
+                let sample_client = stumble_api::ReqwestOriginExploreSampleClient::new(
+                    runtime.handle().clone(),
+                );
+                let fetched = explored
+                    .results
+                    .iter()
+                    .take(5)
+                    .filter(|result| {
+                        !result.is_subscribed && result.sample_content_references.is_empty()
+                    })
+                    .filter(|result| {
+                        tools
+                            .fetch_origin_explore_samples(
+                                actor,
+                                result.announcement.origin_node_id,
+                                &result.announcement.pod_slug,
+                                sample_size,
+                                &sample_client,
+                            )
+                            .is_ok()
+                    })
+                    .count();
+                if fetched > 0 {
+                    explored = tools
+                        .explore_public_pods(actor, request)
+                        .map_err(agent_tools_error)?;
+                }
+            }
+            drop(runtime);
             let results = paginate(
                 explored.results,
                 args.page.limit,
@@ -330,6 +359,50 @@ fn publish(args: &PublishPodArgs, tools: &AgentTools, actor: &AuthContext) -> Cl
                 .map_err(agent_tools_error)
         })
         .transpose()?;
+    // Push the announcement to every enabled Bootstrap endpoint so the wider
+    // network can discover the Pod. Best-effort: a down Bootstrap never blocks
+    // publishing, and direct-URL sharing needs no announcement at all.
+    let bootstrap_submissions = match &announcement {
+        Some(announcement) => {
+            let endpoints: Vec<_> = tools
+                .list_bootstrap_endpoints(actor)
+                .map_err(agent_tools_error)?
+                .into_iter()
+                .filter(|endpoint| endpoint.enabled)
+                .collect();
+            if endpoints.is_empty() {
+                Vec::new()
+            } else {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(internal_error)?;
+                endpoints
+                    .iter()
+                    .map(|endpoint| {
+                        let result = runtime.block_on(
+                            stumble_api::submit_pod_announcement_to_bootstrap(
+                                &endpoint.base_url,
+                                announcement,
+                            ),
+                        );
+                        match result {
+                            Ok(_) => json!({
+                                "base_url": endpoint.base_url,
+                                "status": "admitted",
+                            }),
+                            Err(reason) => json!({
+                                "base_url": endpoint.base_url,
+                                "status": "failed",
+                                "reason": reason,
+                            }),
+                        }
+                    })
+                    .collect()
+            }
+        }
+        None => Vec::new(),
+    };
     Ok(json!({
         "pod_id": pod.id,
         "slug": pod.slug,
@@ -337,6 +410,7 @@ fn publish(args: &PublishPodArgs, tools: &AgentTools, actor: &AuthContext) -> Cl
         "share_url": share_url,
         "share_url_template": "<base-url>/federation/pods/<slug>",
         "announcement": announcement,
+        "bootstrap_submissions": bootstrap_submissions,
         "serve_hint": "friends can subscribe once this node is reachable: stumble-api --bind <addr>",
     }))
 }

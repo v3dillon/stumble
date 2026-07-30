@@ -56,6 +56,14 @@ struct RunnerConfig {
     curators: BTreeMap<String, CredentialSelection>,
     #[serde(default)]
     schedules: BTreeMap<String, Schedule>,
+    /// Interval for passive network sync (Bootstrap Announcement Streams and
+    /// outbound Discovery Peer streams). Zero disables it.
+    #[serde(default = "default_network_sync_seconds")]
+    network_sync_every_seconds: u64,
+}
+
+fn default_network_sync_seconds() -> u64 {
+    900
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -220,7 +228,8 @@ async fn serve_all_mcp(config: &RunnerConfig) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(config.bind)
         .await
         .with_context(|| format!("bind unified runner at {}", config.bind))?;
-    start_schedules(config, tools)?;
+    start_schedules(config, tools.clone())?;
+    start_network_sync(config, tools);
     axum::serve(listener, router)
         .await
         .context("serve unified runner")
@@ -265,6 +274,49 @@ fn start_schedules(config: &RunnerConfig, tools: AgentTools) -> anyhow::Result<(
         });
     }
     Ok(())
+}
+
+/// Ticks the passive discovery loop: pull Bootstrap Announcement Streams and
+/// outbound Discovery Peer streams so the local catalog of public Pods stays
+/// current without any manual `stumble sync` invocations.
+fn start_network_sync(config: &RunnerConfig, tools: AgentTools) {
+    if config.network_sync_every_seconds == 0 {
+        return;
+    }
+    let every = std::time::Duration::from_secs(config.network_sync_every_seconds);
+    let handle = tokio::runtime::Handle::current();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(every);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let tools = tools.clone();
+            let handle = handle.clone();
+            let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                let _ = tools.refresh_if_stale();
+                let actor = tools.local_owner_auth_context()?;
+                let now = chrono::Utc::now();
+                let bootstrap_client =
+                    stumble_api::ReqwestAnnouncementStreamClient::new(handle.clone());
+                let report = tools.sync_bootstrap_endpoints(&actor, &bootstrap_client, now)?;
+                if report.retained_announcements > 0 || report.retained_withdrawals > 0 {
+                    eprintln!(
+                        "network sync retained {} announcement(s), {} withdrawal(s)",
+                        report.retained_announcements, report.retained_withdrawals
+                    );
+                }
+                let peer_client = stumble_api::ReqwestDiscoveryPeerStreamClient::new(handle);
+                let _ = tools.sync_outbound_discovery_peers(&actor, &peer_client, now)?;
+                Ok(())
+            })
+            .await;
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => eprintln!("network sync failed: {error:#}"),
+                Err(error) => eprintln!("network sync task failed: {error}"),
+            }
+        }
+    });
 }
 
 fn run_discovery(

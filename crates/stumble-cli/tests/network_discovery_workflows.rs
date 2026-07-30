@@ -1,0 +1,167 @@
+use serde_json::Value;
+use std::{fs, path::PathBuf, process::Command, sync::Arc};
+use stumble_api::{router_with_base_url, ReqwestOriginProbe};
+use stumble_core::{seed_store, AgentTools};
+
+struct Environment {
+    root: PathBuf,
+    data_dir: PathBuf,
+}
+
+impl Environment {
+    fn new(label: &str) -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "stumble-network-discovery-{label}-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let data_dir = root.join("home");
+        fs::create_dir_all(&root).unwrap();
+        let environment = Self { root, data_dir };
+        environment.run(&["node", "init"]);
+        environment
+    }
+
+    fn run(&self, arguments: &[&str]) -> Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_stumble"))
+            .env("STUMBLE_DATA_DIR", &self.data_dir)
+            .env(
+                "STUMBLE_CREDENTIAL_STORE_DIR",
+                self.root.join("credentials"),
+            )
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["data"].clone()
+    }
+
+    /// Points this node at exactly one Bootstrap: the test's live one.
+    fn use_bootstrap(&self, base_url: &str) {
+        let endpoints = self.run(&["sync", "bootstrap", "list"]);
+        for endpoint in endpoints.as_array().unwrap() {
+            self.run(&[
+                "sync",
+                "bootstrap",
+                "disable",
+                endpoint["id"].as_str().unwrap(),
+            ]);
+        }
+        self.run(&[
+            "sync",
+            "bootstrap",
+            "add",
+            "--label",
+            "test-bootstrap",
+            "--base-url",
+            base_url,
+        ]);
+    }
+}
+
+impl Drop for Environment {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn published_pods_travel_bootstrap_to_explore_to_subscription() {
+    // ── A live Bootstrap node with open admission and a real Origin probe ────
+    let bootstrap_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bootstrap_base = format!("http://{}", bootstrap_listener.local_addr().unwrap());
+    let bootstrap_tools = AgentTools::new(seed_store())
+        .with_bootstrap_capability(true, Arc::new(ReqwestOriginProbe));
+    let bootstrap_router = router_with_base_url(bootstrap_tools, &bootstrap_base);
+    let bootstrap_server = tokio::spawn(async move {
+        axum::serve(bootstrap_listener, bootstrap_router).await.unwrap()
+    });
+
+    // ── Alice: origin node serving before she publishes, so the Bootstrap can
+    // probe her live manifest during announcement admission ──────────────────
+    let alice = Environment::new("alice");
+    alice.run(&[
+        "pod", "create", "--name", "Distributed Craft", "--slug", "distributed-craft",
+        "--description", "Distributed systems craft and reliability engineering.",
+        "--visibility", "private",
+    ]);
+    alice.run(&[
+        "add",
+        "https://example.com/raft-explained",
+        "--pod",
+        "distributed-craft",
+        "--title",
+        "Raft explained visually",
+        "--tag",
+        "distributed-systems",
+    ]);
+    alice.use_bootstrap(&bootstrap_base);
+
+    let alice_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let alice_base = format!("http://{}", alice_listener.local_addr().unwrap());
+    let alice_origin = AgentTools::open_initialized_home_node(&alice.data_dir).unwrap();
+    let alice_router = router_with_base_url(alice_origin, &alice_base);
+    let alice_server =
+        tokio::spawn(async move { axum::serve(alice_listener, alice_router).await.unwrap() });
+
+    // Publish announces to the configured Bootstrap in the same command.
+    let published = alice.run(&[
+        "pod",
+        "publish",
+        "distributed-craft",
+        "--base-url",
+        &alice_base,
+    ]);
+    assert_eq!(published["status"], "published");
+    let submissions = published["bootstrap_submissions"].as_array().unwrap();
+    assert_eq!(submissions.len(), 1, "{submissions:?}");
+    assert_eq!(submissions[0]["status"], "admitted", "{submissions:?}");
+
+    // ── Bob: pulls the Announcement Stream and discovers Alice's Pod locally ─
+    let bob = Environment::new("bob");
+    bob.use_bootstrap(&bootstrap_base);
+    let report = bob.run(&["sync", "bootstrap", "run"]);
+    assert!(
+        report["retained_announcements"].as_u64().unwrap() >= 1,
+        "{report}"
+    );
+
+    let explored = bob.run(&["pod", "explore", "--query", "distributed systems"]);
+    let items = explored["items"].as_array().unwrap();
+    let found = items
+        .iter()
+        .find(|item| item["announcement"]["pod_slug"] == "distributed-craft")
+        .unwrap_or_else(|| panic!("expected discovered pod in {explored}"));
+    assert_eq!(found["is_subscribed"], false);
+    // Explore fetched verified Origin samples, so Bob previews real content
+    // from a Pod he has never subscribed to.
+    let samples = found["sample_content_references"].as_array().unwrap();
+    assert!(
+        samples
+            .iter()
+            .any(|sample| sample["title"] == "Raft explained visually"),
+        "{samples:?}"
+    );
+    let public_pod_url = found["announcement"]["public_pod_url"].as_str().unwrap();
+
+    // Explore hands Bob everything needed to subscribe in one command.
+    let subscribed = bob.run(&["pod", "subscribe", public_pod_url]);
+    assert_eq!(subscribed["slug"], "distributed-craft");
+
+    let batch = bob.run(&["feed", "batch", "get"]);
+    let titles: Vec<_> = batch["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["content_reference"]["title"].as_str().unwrap())
+        .collect();
+    assert!(titles.contains(&"Raft explained visually"), "{titles:?}");
+
+    alice_server.abort();
+    bootstrap_server.abort();
+    let _ = alice_server.await;
+    let _ = bootstrap_server.await;
+}
