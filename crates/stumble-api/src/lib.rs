@@ -80,6 +80,7 @@ pub fn router_with_options(
         .route("/health", get(health))
         .route("/.well-known/stumble-node", get(well_known_node))
         .route("/openapi-lite", get(openapi_lite))
+        .route("/llms.txt", get(llms_txt))
         .route(
             "/discovery/announcements",
             post(index_pod_announcement).get(search_pod_announcements),
@@ -175,6 +176,16 @@ async fn openapi_lite() -> Json<Vec<ApiRouteDoc>> {
     Json(route_docs())
 }
 
+/// Serves the friend-onboarding llms.txt with this node's base URL filled in,
+/// so operators can onboard people by sending one link.
+async fn llms_txt(State(state): State<ApiState>) -> ([(&'static str, &'static str); 1], String) {
+    let onboarding = include_str!("../../../llms.txt").replace(
+        "BOOTSTRAP_URL=https://REPLACE-WITH-YOUR-BOOTSTRAP-DOMAIN",
+        &format!("BOOTSTRAP_URL={}", state.base_url),
+    );
+    ([("content-type", "text/plain; charset=utf-8")], onboarding)
+}
+
 fn auth_or_default(state: &ApiState, headers: &HeaderMap) -> Result<AuthContext, ApiError> {
     let tools = &state.tools;
     if let Some(value) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
@@ -224,6 +235,25 @@ mod tests {
         let bind: SocketAddr = "127.0.0.1:8787".parse().unwrap();
         let updated = bind_with_port(bind, Some(9000));
         assert_eq!(updated.to_string(), "127.0.0.1:9000");
+    }
+
+    #[tokio::test]
+    async fn llms_txt_is_served_with_the_node_base_url_filled_in() {
+        let response = router_with_base_url(AgentTools::new(seed_store()), "https://boot.example")
+            .oneshot(
+                Request::get("/llms.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("BOOTSTRAP_URL=https://boot.example"));
+        assert!(!body.contains("REPLACE-WITH-YOUR-BOOTSTRAP-DOMAIN"));
     }
 
     #[tokio::test]

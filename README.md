@@ -63,7 +63,7 @@ Stumble plans, your harness browses, you wake up to a shortlist. A daily Persona
 
 ### Onboard a friend
 
-[`llms.txt`](llms.txt) is a paste-able onboarding script for a friend's AI harness: it installs Stumble, connects to your Bootstrap, has them log into X in the harness browser, learns their taste from "send me something cool," runs their first discovery scroll, and offers their first Pod. Fill in your Bootstrap URL at the top and send them the file (or a raw GitHub link to your fork).
+[`llms.txt`](llms.txt) is a paste-able onboarding script for a friend's AI harness: it installs Stumble, connects to your Bootstrap, has them log into X in the harness browser, learns their taste from "send me something cool," runs their first discovery scroll, and offers their first Pod. Fill in your Bootstrap URL at the top and send them the file — or just send `https://your-bootstrap/llms.txt`, which every node serves with its own URL pre-filled.
 
 ### Use it from an AI harness
 

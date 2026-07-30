@@ -44,6 +44,18 @@ The well-known response advertises `bootstrap_announcements`,
 `bootstrap_announcement_stream`, and (with the Index role)
 `index_search_announcements`.
 
+## Onboard friends with one link
+
+The node serves the onboarding script with its own URL pre-filled:
+
+```
+https://bootstrap.example.com/llms.txt
+```
+
+Send that link; a friend pastes it (or its contents) into their AI harness
+and the harness walks them through install, taste, and their first discovery
+run against your Bootstrap.
+
 ## Point nodes at it
 
 Home Nodes (readers):
