@@ -25,6 +25,7 @@ A Pod travels with its context: subscribing pulls the accepted content *and* the
 # You: publish and serve
 stumble pod publish rust-craft --base-url https://your-node.example
 stumble-api --bind 0.0.0.0:8787          # keep running while friends sync
+                                         # (or stumble-runner serve, which also serves MCP)
 
 # Friend: subscribe by the URL you sent, read, and re-sync any time
 stumble pod subscribe https://your-node.example/federation/pods/rust-craft
@@ -32,7 +33,7 @@ stumble feed batch get
 stumble sync pod run rust-craft          # pulls new items from your node
 ```
 
-`pod publish` makes the Pod public (as the node owner you approve your own change; an agent harness gets a Pending Proposal for you to approve instead) and issues the discovery announcement when `--base-url` is given.
+`pod publish` makes the Pod public (as the node owner you approve your own change; an agent harness gets a Pending Proposal for you to approve instead) and issues the discovery announcement when `--base-url` is given. Only history from the moment of publication federates — anything added and removed while the Pod was private stays on your node. The running server picks up `stumble add` and other CLI changes automatically, so you can keep curating while friends stay in sync.
 
 ### Use it from an AI harness
 

@@ -1031,7 +1031,7 @@ pub fn persist_sqlite_store_changes(
     database_path: &Path,
     previous: &InMemoryStore,
     current: &InMemoryStore,
-) -> Result<(), StorePersistenceError> {
+) -> Result<i64, StorePersistenceError> {
     let mut connection = open_sqlite_store(database_path)?;
     let previous_records = store_records(previous)?;
     let current_records = store_records(current)?;
@@ -1079,8 +1079,32 @@ pub fn persist_sqlite_store_changes(
          ON CONFLICT (key) DO UPDATE SET value = excluded.value",
         [],
     )?;
+    transaction.execute(
+        "INSERT INTO stumble_store_metadata (key, value) VALUES ('generation', '1')
+         ON CONFLICT (key) DO UPDATE SET value = CAST(CAST(stumble_store_metadata.value AS INTEGER) + 1 AS TEXT)",
+        [],
+    )?;
+    let generation: i64 = transaction.query_row(
+        "SELECT CAST(value AS INTEGER) FROM stumble_store_metadata WHERE key = 'generation'",
+        [],
+        |row| row.get(0),
+    )?;
     transaction.commit()?;
-    Ok(())
+    Ok(generation)
+}
+
+/// Reads the monotonically increasing store generation used by long-lived
+/// processes to detect writes from other processes. Zero for fresh stores.
+pub fn read_store_generation(database_path: &Path) -> Result<i64, StorePersistenceError> {
+    let connection = open_sqlite_store(database_path)?;
+    let generation = connection
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM stumble_store_metadata WHERE key = 'generation'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(generation.unwrap_or(0))
 }
 
 fn open_sqlite_store(path: &Path) -> Result<rusqlite::Connection, StorePersistenceError> {
@@ -1153,6 +1177,11 @@ fn initialize_sqlite_store(
     }
     transaction.execute(
         "INSERT INTO stumble_store_metadata (key, value) VALUES ('initialized', '1')",
+        [],
+    )?;
+    transaction.execute(
+        "INSERT INTO stumble_store_metadata (key, value) VALUES ('generation', '1')
+         ON CONFLICT (key) DO NOTHING",
         [],
     )?;
     transaction.commit()?;
@@ -1572,12 +1601,24 @@ impl InMemoryStore {
             .collect()
     }
 
+    /// Federated events for a public Pod, starting at its most recent
+    /// publication. History from before the Pod became public stays local:
+    /// `pod_published` carries the full current Pod and package, and publish
+    /// re-emits placements for the accepted content that should federate.
     pub fn public_events_for_pod(&self, pod_slug: &str) -> Vec<EventLog> {
-        self.event_log
+        let events: Vec<EventLog> = self
+            .event_log
             .iter()
             .filter(|event| event.pod_slug == pod_slug && is_federated_pod_event(&event.event_type))
             .cloned()
-            .collect()
+            .collect();
+        let publication_start = events
+            .iter()
+            .rposition(|event| event.event_type == "pod_published");
+        match publication_start {
+            Some(start) => events[start..].to_vec(),
+            None => events,
+        }
     }
 
     pub fn portable_package_events_for_pod(&self, pod_slug: &str) -> Vec<EventLog> {

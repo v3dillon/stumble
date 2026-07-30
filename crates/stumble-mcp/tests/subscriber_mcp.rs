@@ -238,7 +238,7 @@ async fn subscription_management_harness_subscribes_and_refreshes_from_a_real_or
         .await;
     assert!(!subscribed.is_error());
     let subscribed = subscribed.synchronization_result();
-    assert_eq!(subscribed.imported_events, 3);
+    assert_eq!(subscribed.imported_events, 2);
     let subscription_id = subscribed.subscription.id;
     let first_cursor = subscribed
         .subscription
@@ -409,6 +409,12 @@ async fn subscription_mcp_preserves_origin_identity_signature_and_chain_errors()
         None,
         "https://example.com/subscriber-mcp/error-fixture",
         "error-fixture",
+    );
+    publish_item(
+        &origin,
+        Some(&pod),
+        "https://example.com/subscriber-mcp/error-fixture-second",
+        "error-fixture-second",
     );
     let origin_context = origin.default_auth_context().expect("Origin context");
     let valid_snapshot = origin

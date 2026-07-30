@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::{fs, path::PathBuf, process::Command};
 use stumble_api::router_with_base_url;
-use stumble_core::{AddReferenceRequest, AgentTools};
+use stumble_core::AgentTools;
 
 struct Environment {
     root: PathBuf,
@@ -89,8 +89,7 @@ async fn publish_share_subscribe_and_origin_resync_deliver_the_package_and_conte
 
     // ── Serve Alice's node so the share URL is reachable ─────────────────────
     let origin = AgentTools::open_initialized_home_node(&alice.data_dir).unwrap();
-    let origin_actor = origin.local_owner_auth_context().unwrap();
-    let router = router_with_base_url(origin.clone(), &base_url);
+    let router = router_with_base_url(origin, &base_url);
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
     // ── Bob: subscribe by the shared URL ─────────────────────────────────────
@@ -120,22 +119,16 @@ async fn publish_share_subscribe_and_origin_resync_deliver_the_package_and_conte
         .contains("Rust Craft"));
     assert!(!package["package"]["skill_md"].as_str().unwrap().is_empty());
 
-    // ── Alice adds more; Bob re-syncs from the Origin with no trusted peer ───
-    origin
-        .add_reference(
-            &origin_actor,
-            AddReferenceRequest {
-                url: "https://example.com/borrow-checker".into(),
-                pod: Some("rust-craft".into()),
-                title: Some("Borrow checker deep dive".into()),
-                summary: None,
-                excerpt: None,
-                tags: vec![],
-                note: None,
-            },
-            chrono::Utc::now(),
-        )
-        .unwrap();
+    // ── Alice adds more through the CLI while the server keeps running; the
+    // long-lived server must observe the new store generation ────────────────
+    alice.run(&[
+        "add",
+        "https://example.com/borrow-checker",
+        "--pod",
+        "rust-craft",
+        "--title",
+        "Borrow checker deep dive",
+    ]);
 
     let resync = bob.run(&["sync", "pod", "run", "rust-craft"]);
     assert_eq!(resync["verification"], "verified");
@@ -196,4 +189,37 @@ fn harness_publish_returns_a_pending_proposal_instead_of_self_approving() {
     owner.run(&["node", "proposal", "approve", proposal_id]);
     let republished = owner.run(&["pod", "publish", "curated"]);
     assert_eq!(republished["status"], "published");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscribing_over_a_local_slug_collision_explains_the_conflict() {
+    let alice = Environment::new("collision-origin");
+    alice.run(&[
+        "pod", "create", "--name", "Shared", "--slug", "shared", "--visibility", "private",
+    ]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    alice.run(&["pod", "publish", "shared", "--base-url", &base_url]);
+    let origin = AgentTools::open_initialized_home_node(&alice.data_dir).unwrap();
+    let router = router_with_base_url(origin, &base_url);
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let bob = Environment::new("collision-home");
+    bob.run(&[
+        "pod", "create", "--name", "Mine", "--slug", "shared", "--visibility", "private",
+    ]);
+    let output = bob
+        .command()
+        .args(["pod", "subscribe", &format!("{base_url}/federation/pods/shared")])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("a local Pod already uses the slug shared"),
+        "{stderr}"
+    );
+
+    server.abort();
+    let _ = server.await;
 }

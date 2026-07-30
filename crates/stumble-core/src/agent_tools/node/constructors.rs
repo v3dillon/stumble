@@ -1,3 +1,4 @@
+use crate::store::read_store_generation;
 use super::super::prelude::*;
 use super::super::*;
 
@@ -13,11 +14,14 @@ impl AgentTools {
     }
 
     pub fn new_sqlite_persistent(store: InMemoryStore, path: impl Into<PathBuf>) -> Self {
+        let path: PathBuf = path.into();
+        let generation = read_store_generation(&path).unwrap_or(0);
         Self {
             store: Arc::new(RwLock::new(store.clone())),
             persistence: Some(Persistence::Sqlite {
-                path: Arc::new(path.into()),
+                path: Arc::new(path),
                 baseline: Arc::new(Mutex::new(store)),
+                generation: Arc::new(std::sync::atomic::AtomicI64::new(generation)),
             }),
             bootstrap: BootstrapCapability::default(),
             index: IndexCapability::default(),
@@ -107,20 +111,65 @@ impl AgentTools {
 
     pub(crate) fn persist_locked(&self, store: &mut InMemoryStore) -> Result<(), AgentToolsError> {
         match &self.persistence {
-            Some(Persistence::Sqlite { path, baseline }) => {
+            Some(Persistence::Sqlite {
+                path,
+                baseline,
+                generation,
+            }) => {
                 let mut baseline = baseline.lock().map_err(|_| AgentToolsError::LockPoisoned)?;
-                if let Err(error) = persist_sqlite_store_changes(path, &baseline, store) {
-                    let authoritative =
-                        load_sqlite_store(path).unwrap_or_else(|_| baseline.clone());
-                    *baseline = authoritative.clone();
-                    *store = authoritative;
-                    return Err(error.into());
+                match persist_sqlite_store_changes(path, &baseline, store) {
+                    Ok(new_generation) => {
+                        generation.store(new_generation, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    Err(error) => {
+                        let authoritative =
+                            load_sqlite_store(path).unwrap_or_else(|_| baseline.clone());
+                        generation.store(
+                            read_store_generation(path).unwrap_or(0),
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        *baseline = authoritative.clone();
+                        *store = authoritative;
+                        return Err(error.into());
+                    }
                 }
                 *baseline = store.clone();
             }
             None => {}
         }
         Ok(())
+    }
+
+    /// Reloads in-memory state when another process has persisted newer store
+    /// generations — the freshness guarantee for long-lived daemons whose
+    /// SQLite store is also written by one-shot CLI commands.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store cannot be read or a lock is poisoned.
+    pub fn refresh_if_stale(&self) -> Result<bool, AgentToolsError> {
+        let Some(Persistence::Sqlite {
+            path,
+            baseline,
+            generation,
+        }) = &self.persistence
+        else {
+            return Ok(false);
+        };
+        let disk_generation = read_store_generation(path)?;
+        if disk_generation == generation.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        let mut baseline = baseline.lock().map_err(|_| AgentToolsError::LockPoisoned)?;
+        let authoritative = load_sqlite_store(path)?;
+        *baseline = authoritative.clone();
+        *store = authoritative;
+        generation.store(disk_generation, std::sync::atomic::Ordering::SeqCst);
+        Ok(true)
     }
 
     pub fn create_tenant(&self, request: CreateTenantRequest) -> Result<Tenant, AgentToolsError> {

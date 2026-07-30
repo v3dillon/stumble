@@ -164,7 +164,7 @@ async fn private_home_node_subscribes_outbound_through_the_direct_pod_url() {
     .unwrap();
 
     // Assert: remote accepted content is local and public Home responses stay private.
-    assert_eq!(synchronized.imported_events, 3);
+    assert_eq!(synchronized.imported_events, 2);
     let feed = home
         .get_feed_batch(&subscriber, FeedBatchRequest::new(1).unwrap(), Utc::now())
         .unwrap();

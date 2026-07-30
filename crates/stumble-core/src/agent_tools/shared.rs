@@ -458,6 +458,34 @@ pub(crate) fn apply_expand_pod_visibility(
             store.latest_event_hash(&pod.slug),
         )?;
         store.event_log.push(event);
+        // Federation serves history from this publication onward, so re-emit
+        // the accepted content that should travel with the now-public Pod.
+        // Anything placed (or removed) while private stays local.
+        let mut placements: Vec<AcceptedPlacementProjection> = store
+            .accepted_placement_projections
+            .values()
+            .filter(|placement| placement.pod_id == *pod_id)
+            .cloned()
+            .collect();
+        placements.sort_by_key(|placement| (placement.accepted_at, placement.content_item_id));
+        for placement in placements {
+            let item = store
+                .submissions
+                .get(&Uuid::from(placement.content_item_id))
+                .map(ContentItem::from)
+                .ok_or_else(|| StoreError::NotFound("Content Item".to_string()))?;
+            let event = sign_public_event(
+                &node,
+                "content_item_placed",
+                &pod.slug,
+                json!({
+                    "content_item": item,
+                    "accepted_placement": placement,
+                }),
+                store.latest_event_hash(&pod.slug),
+            )?;
+            store.event_log.push(event);
+        }
     }
     Ok(())
 }

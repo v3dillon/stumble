@@ -140,7 +140,8 @@ pub(crate) fn validate_remote_pod_identity(
             && local.origin_node_id != Some(origin_node_id)
     }) {
         return Err(StoreError::Duplicate(format!(
-            "local Pod slug {} conflicts with the subscribed Origin",
+            "a local Pod already uses the slug {}; remove or rename the local Pod \
+             before subscribing to the remote Pod with that slug",
             remote.slug
         ))
         .into());
@@ -610,7 +611,12 @@ pub(crate) fn project_imported_pod(
         .values()
         .any(|existing| existing.slug == pod.slug && existing.tenant_id == ctx.tenant_id)
     {
-        return Err(StoreError::Duplicate(format!("Pod slug {}", pod.slug)).into());
+        return Err(StoreError::Duplicate(format!(
+            "a local Pod already uses the slug {}; remove or rename the local Pod \
+             before subscribing to the remote Pod with that slug",
+            pod.slug
+        ))
+        .into());
     }
     let pod_id = Uuid::now_v7();
     pod.id = pod_id;

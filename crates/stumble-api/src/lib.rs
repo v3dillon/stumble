@@ -19,7 +19,10 @@ pub use error::ApiError;
 
 use announcements::*;
 use axum::{
+    extract::{Request, State},
     http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
     Json, Router,
 };
@@ -128,9 +131,25 @@ pub fn router_with_options(
             "/federation/sync/:peer_id/:pod_slug",
             post(federation_sync_pod),
         )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            refresh_store_state,
+        ))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// Long-lived servers pick up store generations persisted by CLI commands
+/// before answering each request; a failed reload serves the last good state.
+async fn refresh_store_state(
+    State(state): State<ApiState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let tools = state.tools.clone();
+    let _ = tokio::task::spawn_blocking(move || tools.refresh_if_stale()).await;
+    next.run(request).await
 }
 
 pub fn bind_with_port(bind: SocketAddr, port: Option<u16>) -> SocketAddr {

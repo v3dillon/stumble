@@ -147,6 +147,8 @@ enum Persistence {
     Sqlite {
         path: Arc<PathBuf>,
         baseline: Arc<Mutex<InMemoryStore>>,
+        /// Last store generation this process observed on disk.
+        generation: Arc<std::sync::atomic::AtomicI64>,
     },
 }
 

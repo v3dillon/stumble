@@ -171,7 +171,7 @@ fn subscribed_home_node_synchronizes_incrementally_and_reads_remote_content_offl
         .unwrap();
 
     // Assert: accepted remote content is Feed-eligible and the cursor is idempotent.
-    assert_eq!(synchronized.imported_events, 3);
+    assert_eq!(synchronized.imported_events, 2);
     let cursor = synchronized.subscription.last_event_hash.clone();
     assert_eq!(
         home.synchronize_subscription(

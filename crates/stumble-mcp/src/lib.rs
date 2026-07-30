@@ -66,6 +66,8 @@ impl McpToolRouter {
         if let Some(error) = legacy_tool_error(&call.tool) {
             return Err(error);
         }
+        // Pick up store generations persisted by CLI commands since the last call.
+        let _ = self.tools.refresh_if_stale();
         let definition = tool_definition(&call.tool)
             .ok_or_else(|| anyhow::anyhow!("unknown MCP tool {}", call.tool))?;
         if definition.handler == ToolHandlerKind::Async {
@@ -377,6 +379,11 @@ impl McpToolRouter {
     pub async fn call_async(&self, call: McpToolCall) -> anyhow::Result<Value> {
         if let Some(error) = legacy_tool_error(&call.tool) {
             return Err(error);
+        }
+        // Pick up store generations persisted by CLI commands since the last call.
+        {
+            let tools = self.tools.clone();
+            let _ = tokio::task::spawn_blocking(move || tools.refresh_if_stale()).await;
         }
         let definition = tool_definition(&call.tool)
             .ok_or_else(|| anyhow::anyhow!("unknown MCP tool {}", call.tool))?;

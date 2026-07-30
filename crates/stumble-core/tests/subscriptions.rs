@@ -218,7 +218,7 @@ fn later_accepted_placement_syncs_from_cursor_without_exporting_home_feedback() 
             Utc::now(),
         )
         .unwrap();
-    assert_eq!(subscribed.imported_events, 2);
+    assert_eq!(subscribed.imported_events, 1);
     submit_and_accept_placement(&origin, &pod);
 
     // Act: resume from the stored cursor and apply only the new accepted placement.
@@ -596,4 +596,76 @@ fn a_changed_package_cannot_reuse_an_immutable_version() {
         result,
         Err(AgentToolsError::Store(StoreError::Validation(_)))
     ));
+}
+
+#[test]
+fn publication_boundary_hides_private_history_but_reemits_accepted_content() {
+    // Arrange: accept content while the Pod is still private, then publish.
+    let origin = AgentTools::new(seed_store());
+    let owner = origin.local_owner_auth_context().unwrap();
+    let pod = origin
+        .create_pod(
+            &owner,
+            CreatePodRequest {
+                name: "Private then public".into(),
+                slug: "private-then-public".into(),
+                description: "publication boundary fixture".into(),
+                visibility: Visibility::Private,
+            },
+        )
+        .unwrap();
+    submit_and_accept_placement(&origin, &pod);
+    let outcome = origin
+        .request_set_pod_visibility(&owner, pod.id, Visibility::Public, Utc::now())
+        .unwrap();
+    assert!(matches!(outcome, PodVisibilityOutcome::Updated(_)));
+
+    // Assert: federation serves only the publication onward, with the accepted
+    // content re-emitted after `pod_published`.
+    let store = origin.store();
+    let store = store.read().unwrap();
+    let served = store.public_events_for_pod(&pod.slug);
+    assert_eq!(served[0].event_type, "pod_published");
+    assert!(served
+        .iter()
+        .all(|event| event.event_type != "pod_created"));
+    assert!(served
+        .iter()
+        .any(|event| event.event_type == "content_item_placed"));
+    drop(store);
+
+    // The private-era creation event stays in the local log.
+    let store = origin.store();
+    let store = store.read().unwrap();
+    assert!(store
+        .event_log
+        .iter()
+        .any(|event| event.pod_slug == pod.slug && event.event_type == "pod_created"));
+    drop(store);
+
+    // A subscriber imports the served suffix and receives the content.
+    let home = AgentTools::new(seed_store());
+    let snapshot = origin
+        .federation_pod_snapshot(&owner, &pod.slug, None)
+        .unwrap();
+    let subscriber = register_authenticated_harness(
+        &home,
+        "post-publication subscriber",
+        vec![HarnessCapability::SubscriptionManagement, HarnessCapability::FeedRead],
+    );
+    let synchronized = home
+        .subscribe_public_pod(
+            &subscriber,
+            SubscribePublicPodRequest::new(
+                "https://origin.example/federation/pods/private-then-public",
+                snapshot,
+            ),
+            Utc::now(),
+        )
+        .unwrap();
+    assert_eq!(synchronized.imported_events, 2);
+    let feed = home
+        .get_feed_batch(&subscriber, FeedBatchRequest::new(1).unwrap(), Utc::now())
+        .unwrap();
+    assert!(!feed.items.is_empty());
 }
