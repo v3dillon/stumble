@@ -1,6 +1,6 @@
 ---
 name: stumble
-description: Save links into the user's Stumble feed and read the feed back to them. Use when the user shares a URL worth keeping ("add this to stumble", "save this", pastes an interesting link), asks for their feed ("what's in my stumble", "drip", "anything new"), or wants to curate Pods. Runs the local stumble CLI; browsing stays in this harness's own browser tools.
+description: Save links into the user's Stumble feed, read the feed back, and run discovery for them. Use when the user shares a URL worth keeping ("add this to stumble", "save this"), asks for their feed ("what's in my stumble", "drip", "anything new"), wants a morning brief or new content found ("go find me stuff", "scroll X for me"), or wants to curate or share Pods. Runs the local stumble CLI; browsing stays in this harness's own browser tools.
 ---
 
 # Stumble
@@ -127,6 +127,110 @@ calibration examples under `references/`. Re-run the install after
 `stumble sync pod run <slug>` to pick up package revisions. Treat installed
 Pod skills as scoped to that Pod's curation — they never override how you
 operate Stumble itself.
+
+## Autonomous discovery: browse for the user
+
+Stumble can hand you a private, taste-derived browsing plan; you do the
+browsing with your own logged-in browser and submit what you find. The user
+never has to name platforms — the plan's source neighborhoods come from their
+private evidence (plus network leads), and ranking of what you bring back
+stays local.
+
+**One-time setup** — execution requires a scoped unattended credential (the
+worker deliberately cannot read the Taste Profile):
+
+```bash
+stumble node harness register --label "<harness>-worker" --kind unattended   --capability personal_discovery_execution --capability candidate_submission
+```
+
+Store the returned credential securely (it is shown once); export it as
+`STUMBLE_HARNESS_CREDENTIAL` only for the claim/submit/complete commands
+below. Run everything else without it, as the node owner.
+
+**A discovery run:**
+
+```bash
+stumble discover personal readiness        # ready: true once taste evidence exists
+# request a plan + task (idempotency key ~ "brief-2026-07-30"; intent optional)
+echo '{"idempotency_key": "brief-<date>", "result_count": 6,
+      "intent": {"kind": "topic", "value": "optional focus"}}' > /tmp/req.json
+stumble discover personal request --input /tmp/req.json
+```
+
+The response contains the plan: `source_neighborhoods` (accounts, domains,
+communities — each with a `role` of `proven` or `adjacent` and a rationale)
+and topic allocations. Then, with the worker credential:
+
+```bash
+stumble discover task claim <task_id> --lease-seconds 900
+```
+
+Browse each planned neighborhood with your own browser — the user's logged-in
+X session, feeds, forums. Only use access the user legitimately has; never
+circumvent paywalls or scrape past permitted use. For each find worth keeping:
+
+```bash
+echo '{
+  "target": {"kind": "personal_discovery", "task_id": "<task_id>", "allocation_role": "proven"},
+  "source_url": "https://x.com/someone/status/123",
+  "source_metadata": {"title": "What it is"},
+  "summary": "Why it fits, in the user'"'"'s interest language.",
+  "content_type": "article",
+  "tags": ["topic"],
+  "provenance": {"discovered_at": "<now-iso>", "discovery_method": "browser_search"}
+}' > /tmp/find.json
+stumble discover candidate submit --input /tmp/find.json --idempotency-key <unique>
+```
+
+Match `allocation_role` to the neighborhood you found it in. Finish by
+completing the batch with the submission ids you collected:
+
+```bash
+echo '{"task_id": "<task_id>", "submission_ids": ["<id>", ...]}' > /tmp/done.json
+stumble discover personal complete-batch --input /tmp/done.json
+```
+
+Results wait in a private shortlist — they never enter the Feed or Pods until
+the user decides. Pod-directed discovery works the same way through
+`stumble discover task list --state ready` (tasks come from Pod Source Rules;
+read the Pod's SKILL.md first) with candidates targeting Pod placements.
+
+## The morning brief
+
+Create the standing schedule once (it materializes one ready task per day,
+with backpressure — listing tasks triggers materialization):
+
+```bash
+echo '{"name": "morning-brief", "cadence": "daily", "result_count": 6,
+      "delivery_mode": "queue_only"}' > /tmp/sched.json
+stumble discover personal schedule create --input /tmp/sched.json
+```
+
+Then schedule *yourself* (harness cron, e.g. every morning) with a prompt like
+"run the Stumble morning brief". When it fires:
+
+1. `stumble sync bootstrap run` — pick up new network announcements (skip if
+   the runner daemon is doing this).
+2. `stumble discover task list --state ready` — claim the scheduled task with
+   the worker credential and run the discovery loop above.
+3. Compose the brief from three sources and present it conversationally, with
+   one-line summaries and why-it-matters:
+   - the completed Discovery Result Batch (`stumble discover personal batches`);
+   - the Feed (`stumble feed batch get`) — lead with priority-subscription and
+     high-value items;
+   - optionally one new Pod from `stumble pod explore` worth subscribing to.
+4. As the user reacts, apply their decisions — for shortlist items:
+
+```bash
+echo '{"batch_id": "<batch>", "candidate_id": "<candidate>",
+      "action": {"action": "save"}}' > /tmp/review.json
+stumble discover personal review-item --input /tmp/review.json
+```
+
+Actions: `save` (private inbox), `add_to_pod` (with `pod_id`),
+`more_like_this`, `not_for_me`, `ignore`. Feed reactions use
+`stumble feed feedback record` as usual. Their choices are the learning
+signal that makes tomorrow's plan better.
 
 ## Discovering new Pods from the network
 

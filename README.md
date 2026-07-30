@@ -51,6 +51,10 @@ Pods can vouch for each other: `stumble pod endorse <slug> --from <your-pod> --r
 sudo ./scripts/deploy-bootstrap-vps.sh bootstrap.example.com
 ``` Point your own node at an Index with `stumble sync discovery index add --label <name> --base-url <url>` — explore then fans explicit queries out to it and still ranks everything locally.
 
+### The morning brief
+
+Stumble plans, your harness browses, you wake up to a shortlist. A daily Personal Discovery schedule (`stumble discover personal schedule create`) materializes a browsing task each morning from your private taste evidence; the harness claims it, scrolls X and your other sources with its own logged-in browser, submits what fits, and presents the batch alongside your Feed as a conversational brief. Nothing enters your Feed or Pods until you say so — see the "Autonomous discovery" and "morning brief" workflows in [`SKILL.md`](SKILL.md).
+
 ### Use it from an AI harness
 
 Stumble is designed to be driven by an agent harness (Claude Code, Codex, Hermes, Pi, ...). The harness owns the browser — it reads pages with your logged-in sessions — and Stumble owns the collection and the Feed. Install the [`SKILL.md`](SKILL.md) at the repository root into your harness's skills directory and it will know the loop: open a shared link, understand it, `stumble add` it, and read your Feed back on request.
