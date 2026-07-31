@@ -13,6 +13,10 @@ path = "src/bin/stumble.rs"
 name = "stumble-runner"
 path = "src/bin/stumble-runner.rs"
 
+[[bin]]
+name = "stumble-api"
+path = "src/bin/stumble-api.rs"
+
 [dependencies]
 axum.workspace = true
 anyhow.workspace = true
@@ -30,4 +34,5 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+reqwest.workspace = true
 tower.workspace = true

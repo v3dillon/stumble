@@ -238,8 +238,8 @@ stumble sync pod run <slug>
 After subscribing, the Pod's items flow into `feed batch get` automatically,
 and `stumble pod package show <slug>` gives you the friend's curation context
 to work with. The sharer's node must be running `stumble-api` to be reachable
-(a separate binary, not part of the `stumble-cli` install:
-`cargo install --path crates/stumble-api --locked`).
+(same install as the CLI — `curl -fsSL https://raw.githubusercontent.com/v3dillon/stumble/main/scripts/install.sh | bash`
+puts `stumble`, `stumble-api`, and `stumble-runner` on `PATH`).
 
 To make a Pod's guidance part of your own skill system, install it:
 

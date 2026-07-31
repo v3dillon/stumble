@@ -48,7 +48,8 @@ fi
 export PATH="$HOME/.cargo/bin:$PATH"
 
 echo "==> Building release binaries"
-cargo build --release --manifest-path "$REPO_DIR/Cargo.toml" -p stumble-cli -p stumble-api
+# One package ships both product binaries (CLI + HTTP server).
+cargo build --release --manifest-path "$REPO_DIR/Cargo.toml" -p stumble-cli
 install -m 0755 "$REPO_DIR/target/release/stumble" /usr/local/bin/stumble
 install -m 0755 "$REPO_DIR/target/release/stumble-api" /usr/local/bin/stumble-api
 

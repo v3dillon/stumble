@@ -3,13 +3,18 @@
 //! This crate serves only the surface other Stumble nodes reach: federation,
 //! Bootstrap admission and streams, and Discovery Peer serving. The private
 //! User and Harness surface lives in the CLI and MCP adapters.
+//!
+//! The `stumble-api` binary is shipped by the install package (`stumble-cli`);
+//! its process entrypoint is [`cli::run`].
 
 mod announcements;
+mod cli;
 mod clients;
 mod docs;
 mod error;
 mod federation;
 
+pub use cli::run;
 pub use clients::{
     fetch_pod_endorsements_from_bootstrap, submit_pod_announcement_to_bootstrap,
     submit_pod_endorsement_to_bootstrap, ReqwestAnnouncementStreamClient,

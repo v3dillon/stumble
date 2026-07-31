@@ -1,8 +1,14 @@
+//! Process entrypoint for the `stumble-api` binary.
+//!
+//! Lives in the library so the install package (`stumble-cli`) and any
+//! package-local binary can share one implementation.
+
 use clap::{Parser, ValueEnum};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use stumble_api::{
+
+use crate::{
     bind_with_port, router_with_options, ReqwestDiscoveryPeerProbe, ReqwestOriginProbe,
     RouterOptions,
 };
@@ -34,8 +40,8 @@ enum Mode {
     Hosted,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Parse process args and serve the node-to-node HTTP API until shutdown.
+pub async fn run() -> anyhow::Result<()> {
     let args = Args::parse();
     // Match the `stumble` CLI default so serving never opens a different node.
     let data_dir = match args.data_dir {

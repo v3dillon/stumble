@@ -1,25 +1,53 @@
 # Stumble
 
+![Stumble mascots](docs/assets/stumble-mascots.jpg)
+
 Stumble is a decentralized personal discovery system. It builds a personal Feed from independently curated Pods on a local Home Node.
 
 ## Get started
 
-Install [Rust](https://rustup.rs), clone this repository, then run:
+Install the prebuilt binaries (macOS and Linux; no Rust required):
 
 ```bash
-cargo install --path crates/stumble-cli --locked
+curl -fsSL https://raw.githubusercontent.com/v3dillon/stumble/main/scripts/install.sh | bash
+```
+
+That installs three commands into `~/.local/bin` (override with `STUMBLE_INSTALL_DIR`):
+
+| Binary | Role |
+| --- | --- |
+| `stumble` | Local CLI — save links, press the Feed, curate Pods |
+| `stumble-api` | HTTP server — share Pods, federation, Bootstrap/Index roles |
+| `stumble-runner` | Long-running daemon — network sync, MCP, scheduled workers |
+
+If `~/.local/bin` is not already on your `PATH`, the script prints the line to add. Pin a version with `STUMBLE_VERSION=v0.1.0`, or grab a tarball from [Releases](https://github.com/v3dillon/stumble/releases).
+
+Then the whole loop:
+
+```bash
 stumble node init
 stumble add "https://example.com/something-worth-keeping"
 stumble
 ```
 
-That is the whole loop: initialize once, add links as you find them, and press `stumble` when you want something. Every bare press shows one new item — link, summary, cover — from your Feed, rolling into a fresh batch when the current one is walked; when your Feed is caught up it reaches out to the network for a clearly labeled sample from an unsubscribed public Pod. `stumble add` creates a private `saved` Pod on first use, places the link in it, and makes it Feed-eligible in one step. (`stumble feed batch get` reads the Feed as a batch instead of one press at a time.)
+Initialize once, add links as you find them, and press `stumble` when you want something. Every bare press shows one new item — link, summary, cover — from your Feed, rolling into a fresh batch when the current one is walked; when your Feed is caught up it reaches out to the network for a clearly labeled sample from an unsubscribed public Pod. `stumble add` creates a private `saved` Pod on first use, places the link in it, and makes it Feed-eligible in one step. (`stumble feed batch get` reads the Feed as a batch instead of one press at a time.)
 
 Stumble stores its Home Node under `~/.stumble/nodes/home` by default. Set `STUMBLE_DATA_DIR` or pass `--data-dir` to use another directory. `stumble node init` also records the local Owner credential in the operating system's credential store; later local commands detect its presence automatically. Pass `--demo` to `node init` for throwaway fixture data.
 
+Stumble is designed to be driven by an agent harness (Claude Code, Codex, Hermes, Pi, …). The harness owns the browser — it reads pages with your logged-in sessions — and Stumble owns the collection and the Feed. After the install above, install the skill globally so every harness can find it:
+
+```bash
+npx skills add v3dillon/stumble -g -y   # global skill for your agents
+npx skills update -g                    # refresh after the repo changes
+```
+
+(`-g` installs under each agent’s user skills directory rather than only this checkout; `-y` skips prompts. Without npx, copy the repository’s root [`SKILL.md`](SKILL.md) to `~/.agents/skills/stumble/SKILL.md`.) Your harness then knows the loop: open a shared link, understand it, `stumble add` it, and read your Feed back on request. (Pod skills installed with `stumble pod skill install` update by re-running the install after a `sync pod run`.)
+
+For a guided first run, paste [`llms.txt`](llms.txt) into the harness — or point it at `https://your-bootstrap/llms.txt`, which every node serves with its own URL pre-filled. That script installs Stumble, connects to a Bootstrap, has you log into X in the harness browser, learns your taste from “send me something cool,” runs your first discovery scroll, and offers your first Pod.
+
 ### Share a Pod with a friend
 
-A Pod travels with its context: subscribing pulls the accepted content *and* the Pod Package (`CONTEXT.md` + `SKILL.md`), so your friend's harness immediately understands the Pod's subject and curation rules. Serving needs the API binary, which installs separately: `cargo install --path crates/stumble-api --locked`.
+A Pod travels with its context: subscribing pulls the accepted content *and* the Pod Package (`CONTEXT.md` + `SKILL.md`), so your friend's harness immediately understands the Pod's subject and curation rules. `stumble-api` is already on your `PATH` from Get started — keep it running while friends sync.
 
 ```bash
 # You: publish and serve
@@ -61,21 +89,6 @@ Point your own node at an Index with `stumble sync discovery index add --label <
 ### The morning brief
 
 Stumble plans, your harness browses, you wake up to a shortlist. A daily Personal Discovery schedule (`stumble discover personal schedule create`) materializes a browsing task each morning from your private taste evidence; the harness claims it, scrolls X and your other sources with its own logged-in browser, submits what fits, and presents the batch alongside your Feed as a conversational brief. Nothing enters your Feed or Pods until you say so — see the "Autonomous discovery" and "morning brief" workflows in [`SKILL.md`](SKILL.md).
-
-### Get started for your agent
-
-[`llms.txt`](llms.txt) is a paste-able get-started script for your AI harness: it installs Stumble, connects to a Bootstrap, has you log into X in the harness browser, learns your taste from "send me something cool," runs your first discovery scroll, and offers your first Pod. Paste the file into the harness — or point it at `https://your-bootstrap/llms.txt`, which every node serves with its own URL pre-filled.
-
-### Use it from an AI harness
-
-Stumble is designed to be driven by an agent harness (Claude Code, Codex, Hermes, Pi, ...). The harness owns the browser — it reads pages with your logged-in sessions — and Stumble owns the collection and the Feed. With the CLI already installed (see Get started above), install the skill globally so every harness can find it:
-
-```bash
-npx skills add v3dillon/stumble -g -y   # global skill for your agents
-npx skills update -g                    # refresh after the repo changes
-```
-
-(`-g` installs under each agent’s user skills directory rather than only this checkout; `-y` skips prompts. Without npx, copy the repository’s root `SKILL.md` to `~/.agents/skills/stumble/SKILL.md`.) Your harness then knows the loop: open a shared link, understand it, `stumble add` it, and read your Feed back on request. (Pod skills installed with `stumble pod skill install` update by re-running the install after a `sync pod run`.)
 
 ## Quick actions
 
@@ -217,3 +230,54 @@ Manage trusted peers and synchronize Pod state.
 | `stumble sync discovery index list` | List configured Index Nodes. |
 | `stumble sync discovery index add` | Add a replaceable Index Node (`--label`, `--base-url`). |
 | `stumble sync discovery index remove` | Remove an Index Node. |
+
+## Develop
+
+Day-to-day product use is Get started (prebuilt binaries). This section is for contributors.
+
+### Build from source
+
+Install [Rust](https://rustup.rs), clone this repository, then:
+
+```bash
+git clone https://github.com/v3dillon/stumble && cd stumble
+cargo install --path crates/stumble-cli --locked
+```
+
+That installs the same three binaries (`stumble`, `stumble-api`, `stumble-runner`) as the release tarball. Optional MCP server:
+
+```bash
+cargo install --path crates/stumble-mcp --locked
+```
+
+### Multi-crate layout
+
+The repository is multi-crate so each surface stays focused; users still get one product install:
+
+| Crate | What it is |
+| --- | --- |
+| `stumble-cli` | **Install package** — ships `stumble`, `stumble-api`, and `stumble-runner` |
+| `stumble-core` | Domain model, store, agent tools (library) |
+| `stumble-api` | Node-to-node HTTP surface (library; binary entrypoint lives here, binary target in `stumble-cli`) |
+| `stumble-mcp` | MCP transport (optional separate binary) |
+| `stumble-sync` | Sync helpers (library) |
+
+```bash
+cargo test -p stumble-core
+cargo test -p stumble-api
+cargo test -p stumble-cli
+cargo build -p stumble-cli --release --bin stumble-api
+```
+
+### Publishing a release
+
+Push a version tag; CI builds platform tarballs and attaches them to a GitHub Release (plus `install.sh` and `SHA256SUMS`):
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Targets: `macos-arm64`, `macos-x86_64`, `linux-arm64`, `linux-x86_64`. Workflow: [`.github/workflows/release.yml`](.github/workflows/release.yml).
+
+`stumble` has no `serve` or `--api` mode on purpose (local workflows stay local). Remote reachability is always the separate `stumble-api` process — it just ships in the same install.
