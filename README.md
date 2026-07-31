@@ -1,6 +1,6 @@
 # Stumble
 
-![Stumble mascots](docs/assets/stumble-mascots.jpg)
+<img src="docs/assets/stumble-mascots.png" alt="Stumble mascots" width="300">
 
 Stumble is a decentralized personal discovery system. It builds a personal Feed from independently curated Pods on a local Home Node.
 
