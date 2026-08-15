@@ -26,6 +26,35 @@ Pass `--no-index` and/or `--no-relay` after the domain to turn off those roles.
 The three capabilities stay independent flags on one process, never one fused
 role.
 
+## Coolify (same VPS, Coolify owns TLS)
+
+Do **not** run `deploy-bootstrap-vps.sh` on a Coolify host. That script
+installs Caddy and overwrites `/etc/caddy/Caddyfile`. Use the root
+`Dockerfile` instead and let Coolify terminate HTTPS.
+
+1. In Cloudflare, create an A (and AAAA) record for
+   `bootstrap.stumble.network` that points at the VPS. Keep the record
+   DNS-only (grey cloud) so Coolify can issue the certificate.
+2. In Coolify: **New Resource** → **Git Repository** → `v3dillon/stumble`,
+   branch `main`.
+3. Build pack: **Dockerfile** (root `Dockerfile`). Port: `8787`.
+   Health check path: `/health`.
+4. Persistent storage: one volume mounted at `/data`. One replica only —
+   SQLite does not accept two writers.
+5. Environment:
+
+```bash
+STUMBLE_DATA_DIR=/data/node
+STUMBLE_CREDENTIAL_STORE_DIR=/data/credentials
+STUMBLE_BASE_URL=https://bootstrap.stumble.network
+```
+
+   Leave `STUMBLE_BOOTSTRAP`, `STUMBLE_INDEX`, and `STUMBLE_RELAY` unset
+   (they default on). Set any of them to `0` to disable that role.
+6. Domains: `https://bootstrap.stumble.network`.
+7. Deploy. First start runs `stumble node init` into `/data`. Later
+   deploys reuse that volume.
+
 The script is idempotent — to upgrade, `git pull` and re-run it. Note that it
 owns the entire `/etc/caddy/Caddyfile`: every run overwrites the file with its
 single domain block, clobbering any other site served from the box. It:
