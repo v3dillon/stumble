@@ -1,0 +1,8 @@
+target
+.git
+.scratch
+**/*.md
+!docs/deploy-bootstrap.md
+skills
+config
+llms.txt
