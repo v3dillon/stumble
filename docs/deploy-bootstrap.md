@@ -1,10 +1,12 @@
-# Deploy a Bootstrap/Index node on a VPS
+# Deploy a Bootstrap/Index/Relay node on a VPS
 
 A Bootstrap node gives the network an initial meeting point: Origins push signed
 Pod Announcements to it, and Home Nodes pull its topic-neutral Announcement
 Stream. An Index node answers explicit Explore queries over the same admitted
-announcements. Neither role gains authority — every artifact stays
-Origin-signed and is re-verified by each Home Node (ADR-0037, ADR-0046).
+announcements. A Relay node caches and serves Origin-signed Pod snapshots so a
+private Home Node can publish without a public listener. No role gains
+authority — every artifact stays Origin-signed and is re-verified by each Home
+Node (ADR-0037, ADR-0046, ADR-0055).
 
 Any small VPS works: 1 vCPU / 1 GB RAM is plenty. The store is a single SQLite
 file.
@@ -20,7 +22,9 @@ git clone https://github.com/<you>/stumble && cd stumble
 sudo ./scripts/deploy-bootstrap-vps.sh bootstrap.example.com
 ```
 
-Pass `--no-index` as the second argument to serve only the Bootstrap role.
+Pass `--no-index` and/or `--no-relay` after the domain to turn off those roles.
+The three capabilities stay independent flags on one process, never one fused
+role.
 
 The script is idempotent — to upgrade, `git pull` and re-run it. Note that it
 owns the entire `/etc/caddy/Caddyfile`: every run overwrites the file with its
@@ -31,7 +35,7 @@ single domain block, clobbering any other site served from the box. It:
 - creates a `stumble` system user with a Home Node under `/var/lib/stumble`
   (file-based Owner Credential store via `STUMBLE_CREDENTIAL_STORE_DIR`);
 - installs a hardened `stumble-bootstrap` systemd unit running
-  `stumble-api --bootstrap --index --bind 127.0.0.1:8787 --base-url https://<domain>`;
+  `stumble-api --bootstrap --index --relay --bind 127.0.0.1:8787 --base-url https://<domain>`;
 - configures Caddy to terminate TLS for the domain (certificates are automatic
   via Let's Encrypt) and reverse-proxy to the loopback bind.
 
@@ -43,8 +47,10 @@ curl "https://bootstrap.example.com/bootstrap/announcements/stream?limit=5"
 ```
 
 The well-known response advertises `bootstrap_announcements`,
-`bootstrap_announcement_stream`, and (with the Index role)
-`index_search_announcements`.
+`bootstrap_announcement_stream`, (with the Index role)
+`index_search_announcements`, and (with the Relay role) `relay_publications`
+and `relay_pod_snapshot_template`. A process with a role off never advertises
+that role.
 
 ## Onboard friends with one link
 
@@ -80,6 +86,19 @@ interval; `stumble pod explore` fans explicit queries out to the Index.
 Origins (publishers) need nothing extra: `stumble pod publish` and the daemon's
 re-announce tick push announcements to every enabled Bootstrap endpoint
 automatically.
+
+Private Origins (no public listener) publish through the Relay:
+
+```bash
+stumble pod publish <slug> --base-url https://bootstrap.example.com --via-relay
+stumble pod relay-push <slug> --relay-url https://bootstrap.example.com  # later updates
+```
+
+The share URL becomes
+`https://bootstrap.example.com/relay/pods/<origin-node-id>/<slug>`. Friends
+subscribe to that URL; their nodes pin the Origin identity from the signed
+snapshot, never the Relay. The Relay stores only the signed public snapshot —
+no Taste Profile, Subscriptions, Candidates, or Owner credentials.
 
 ## Operate
 

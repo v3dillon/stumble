@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Deploys a Stumble Bootstrap + Index node on an Ubuntu/Debian VPS.
+# Deploys a Stumble Bootstrap + Index + Relay node on an Ubuntu/Debian VPS.
 #
 #   sudo ./scripts/deploy-bootstrap-vps.sh bootstrap.example.com
+#   flags: --no-index, --no-relay
 #
 # Idempotent: re-run after `git pull` to upgrade in place. Installs Rust and
 # Caddy if missing, builds release binaries, initializes a Home Node under a
@@ -9,11 +10,20 @@
 # Prerequisite: a DNS A/AAAA record for the domain pointing at this machine.
 set -euo pipefail
 
-DOMAIN="${1:?usage: deploy-bootstrap-vps.sh <domain> [--no-index]}"
+DOMAIN="${1:?usage: deploy-bootstrap-vps.sh <domain> [--no-index] [--no-relay]}"
+shift
 INDEX_FLAG="--index"
-if [[ "${2:-}" == "--no-index" ]]; then
-  INDEX_FLAG=""
-fi
+RELAY_FLAG="--relay"
+for flag in "$@"; do
+  case "$flag" in
+    --no-index) INDEX_FLAG="" ;;
+    --no-relay) RELAY_FLAG="" ;;
+    *)
+      echo "unknown flag: $flag (expected --no-index or --no-relay)" >&2
+      exit 1
+      ;;
+  esac
+done
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "run with sudo (installs packages, writes systemd units)" >&2
   exit 1
@@ -67,7 +77,7 @@ fi
 echo "==> Writing systemd unit"
 cat >/etc/systemd/system/stumble-bootstrap.service <<UNIT
 [Unit]
-Description=Stumble Bootstrap/Index node
+Description=Stumble Bootstrap/Index/Relay node
 After=network-online.target
 Wants=network-online.target
 
@@ -75,7 +85,7 @@ Wants=network-online.target
 User=stumble
 Environment=STUMBLE_DATA_DIR=$DATA_DIR
 Environment=STUMBLE_CREDENTIAL_STORE_DIR=$CREDENTIAL_DIR
-ExecStart=/usr/local/bin/stumble-api --bootstrap $INDEX_FLAG --bind $BIND --base-url https://$DOMAIN
+ExecStart=/usr/local/bin/stumble-api --bootstrap $INDEX_FLAG $RELAY_FLAG --bind $BIND --base-url https://$DOMAIN
 Restart=always
 RestartSec=5
 NoNewPrivileges=true

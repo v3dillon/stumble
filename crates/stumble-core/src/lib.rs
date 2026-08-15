@@ -69,9 +69,9 @@ pub use pod_announcement::{
     announcement_delivery_is_active, announcement_is_discovery_eligible,
     build_signed_pod_announcement, compare_announcement_preference,
     issue_and_retain_origin_pod_announcement, issue_origin_pod_withdrawal,
-    refresh_public_pod_announcement_if_needed, retain_verified_pod_announcement,
-    retain_verified_pod_withdrawal, retains_bootstrap_url, retains_discovery_peer_endpoint,
-    validate_public_pod_url, DeliveryProvenance,
+    refresh_public_pod_announcement_if_needed, relay_public_pod_url_parts,
+    retain_verified_pod_announcement, retain_verified_pod_withdrawal, retains_bootstrap_url,
+    retains_discovery_peer_endpoint, validate_public_pod_url, DeliveryProvenance,
 };
 pub use pod_similarity::{
     agent_evidence_is_active, append_trial_exposure_label,

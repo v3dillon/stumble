@@ -223,6 +223,18 @@ async fn fetch_pod_snapshot(
             source,
         }
     })?;
+    // A Relay-shaped address serves the whole Origin-signed snapshot in one
+    // response. The snapshot's own `node` is the Origin; the Relay host's
+    // well-known identity is the Relay and must never be pinned as Origin.
+    if relay_public_pod_url_parts(pod_url.path()).is_some() {
+        let snapshot = fetch_json::<FederationPodSnapshot>(client, public_pod_url).await?;
+        let events = filter_events_after_cursor(snapshot.events, after_event_hash)?;
+        return Ok(FederationPodSnapshot::new(
+            snapshot.node,
+            snapshot.manifest,
+            events,
+        ));
+    }
     let mut origin_url = pod_url.clone();
     origin_url.set_path("");
     origin_url.set_query(None);
@@ -251,17 +263,24 @@ async fn fetch_pod_snapshot(
     let manifest = fetch_json(client, &manifest_url).await?;
     let events_url = format!("{}/events", public_pod_url.trim_end_matches('/'));
     let all_events = fetch_json::<Vec<EventLog>>(client, &events_url).await?;
-    let events = match after_event_hash {
+    let events = filter_events_after_cursor(all_events, after_event_hash)?;
+    Ok(FederationPodSnapshot::new(node, manifest, events))
+}
+
+fn filter_events_after_cursor(
+    all_events: Vec<EventLog>,
+    after_event_hash: Option<&str>,
+) -> Result<Vec<EventLog>, DirectSubscriptionError> {
+    match after_event_hash {
         Some(cursor) => {
             let index = all_events
                 .iter()
                 .position(|event| event.content_hash == cursor)
                 .ok_or(DirectSubscriptionError::UnknownCursor)?;
-            all_events.into_iter().skip(index + 1).collect()
+            Ok(all_events.into_iter().skip(index + 1).collect())
         }
-        None => all_events,
-    };
-    Ok(FederationPodSnapshot::new(node, manifest, events))
+        None => Ok(all_events),
+    }
 }
 
 async fn fetch_json<T: serde::de::DeserializeOwned>(

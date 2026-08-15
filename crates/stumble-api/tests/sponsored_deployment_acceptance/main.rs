@@ -8,3 +8,4 @@
 mod capability_surfaces;
 mod common;
 mod multi_node;
+mod relay_publication;

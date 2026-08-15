@@ -233,6 +233,26 @@ impl FederationPodSnapshot {
     }
 }
 
+/// Maximum serialized snapshot size accepted by open Relay admission (1 MiB).
+pub const MAX_RELAY_SNAPSHOT_PAYLOAD_BYTES: usize = 1_048_576;
+
+/// Origin-signed public Pod snapshot cached by an optional Relay Node.
+///
+/// The Relay stores and serves the snapshot unchanged. It never re-signs,
+/// never becomes the Origin, and never holds Home Node private state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RelayPublication {
+    /// Authoritative Origin Node identity that signed the snapshot.
+    pub origin_node_id: NodeIdentityId,
+    /// Public Pod slug at the Origin Node.
+    pub pod_slug: String,
+    /// Verified Origin snapshot served verbatim to subscribers.
+    pub snapshot: FederationPodSnapshot,
+    /// Time at which this Relay admitted the snapshot.
+    pub received_at: DateTime<Utc>,
+}
+
 /// Local-only relationship making one Pod Feed-eligible for one User.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]

@@ -5,8 +5,8 @@ use super::{
 };
 use crate::parser::{
     AnnouncePodArgs, ContentWorkflow, CreatePodArgs, EndorsePodArgs, PackageWorkflow, PodWorkflow,
-    PolicyMode, PolicyWorkflow, PublishPodArgs, RoleChangeArgs, RoleWorkflow, SkillInstallArgs,
-    SkillWorkflow, SubscriptionWorkflow, VisibilityWorkflow,
+    PolicyMode, PolicyWorkflow, PublishPodArgs, RelayPushPodArgs, RoleChangeArgs, RoleWorkflow,
+    SkillInstallArgs, SkillWorkflow, SubscriptionWorkflow, VisibilityWorkflow,
 };
 use serde_json::json;
 use stumble_cli::{paginate, ErrorBody, ExitStatusCategory};
@@ -48,9 +48,8 @@ pub(super) fn execute(command: PodWorkflow, tools: &AgentTools, actor: &AuthCont
         PodWorkflow::Create(args) => create_pod(args, tools, actor),
         PodWorkflow::Explore(args) => {
             let sample_size = usize::from(args.sample_size);
-            let request =
-                ExploreRequest::new(args.query.unwrap_or_default(), 50, sample_size)
-                    .map_err(|error| agent_tools_error(error.into()))?;
+            let request = ExploreRequest::new(args.query.unwrap_or_default(), 50, sample_size)
+                .map_err(|error| agent_tools_error(error.into()))?;
             // When Indexes are configured, fan out explicit query via HTTP transport
             // then rank locally. Empty/local-only Explore stays on the Home Node.
             let has_indexes = tools
@@ -77,9 +76,8 @@ pub(super) fn execute(command: PodWorkflow, tools: &AgentTools, actor: &AuthCont
             // Best-effort: unreachable nodes never fail Explore.
             let mut enriched = 0usize;
             if sample_size > 0 {
-                let sample_client = stumble_api::ReqwestOriginExploreSampleClient::new(
-                    runtime.handle().clone(),
-                );
+                let sample_client =
+                    stumble_api::ReqwestOriginExploreSampleClient::new(runtime.handle().clone());
                 enriched += explored
                     .results
                     .iter()
@@ -108,13 +106,12 @@ pub(super) fn execute(command: PodWorkflow, tools: &AgentTools, actor: &AuthCont
                 .collect();
             for result in explored.results.iter().take(5) {
                 for endpoint in &bootstrap_endpoints {
-                    let fetched = runtime.block_on(
-                        stumble_api::fetch_pod_endorsements_from_bootstrap(
+                    let fetched =
+                        runtime.block_on(stumble_api::fetch_pod_endorsements_from_bootstrap(
                             &endpoint.base_url,
                             result.announcement.origin_node_id,
                             &result.announcement.pod_slug,
-                        ),
-                    );
+                        ));
                     for endorsement in fetched.unwrap_or_default() {
                         if tools.index_pod_endorsement(endorsement).is_ok() {
                             enriched += 1;
@@ -143,6 +140,7 @@ pub(super) fn execute(command: PodWorkflow, tools: &AgentTools, actor: &AuthCont
         PodWorkflow::Publish(args) => publish(&args, tools, actor),
         PodWorkflow::Endorse(args) => endorse(&args, tools, actor),
         PodWorkflow::Announce(args) => announce(&args, tools, actor),
+        PodWorkflow::RelayPush(args) => relay_push(&args, tools, actor),
         PodWorkflow::Subscribe(args) => subscribe(&args.pod, tools, actor),
         PodWorkflow::Unsubscribe(args) => {
             let pod = resolve_pod(tools, actor, &args.pod)?;
@@ -392,13 +390,27 @@ fn publish(args: &PublishPodArgs, tools: &AgentTools, actor: &AuthContext) -> Cl
             }));
         }
     }
+    // The Relay serves the signed snapshot; the Origin needs no listener.
+    let origin_node_id = if args.via_relay {
+        Some(tools.node_info(actor).map_err(agent_tools_error)?.node_id)
+    } else {
+        None
+    };
     let share_url = args.base_url.as_ref().map(|base| {
-        format!(
-            "{}/federation/pods/{}",
-            base.trim_end_matches('/'),
-            pod.slug
-        )
+        let base = base.trim_end_matches('/');
+        match origin_node_id {
+            Some(node_id) => format!("{base}/relay/pods/{node_id}/{}", pod.slug),
+            None => format!("{base}/federation/pods/{}", pod.slug),
+        }
     });
+    // Snapshot push happens before the announcement so a Bootstrap probing the
+    // Relay URL finds the snapshot already stored.
+    let relay_push = match (&share_url, args.via_relay) {
+        (Some(relay_url), true) => {
+            Some(push_snapshot_to_relay(tools, actor, &pod.slug, relay_url)?)
+        }
+        _ => None,
+    };
     let announcement = share_url
         .as_ref()
         .map(|url| {
@@ -416,15 +428,74 @@ fn publish(args: &PublishPodArgs, tools: &AgentTools, actor: &AuthContext) -> Cl
         }
         None => Vec::new(),
     };
+    let serve_hint = if args.via_relay {
+        "friends can subscribe through the Relay URL; this node needs no public listener"
+    } else {
+        "friends can subscribe once this node is reachable: stumble-api --bind <addr>"
+    };
     Ok(json!({
         "pod_id": pod.id,
         "slug": pod.slug,
         "status": "published",
         "share_url": share_url,
-        "share_url_template": "<base-url>/federation/pods/<slug>",
+        "share_url_template": if args.via_relay {
+            "<base-url>/relay/pods/<origin-node-id>/<slug>"
+        } else {
+            "<base-url>/federation/pods/<slug>"
+        },
+        "relay_push": relay_push,
         "announcement": announcement,
         "bootstrap_submissions": bootstrap_submissions,
-        "serve_hint": "friends can subscribe once this node is reachable: stumble-api --bind <addr>",
+        "serve_hint": serve_hint,
+    }))
+}
+
+/// Builds the current signed snapshot and POSTs it to a canonical Relay URL.
+fn push_snapshot_to_relay(
+    tools: &AgentTools,
+    actor: &AuthContext,
+    pod_slug: &str,
+    relay_pod_url: &str,
+) -> Result<serde_json::Value, (ErrorBody, ExitStatusCategory)> {
+    let snapshot = tools
+        .federation_pod_snapshot(actor, pod_slug, None)
+        .map_err(agent_tools_error)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(internal_error)?;
+    let result = runtime.block_on(stumble_api::submit_pod_snapshot_to_relay(
+        relay_pod_url,
+        &snapshot,
+    ));
+    Ok(match result {
+        Ok(_) => json!({
+            "relay_pod_url": relay_pod_url,
+            "status": "admitted",
+        }),
+        Err(reason) => json!({
+            "relay_pod_url": relay_pod_url,
+            "status": "failed",
+            "reason": reason,
+        }),
+    })
+}
+
+/// Pushes the current signed snapshot of a published Pod to a Relay so later
+/// event updates reach subscribers without a public Origin listener.
+fn relay_push(args: &RelayPushPodArgs, tools: &AgentTools, actor: &AuthContext) -> CliResult {
+    let pod = resolve_pod(tools, actor, &args.pod)?;
+    let node_id = tools.node_info(actor).map_err(agent_tools_error)?.node_id;
+    let relay_pod_url = format!(
+        "{}/relay/pods/{node_id}/{}",
+        args.relay_url.trim_end_matches('/'),
+        pod.slug
+    );
+    let report = push_snapshot_to_relay(tools, actor, &pod.slug, &relay_pod_url)?;
+    Ok(json!({
+        "pod_id": pod.id,
+        "slug": pod.slug,
+        "relay_push": report,
     }))
 }
 
@@ -496,8 +567,26 @@ fn announce(args: &AnnouncePodArgs, tools: &AgentTools, actor: &AuthContext) -> 
             ));
         }
     }
+    // A Relay-shaped announcement URL means subscribers read the Relay, not
+    // this node: re-push the current signed snapshot so the Relay stays fresh.
+    let mut relay_pushes = Vec::new();
+    for announcement in &refreshed {
+        let is_relay_shaped = url::Url::parse(&announcement.public_pod_url)
+            .ok()
+            .and_then(|url| stumble_core::relay_public_pod_url_parts(url.path()))
+            .is_some();
+        if is_relay_shaped {
+            relay_pushes.push(push_snapshot_to_relay(
+                tools,
+                actor,
+                &announcement.pod_slug,
+                &announcement.public_pod_url,
+            )?);
+        }
+    }
     let bootstrap_submissions = push_announcements_to_bootstraps(tools, actor, &refreshed)?;
     Ok(json!({
+        "relay_pushes": relay_pushes,
         "refreshed": refreshed
             .iter()
             .map(|announcement| json!({

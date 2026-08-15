@@ -196,12 +196,33 @@ pub fn announcement_is_discovery_eligible(
     true
 }
 
+/// Origin identity and Pod slug parsed from a Relay-shaped public Pod path.
+///
+/// Returns `Some((origin_node_id, slug))` when the path is
+/// `/relay/pods/<origin_node_id>/<slug>`, and `None` for every other shape.
+#[must_use]
+pub fn relay_public_pod_url_parts(path: &str) -> Option<(Uuid, String)> {
+    let path = path.trim_end_matches('/');
+    let segments = path.split('/').collect::<Vec<_>>();
+    if segments.len() != 5
+        || !segments[0].is_empty()
+        || segments[1] != "relay"
+        || segments[2] != "pods"
+        || segments[4].is_empty()
+    {
+        return None;
+    }
+    let origin_node_id = segments[3].parse::<Uuid>().ok()?;
+    Some((origin_node_id, segments[4].to_string()))
+}
+
 /// Validates and canonicalizes a direct public Pod address.
 ///
 /// # Errors
 ///
 /// Returns a validation error unless the address uses HTTPS (or loopback HTTP)
-/// and has the canonical `/federation/pods/<slug>` shape.
+/// and has the canonical `/federation/pods/<slug>` Origin shape or the
+/// `/relay/pods/<origin_node_id>/<slug>` Relay shape.
 pub fn canonical_public_pod_url(value: &str) -> Result<String, StoreError> {
     let mut url =
         Url::parse(value).map_err(|error| StoreError::Validation(format!("bad url: {error}")))?;
@@ -220,14 +241,15 @@ pub fn canonical_public_pod_url(value: &str) -> Result<String, StoreError> {
     }
     let path = url.path().trim_end_matches('/').to_string();
     let segments = path.split('/').collect::<Vec<_>>();
-    if segments.len() != 4
-        || !segments[0].is_empty()
-        || segments[1] != "federation"
-        || segments[2] != "pods"
-        || segments[3].is_empty()
-    {
+    let is_origin_shape = segments.len() == 4
+        && segments[0].is_empty()
+        && segments[1] == "federation"
+        && segments[2] == "pods"
+        && !segments[3].is_empty();
+    if !is_origin_shape && relay_public_pod_url_parts(&path).is_none() {
         return Err(StoreError::Validation(
-            "public Pod URL must use /federation/pods/<slug>".to_string(),
+            "public Pod URL must use /federation/pods/<slug> or /relay/pods/<origin_node_id>/<slug>"
+                .to_string(),
         ));
     }
     url.set_path(&path);
@@ -246,7 +268,12 @@ pub fn validate_public_pod_url(value: &str, pod_slug: &str) -> Result<String, St
     let canonical = canonical_public_pod_url(value)?;
     let url = Url::parse(&canonical)
         .map_err(|error| StoreError::Validation(format!("bad url: {error}")))?;
-    if url.path().trim_end_matches('/') != format!("/federation/pods/{pod_slug}") {
+    let path = url.path().trim_end_matches('/');
+    let matches_slug = match relay_public_pod_url_parts(path) {
+        Some((_, relay_slug)) => relay_slug == pod_slug,
+        None => path == format!("/federation/pods/{pod_slug}"),
+    };
+    if !matches_slug {
         return Err(StoreError::Validation(
             "public Pod URL does not match the signed Pod slug".to_string(),
         ));
@@ -684,6 +711,54 @@ mod tests {
             "lease end is exclusive: active only while expires_at > now"
         );
         assert!(!announcement.lease_is_active(expires_at + chrono::Duration::seconds(1)));
+    }
+
+    #[test]
+    fn canonical_url_accepts_origin_and_relay_shapes() {
+        let origin = canonical_public_pod_url("https://origin.example/federation/pods/systems/")
+            .expect("origin shape");
+        assert_eq!(origin, "https://origin.example/federation/pods/systems");
+
+        let origin_node_id = Uuid::now_v7();
+        let relay = canonical_public_pod_url(&format!(
+            "https://relay.example/relay/pods/{origin_node_id}/systems"
+        ))
+        .expect("relay shape");
+        assert_eq!(
+            relay,
+            format!("https://relay.example/relay/pods/{origin_node_id}/systems")
+        );
+        assert_eq!(
+            relay_public_pod_url_parts(&format!("/relay/pods/{origin_node_id}/systems")),
+            Some((origin_node_id, "systems".to_string()))
+        );
+
+        assert!(canonical_public_pod_url("https://relay.example/relay/pods/systems").is_err());
+        assert!(canonical_public_pod_url(&format!(
+            "https://relay.example/relay/pods/not-a-uuid/systems"
+        ))
+        .is_err());
+        assert!(canonical_public_pod_url(&format!(
+            "https://relay.example/relay/pods/{origin_node_id}/"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn validate_url_matches_slug_for_both_shapes() {
+        let origin_node_id = Uuid::now_v7();
+        let relay_url = format!("https://relay.example/relay/pods/{origin_node_id}/systems");
+        assert!(validate_public_pod_url(&relay_url, "systems").is_ok());
+        assert!(validate_public_pod_url(&relay_url, "other").is_err());
+        assert!(validate_public_pod_url(
+            "https://origin.example/federation/pods/systems",
+            "systems"
+        )
+        .is_ok());
+        assert!(
+            validate_public_pod_url("https://origin.example/federation/pods/systems", "other")
+                .is_err()
+        );
     }
 
     #[test]

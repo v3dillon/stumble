@@ -143,7 +143,7 @@ Announcement lease and withdrawal state persist in the authoritative SQLite stor
 
 ## Sponsored multi-node acceptance and operator docs
 
-The milestone proof is a deterministic multi-node HTTP scenario against real temporary SQLite stores: separate Origin, sponsored Bootstrap/Index, Discovery Peer, and fresh Home Node, exercising public contracts for publish, open admit, cursor-sync, local match/explain/preview, subscribe, sponsor outage with peer delivery, renewal/expiry/withdrawal, malformed signature and protocol rejection, local Trust Policy blocks over Index scores, peer eviction, restart/cursor idempotency, direct Pod URL fallback, unendorsed trial exposure, browser Candidates vs Feed, and independent Bootstrap/Index enablement without Relay.
+The milestone proof is a deterministic multi-node HTTP scenario against real temporary SQLite stores: separate Origin, sponsored Bootstrap/Index, Discovery Peer, and fresh Home Node, exercising public contracts for publish, open admit, cursor-sync, local match/explain/preview, subscribe, sponsor outage with peer delivery, renewal/expiry/withdrawal, malformed signature and protocol rejection, local Trust Policy blocks over Index scores, peer eviction, restart/cursor idempotency, direct Pod URL fallback, unendorsed trial exposure, browser Candidates vs Feed, independent Bootstrap/Index/Relay enablement (a process with Relay off never advertises it), and Relay-backed publish + subscribe for an Origin with no public listener.
 
 ```bash
 cargo test -p stumble-api --test sponsored_deployment_acceptance

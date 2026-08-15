@@ -16,7 +16,7 @@ That installs three commands into `~/.local/bin` (override with `STUMBLE_INSTALL
 | Binary           | Role                                                        |
 | ---------------- | ----------------------------------------------------------- |
 | `stumble`        | Local CLI — save links, press the Feed, curate Pods         |
-| `stumble-api`    | HTTP server — share Pods, federation, Bootstrap/Index roles |
+| `stumble-api`    | HTTP server — share Pods, federation, Bootstrap/Index/Relay roles |
 | `stumble-runner` | Long-running daemon — network sync, MCP, scheduled workers  |
 
 
@@ -54,6 +54,10 @@ stumble-api --bind 0.0.0.0:8787          # keep running while friends sync
                                          # (or stumble-runner --config ~/.config/stumble/runner.yaml serve,
                                          #  which also serves MCP)
 
+# You, with no public address: publish through a Relay instead — nothing to serve.
+# Prints a share URL of the shape https://relay.example/relay/pods/<origin-node-id>/rust-craft
+stumble pod publish rust-craft --base-url https://relay.example --via-relay
+
 # Friend: subscribe by the URL you sent, read, and re-sync any time
 stumble pod subscribe https://your-node.example/federation/pods/rust-craft
 stumble feed batch get
@@ -76,7 +80,7 @@ stumble pod explore --query "distributed systems"   # ranked against your privat
 stumble pod subscribe <public_pod_url>              # from the explore result
 ```
 
-Pods can vouch for each other: `stumble pod endorse <slug> --from <your-pod> --reason "..."` signs a recommendation that travels through Bootstrap nodes and shows up as inspectable evidence in other users' local ranking — never as global reputation. Ranking happens entirely on your node — queries and taste never leave it. To help the network, run a Bootstrap or Index role: `stumble-api --bootstrap` (open announcement admission + streams) or `stumble-api --index` (public search over admitted announcements). Deploying one on a VPS is one script — see [docs/deploy-bootstrap.md](docs/deploy-bootstrap.md):
+Pods can vouch for each other: `stumble pod endorse <slug> --from <your-pod> --reason "..."` signs a recommendation that travels through Bootstrap nodes and shows up as inspectable evidence in other users' local ranking — never as global reputation. Ranking happens entirely on your node — queries and taste never leave it. To help the network, run a Bootstrap, Index, or Relay role — independent flags on one process: `stumble-api --bootstrap` (open announcement admission + streams), `stumble-api --index` (public search over admitted announcements), or `stumble-api --relay` (serves Origin-signed Pod snapshots for private Home Nodes that publish with `stumble pod publish <slug> --base-url <relay> --via-relay`). Deploying one on a VPS is one script — see [docs/deploy-bootstrap.md](docs/deploy-bootstrap.md):
 
 ```bash
 sudo ./scripts/deploy-bootstrap-vps.sh bootstrap.example.com

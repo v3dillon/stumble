@@ -30,6 +30,9 @@ struct Args {
     /// Serve public Index search over admitted announcements (network role)
     #[arg(long, env = "STUMBLE_INDEX")]
     index: bool,
+    /// Serve the signed Pod Event Relay for pushed Origin snapshots (network role)
+    #[arg(long, env = "STUMBLE_RELAY")]
+    relay: bool,
     #[arg(long, env = "STUMBLE_DATA_DIR")]
     data_dir: Option<PathBuf>,
 }
@@ -56,7 +59,8 @@ pub async fn run() -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("open Home Node at {}: {error}", data_dir.display()))?
         .with_discovery_peer_probe(Arc::new(ReqwestDiscoveryPeerProbe))
         .with_bootstrap_capability(args.bootstrap, Arc::new(ReqwestOriginProbe))
-        .with_index_capability(args.index);
+        .with_index_capability(args.index)
+        .with_relay_capability(args.relay);
     let bind = bind_with_port(args.bind, args.port);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let base_url = args
@@ -73,6 +77,9 @@ pub async fn run() -> anyhow::Result<()> {
     }
     if args.index {
         eprintln!("stumble-api serving the public Index role");
+    }
+    if args.relay {
+        eprintln!("stumble-api serving the signed Pod Event Relay role");
     }
     if let Some(path) = tools.persistence_path() {
         eprintln!("stumble-api durable store at {}", path.display());

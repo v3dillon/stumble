@@ -51,13 +51,18 @@ fn agent_tools_error_code(error: &AgentToolsError) -> &'static str {
         AgentToolsError::Store(StoreError::TenantBoundary) => "tenant_boundary",
         AgentToolsError::LockPoisoned | AgentToolsError::Persistence(_) => "internal_error",
         AgentToolsError::IncompatibleProtocol { .. } => "incompatible_protocol",
+        AgentToolsError::RelayDisabled => "relay_disabled",
+        AgentToolsError::RelayPayloadTooLarge => "payload_too_large",
         _ => "request_error",
     }
 }
 
 impl From<AgentToolsError> for ApiError {
     fn from(value: AgentToolsError) -> Self {
-        let status = if matches!(value, AgentToolsError::Forbidden { .. }) {
+        let status = if matches!(value, AgentToolsError::RelayDisabled) {
+            // Same disabled pattern as Bootstrap: absent capability reads as 404.
+            StatusCode::NOT_FOUND
+        } else if matches!(value, AgentToolsError::Forbidden { .. }) {
             StatusCode::FORBIDDEN
         } else if matches!(value, AgentToolsError::Store(StoreError::NotFound(_))) {
             StatusCode::NOT_FOUND
