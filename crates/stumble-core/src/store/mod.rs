@@ -172,6 +172,10 @@ pub struct InMemoryStore {
     pub(crate) taste_learning_evidence: Vec<TasteLearningEvidence>,
     pub feed_batches: HashMap<Uuid, FeedBatch>,
     pub briefs: HashMap<Uuid, Brief>,
+    /// Private per-User Context prose (never federated).
+    pub user_contexts: HashMap<(UserId, Option<TenantId>), UserContext>,
+    /// Private User-scoped watches (not Pod Source Rules; never federated).
+    pub user_watches: HashMap<UserWatchId, UserWatch>,
     pub saves: HashSet<(UserId, SubmissionId)>,
     pub private_notes: BTreeMap<(UserId, SubmissionId), String>,
     pub reading_history: HashSet<(UserId, SubmissionId)>,

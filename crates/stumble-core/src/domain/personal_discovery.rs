@@ -61,6 +61,21 @@ pub struct DiscoveryPlanSourceNeighborhood {
     /// Proven vs adjacent allocation role for this neighborhood.
     #[serde(default)]
     pub role: DiscoveryPlanSourceRole,
+    /// Present when this neighborhood is a due User watch: the exact URL to
+    /// open and the skill to apply. Never carries Taste Profile evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch: Option<DiscoveryPlanWatch>,
+}
+
+/// Minimized watch payload on a worker plan: enough to open the URL and apply
+/// the skill, without exposing the User Context or full Taste Profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryPlanWatch {
+    pub watch_id: UserWatchId,
+    pub url: String,
+    pub kind: UserWatchKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
 }
 
 /// Provenance of a private Discovery Lead from verified public Stumble metadata.

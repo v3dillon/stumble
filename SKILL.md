@@ -45,6 +45,11 @@ Presses record delivery only — reactions still go through
 
 ## Saving a link (the main loop)
 
+> Before you save, discover, or write a brief, run `stumble context show`.
+> Judge every find against `context_md` and explicit blocks.
+> If context is empty, ask for two loved links and write the first draft.
+> Then stop and show it. Do not invent a personality.
+
 Treat a shared URL like a friend texting you an X post: open it, understand it,
 save it with that understanding attached.
 
@@ -363,17 +368,16 @@ stumble discover personal schedule create --input /tmp/sched.json
 Then schedule *yourself* (harness cron, e.g. every morning) with a prompt like
 "run the Stumble morning brief". When it fires:
 
-1. `stumble sync bootstrap run` — pick up new network announcements (skip if
-   the runner daemon is doing this).
-2. `stumble discover task list --state ready` — claim the scheduled task with
-   the worker credential and run the discovery loop above.
-3. Compose the brief from three sources and present it conversationally, with
-   one-line summaries and why-it-matters:
-   - the completed Discovery Result Batch (`stumble discover personal batches`);
-   - the Feed (`stumble feed batch get`) — lead with priority-subscription and
-     high-value items;
-   - optionally one new Pod from `stumble pod explore` worth subscribing to.
-4. As the user reacts, apply their decisions — for shortlist items:
+1. `stumble discover task list --state ready` — claim the scheduled task with
+   the worker credential and run the discovery loop above. Plans carry the
+   user's due watches as first-class neighborhoods with a URL and a skill
+   (e.g. `watch-x`); work them first.
+2. When the user wants a morning brief, run `stumble brief get`.
+   Present `outside`, then `network.feed`, then `network.explore`, then
+   `gaps`. Do not drop a section. The node fills every section (it even runs
+   a best-effort `sync bootstrap run` when announcements are missing); you
+   only present it, with one-line summaries and why-it-matters.
+3. As the user reacts, apply their decisions — for shortlist items:
 
 ```bash
 echo '{"batch_id": "<batch>", "candidate_id": "<candidate>",

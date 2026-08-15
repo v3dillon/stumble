@@ -164,6 +164,10 @@ uuid_id!(
     PersonalDiscoveryScheduleId
 );
 uuid_id!(
+    /// Stable local identity of a private User-scoped watch.
+    UserWatchId
+);
+uuid_id!(
     /// Stable local identity of an [`AgentHarness`].
     AgentHarnessId
 );

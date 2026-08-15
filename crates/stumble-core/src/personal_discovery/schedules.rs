@@ -1,6 +1,6 @@
 //! Named private Personal Discovery schedules, materialization, and backpressure.
 
-use super::{build_plan, prepare_schedule_run, readiness};
+use super::{build_plan, prepare_schedule_run, readiness, stamp_planned_watches};
 use crate::domain::*;
 use crate::store::InMemoryStore;
 use chrono::{DateTime, Utc};
@@ -191,6 +191,7 @@ pub(crate) fn materialize_due_personal_schedules(
             attempts: Vec::new(),
             created_at: now,
         };
+        stamp_planned_watches(store, &plan, now);
         store.discovery_plans.insert(plan.id, plan);
         store.discovery_tasks.insert(task.id, task.clone());
         created.push(task);

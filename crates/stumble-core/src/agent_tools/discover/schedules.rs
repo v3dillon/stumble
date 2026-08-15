@@ -123,6 +123,7 @@ impl AgentTools {
             created_at: now,
         };
         let mut staged = store.clone();
+        stamp_planned_watches(&mut staged, &plan, now);
         staged.discovery_plans.insert(plan.id, plan.clone());
         staged.discovery_tasks.insert(task.id, task.clone());
         record_harness_write(

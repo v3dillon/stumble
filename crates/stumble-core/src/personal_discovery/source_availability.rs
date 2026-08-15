@@ -374,7 +374,41 @@ pub(crate) fn upsert_task_source_availability(
     store
         .discovery_task_source_availability
         .insert(identity.task_id, availability.clone());
+    record_watch_availability(
+        store,
+        identity.user_id,
+        identity.tenant_id,
+        &availability.reports,
+    );
     availability
+}
+
+/// Persists the latest availability fact on matching User watches.
+///
+/// Reports are matched by watch URL domain. Facts only: never auth material.
+pub(crate) fn record_watch_availability(
+    store: &mut InMemoryStore,
+    user_id: UserId,
+    tenant_id: Option<TenantId>,
+    reports: &[ReportedSourceAvailability],
+) {
+    for watch in store.user_watches.values_mut() {
+        if watch.user_id != user_id || watch.tenant_id != tenant_id {
+            continue;
+        }
+        let Some(domain) = url::Url::parse(&watch.url)
+            .ok()
+            .and_then(|url| url.domain().map(str::to_lowercase))
+        else {
+            continue;
+        };
+        if let Some(report) = reports
+            .iter()
+            .find(|report| report.source.eq_ignore_ascii_case(&domain))
+        {
+            watch.last_availability = Some(report.clone());
+        }
+    }
 }
 
 /// Resolves the final report set used when completing a batch.

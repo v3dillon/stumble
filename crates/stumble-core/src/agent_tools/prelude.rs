@@ -41,8 +41,9 @@ pub(super) use crate::personal_discovery::{
     normalize_browser_grant_eligibility, normalize_intent, normalize_reports,
     notification_state_for_schedule, prepare_request, readiness, record_discovery_result_learning,
     resolve_completion_reports, retry, schedule_status, set_discovery_result_learning_link,
-    task_is_scheduled, upsert_task_source_availability, validate_name, validate_result_count,
-    BatchAvailabilityInput, DiscoveryResultLearningInput, TaskAvailabilityIdentity,
+    stamp_planned_watches, task_is_scheduled, upsert_task_source_availability, validate_name,
+    validate_result_count, BatchAvailabilityInput, DiscoveryResultLearningInput,
+    TaskAvailabilityIdentity,
 };
 pub(super) use crate::pod_announcement::{
     announcement_is_discovery_eligible, issue_and_retain_origin_pod_announcement,
