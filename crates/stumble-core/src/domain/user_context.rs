@@ -136,3 +136,56 @@ pub struct AddUserWatchRequest {
     #[serde(default)]
     pub skill: Option<String>,
 }
+
+/// One composed morning brief. Every section is always present.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct MorningBrief {
+    pub user: MorningBriefUser,
+    pub outside: MorningBriefOutside,
+    pub network: MorningBriefNetwork,
+    pub gaps: Vec<MorningBriefGap>,
+}
+
+/// User Context prose plus a short taste line.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct MorningBriefUser {
+    pub context_md: String,
+    pub taste_summary: String,
+}
+
+/// Latest ready Discovery Result Batch, or an empty section with a reason.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct MorningBriefOutside {
+    pub batch_id: Option<DiscoveryResultBatchId>,
+    pub items: Vec<DiscoveryResultItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_availability: Vec<DiscoveryResultAvailabilityReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Network half: current Feed Batch items and at most one Explore Pod.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct MorningBriefNetwork {
+    pub feed: Vec<FeedBatchItem>,
+    pub explore: Vec<ExplorePodResult>,
+}
+
+/// One inspectable shortfall in the brief (login, bootstrap, missing grant).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct MorningBriefGap {
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch_id: Option<UserWatchId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+}

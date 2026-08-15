@@ -350,6 +350,18 @@ fn validation_separates_context_from_instructions_and_rejects_executable_sources
     valid_domain.sources_yaml = "source_rules:\n  - inspect:\n      kind: domain\n      domain: research.example.com\n    seek:\n      description: useful work\n    schedule:\n      cadence: weekly\n".to_string();
     assert!(validate_pod_package_contents(&valid_domain).valid);
 
+    let mut valid_timeline = complete_package();
+    valid_timeline.sources_yaml = "source_rules:\n  - inspect:\n      kind: timeline\n      url: https://x.com/home\n    seek:\n      description: durable posts from the User home timeline\n    schedule:\n      cadence: daily\n".to_string();
+    assert!(validate_pod_package_contents(&valid_timeline).valid);
+
+    let mut valid_account = complete_package();
+    valid_account.sources_yaml = "source_rules:\n  - inspect:\n      kind: account\n      url: https://x.com/gdb\n    seek:\n      description: durable posts from one account\n    schedule:\n      cadence: daily\n".to_string();
+    assert!(validate_pod_package_contents(&valid_account).valid);
+
+    let mut credential_timeline = complete_package();
+    credential_timeline.sources_yaml = "source_rules:\n  - inspect:\n      kind: timeline\n      url: https://user:password@x.com/home\n    seek:\n      description: durable posts\n    schedule:\n      cadence: daily\n".to_string();
+    assert!(!validate_pod_package_contents(&credential_timeline).valid);
+
     let mut missing_filters = complete_package();
     missing_filters.filters_yaml.clear();
     assert!(!validate_pod_package_contents(&missing_filters).valid);

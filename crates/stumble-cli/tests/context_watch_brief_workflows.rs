@@ -144,6 +144,12 @@ fn cli_adds_and_lists_watches_and_plans_carry_due_watches() {
     // The watch is stamped for this period and shows in the packet.
     let packet = environment.run(None, &["context", "show"]);
     assert!(packet["data"]["watches"][0]["last_planned_at"].is_string());
+
+    let watch_id = added["data"]["id"].as_str().unwrap().to_owned();
+    let removed = environment.run(None, &["discover", "watch", "remove", &watch_id]);
+    assert_eq!(removed["data"]["id"], watch_id);
+    let listed_after = environment.run(None, &["discover", "watch", "list"]);
+    assert_eq!(listed_after["data"].as_array().unwrap().len(), 0);
 }
 
 #[test]

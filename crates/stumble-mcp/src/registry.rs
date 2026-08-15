@@ -95,11 +95,17 @@ pub(crate) enum McpTool {
     SubscribePublicPod,
     SynchronizeSubscription,
     AddReference,
+    GetUserContext,
+    SetUserContext,
+    AddUserWatch,
+    ListUserWatches,
+    RemoveUserWatch,
+    GetBrief,
 }
 
 #[cfg(test)]
 impl McpTool {
-    pub(crate) const VARIANT_COUNT: usize = Self::AddReference as usize + 1;
+    pub(crate) const VARIANT_COUNT: usize = Self::GetBrief as usize + 1;
 }
 
 pub(crate) fn definitions() -> &'static [ToolDefinition] {
@@ -155,6 +161,12 @@ pub(crate) fn definitions() -> &'static [ToolDefinition] {
         d(Tool::SubscribePublicPod, "subscribe_public_pod", CapabilityOnly(Capability::SubscriptionManagement), object_schema(json!({"public_pod_url": {"type": "string", "format": "uri"}}), &["public_pod_url"]), Async, published(9, "Subscribe to Public Pod", "Subscribe to a canonical public Pod URL and import its verified signed history from the Origin Node.", false, false)),
         d(Tool::SynchronizeSubscription, "synchronize_subscription", CapabilityOnly(Capability::SubscriptionManagement), uuid_schema("subscription_id"), Async, published(10, "Synchronize Subscription", "Fetch and apply signed Pod Events from the Origin Node after the Subscription's verified cursor.", false, false)),
         d(Tool::AddReference, "add_reference", CapabilityOnly(Capability::PodCuration), add_reference_schema(), Blocking, published(40, "Add Shared Link", "Add a link the User shared into a Pod and their Feed in one step. Creates the default private saved Pod on first use and returns the Accepted Placement.", false, false)),
+        d(Tool::GetUserContext, "get_user_context", PersonalDiscoveryManagement, empty_schema(), Blocking, published(41, "Get User Context", "Read the private briefing packet: User Context prose, Taste Profile, watches, and Personal Discovery readiness.", true, false)),
+        d(Tool::SetUserContext, "set_user_context", PersonalDiscoveryManagement, set_user_context_schema(), Blocking, published(42, "Set User Context", "Replace the private User Context prose. Only the interactive User writes it; agent finds never train it.", false, false)),
+        d(Tool::AddUserWatch, "add_user_watch", PersonalDiscoveryManagement, add_user_watch_schema(), Blocking, published(43, "Add User Watch", "Add a User-scoped watch over a timeline, account, or site. Due watches enter the next Personal Discovery plan.", false, false)),
+        d(Tool::ListUserWatches, "list_user_watches", PersonalDiscoveryManagement, empty_schema(), Blocking, published(44, "List User Watches", "List the User's private watches with last availability.", true, false)),
+        d(Tool::RemoveUserWatch, "remove_user_watch", PersonalDiscoveryManagement, uuid_schema("watch_id"), Blocking, published(45, "Remove User Watch", "Remove one User-scoped watch. The watch no longer enters Personal Discovery plans.", false, true)),
+        d(Tool::GetBrief, "get_brief", PersonalDiscoveryManagement, empty_schema(), Blocking, published(46, "Get Morning Brief", "Compose user, outside, network, and gaps from existing Home Node operations. Every section is present.", false, false)),
     ])
 }
 
@@ -223,6 +235,22 @@ fn published(
 fn empty_schema() -> Value {
     object_schema(json!({}), &[])
 }
+fn set_user_context_schema() -> Value {
+    object_schema(json!({"context_md": {"type": "string"}}), &["context_md"])
+}
+
+fn add_user_watch_schema() -> Value {
+    object_schema(
+        json!({
+            "url": {"type": "string", "format": "uri"},
+            "kind": {"type": "string", "enum": ["timeline", "account", "site"]},
+            "cadence": {"type": ["string", "null"], "enum": ["hourly", "daily", "weekly"]},
+            "skill": {"type": ["string", "null"]}
+        }),
+        &["url", "kind"],
+    )
+}
+
 fn add_reference_schema() -> Value {
     object_schema(
         json!({
@@ -427,11 +455,6 @@ fn complete_batch_schema() -> Value {
         &["task_id", "submission_ids"],
     )
 }
-
-
-
-
-
 
 fn feed_batch_schema() -> Value {
     object_schema(

@@ -140,7 +140,9 @@ Register **two distinct Harness Grants** against the same Home Node:
 
 1. **Interactive management** (`interactive` kind):
    `personal_discovery_management`, `feedback`, and usually
-   `candidate_submission` for User URL intake.
+   `candidate_submission` for User URL intake. The same grant exposes
+   `get_user_context`, `set_user_context`, `add_user_watch`,
+   `list_user_watches`, `remove_user_watch`, and `get_brief`.
 2. **Unattended execution** (`unattended` kind):
    `personal_discovery_execution` only. The worker may claim tasks, read only
    its pinned Discovery Plan, submit provenance-bearing Candidates, report

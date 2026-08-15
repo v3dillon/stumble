@@ -266,6 +266,8 @@ pub(super) enum WatchWorkflow {
     Add(WatchAddArgs),
     /// List the User's watches with last availability
     List,
+    /// Remove a User-scoped watch
+    Remove(IdArgs),
 }
 
 #[derive(Args)]

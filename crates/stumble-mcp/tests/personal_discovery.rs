@@ -85,6 +85,64 @@ fn mcp_manager_and_worker_share_only_the_pinned_personal_plan() {
             arguments: json!({}),
         })
         .is_err());
+    assert!(manager
+        .call(McpToolCall {
+            tool: "get_user_context".into(),
+            arguments: json!({}),
+        })
+        .is_ok());
+    assert!(worker
+        .call(McpToolCall {
+            tool: "get_user_context".into(),
+            arguments: json!({}),
+        })
+        .is_err());
+    let set = manager
+        .call(McpToolCall {
+            tool: "set_user_context".into(),
+            arguments: json!({"context_md": "# Me\nLoves systems papers."}),
+        })
+        .unwrap();
+    assert_eq!(set["context_md"], "# Me\nLoves systems papers.");
+    let watch = manager
+        .call(McpToolCall {
+            tool: "add_user_watch".into(),
+            arguments: json!({"url": "https://x.com/home", "kind": "timeline"}),
+        })
+        .unwrap();
+    assert_eq!(watch["skill"], "watch-x");
+    let listed = manager
+        .call(McpToolCall {
+            tool: "list_user_watches".into(),
+            arguments: json!({}),
+        })
+        .unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    let watch_id = watch["id"].as_str().unwrap();
+    manager
+        .call(McpToolCall {
+            tool: "remove_user_watch".into(),
+            arguments: json!({"watch_id": watch_id}),
+        })
+        .unwrap();
+    let listed_after = manager
+        .call(McpToolCall {
+            tool: "list_user_watches".into(),
+            arguments: json!({}),
+        })
+        .unwrap();
+    assert_eq!(listed_after.as_array().unwrap().len(), 0);
+    let brief = manager
+        .call(McpToolCall {
+            tool: "get_brief".into(),
+            arguments: json!({}),
+        })
+        .unwrap();
+    assert!(brief["user"]["context_md"].is_string());
+    assert!(brief["outside"].is_object());
+    assert!(brief["network"]["feed"].is_array());
+    assert!(brief["network"]["explore"].is_array());
+    assert!(brief["gaps"].is_array());
 }
 
 #[tokio::test]
@@ -169,6 +227,12 @@ async fn mcp_catalog_projects_the_canonical_personal_management_policy() {
             names.contains(&"personal_discovery_readiness".to_string()),
             management
         );
+        assert_eq!(names.contains(&"get_user_context".to_string()), management);
+        assert_eq!(names.contains(&"set_user_context".to_string()), management);
+        assert_eq!(names.contains(&"add_user_watch".to_string()), management);
+        assert_eq!(names.contains(&"list_user_watches".to_string()), management);
+        assert_eq!(names.contains(&"remove_user_watch".to_string()), management);
+        assert_eq!(names.contains(&"get_brief".to_string()), management);
         assert_eq!(
             names.contains(&"request_personal_discovery".to_string()),
             management

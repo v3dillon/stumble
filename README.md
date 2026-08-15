@@ -203,8 +203,9 @@ does not need to name platforms.
 | `stumble discover personal schedule update`  | Update schedule configuration.                      |
 | `stumble discover personal schedule disable` | Disable a schedule.                                 |
 | `stumble discover personal schedule remove`  | Remove a schedule.                                  |
-| `stumble discover watch add <url>`           | Add a User-scoped watch (`--kind`, `--cadence`, `--skill`). |
+| `stumble discover watch add <url>`           | Add a User-scoped watch (`--kind timeline\|account\|site`, `--cadence`, `--skill`). |
 | `stumble discover watch list`                | List watches with last availability.                |
+| `stumble discover watch remove <id>`         | Remove a User-scoped watch.                         |
 | `stumble discover task list`                 | List discovery tasks.                               |
 | `stumble discover task show`                 | Show one discovery task.                            |
 | `stumble discover task claim`                | Claim a task lease.                                 |

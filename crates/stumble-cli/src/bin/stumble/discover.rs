@@ -62,6 +62,15 @@ fn execute_watch(command: WatchWorkflow, tools: &AgentTools, actor: &AuthContext
             serde_json::to_value(tools.list_user_watches(actor).map_err(agent_tools_error)?)
                 .map_err(internal_error)
         }
+        WatchWorkflow::Remove(args) => {
+            let id = parse_id::<stumble_core::UserWatchId>(&args.id)?;
+            serde_json::to_value(
+                tools
+                    .remove_user_watch(actor, id)
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error)
+        }
     }
 }
 
