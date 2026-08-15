@@ -101,6 +101,10 @@ stumble sync discovery status
 
 Degraded messages preserve direct Pod URL guidance. They never claim the sponsor is protocol authority.
 
+## Relay-backed Pod URLs
+
+Some public Pods share a Relay URL of the shape `https://<relay>/relay/pods/<origin-node-id>/<slug>` instead of a direct Origin URL. Subscribe to it the same way (`stumble pod subscribe <url>`). Your Home Node reads the Origin-signed snapshot from the Relay, pins the **Origin** identity and key from the snapshot, and verifies every event with the Origin public key. The Relay host never becomes the Origin and cannot alter the content.
+
 ## What never leaves your Home Node
 
 Background discovery and Bootstrap stream sync carry only public cursor pagination fields. Explicit Explore may send the words you typed to a configured Index Node—never your Taste Profile or Subscriptions. Remote Index scores are discarded; local Trust Policy and Pod Similarity recompute order. Browser-found Candidates stay in finite Discovery Result Batches until you act; they do not enter Feed exploration by themselves.

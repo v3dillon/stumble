@@ -35,13 +35,33 @@ impl AgentTools {
             .store
             .write()
             .map_err(|_| AgentToolsError::LockPoisoned)?;
-        let result = admit_bootstrap_announcement(
-            &mut store,
-            announcement,
-            self.bootstrap.origin_probe.as_ref(),
-            self.bootstrap.enabled,
-            now,
-        );
+        // A Relay-shaped announcement URL served by this same process resolves
+        // against the local Relay cache: probing our own HTTP surface while the
+        // store write lock is held would block, and the stored snapshot already
+        // carries the Origin-signed public facts.
+        let local_relay_view = self.local_relay_probe_view(&store, &announcement);
+        let result = match &local_relay_view {
+            Some(view) => {
+                let probe = crate::bootstrap::FixedOriginProbe {
+                    view: Some(view.clone()),
+                    error: None,
+                };
+                admit_bootstrap_announcement(
+                    &mut store,
+                    announcement,
+                    &probe,
+                    self.bootstrap.enabled,
+                    now,
+                )
+            }
+            None => admit_bootstrap_announcement(
+                &mut store,
+                announcement,
+                self.bootstrap.origin_probe.as_ref(),
+                self.bootstrap.enabled,
+                now,
+            ),
+        };
         // Persist acceptance and rejection audit rows transactionally.
         self.persist_locked(&mut store)?;
         result.map_err(|reason| AgentToolsError::BootstrapRejected {

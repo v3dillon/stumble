@@ -1,6 +1,6 @@
 # Operating a Bootstrap / Index Node
 
-This runbook covers operators who run open Bootstrap admission, Announcement Streams, and optional Index search—whether that is the sponsored first deployment or an independent replacement. Bootstrap and Index are **independent capabilities**. Signed Pod Event **Relay is out of scope** for this milestone and must not be advertised.
+This runbook covers operators who run open Bootstrap admission, Announcement Streams, optional Index search, and the optional signed Pod Event Relay—whether that is the sponsored first deployment or an independent replacement. Bootstrap, Index, and Relay are **independent capabilities**: enable Relay with `--relay`, and never advertise a role whose flag is off. The Relay stores and serves Origin-signed snapshots unchanged; it never re-signs, never becomes the Origin, and never holds Home Node private state (ADR-0055).
 
 ## Open admission verification
 
@@ -125,9 +125,10 @@ Well-known metadata (`GET /.well-known/stumble-node`) advertises only enabled en
 
 - Bootstrap: `bootstrap_announcements`, `bootstrap_announcement_stream`, `bootstrap_withdrawals`, `bootstrap_peer_advertisements`, `bootstrap_peer_advertisement_sample`
 - Index: `index_search_announcements`
+- Relay (only with `--relay`): `relay_publications`, `relay_pod_snapshot_template`
 - Discovery Peer serving (opt-in on that node): `discovery_peer_announcement_stream`, `discovery_peer_advertisement_sample`
 
-**Do not** advertise Relay, Hub, or retired discovery routes.
+**Do not** advertise a disabled Relay, Hub, or retired discovery routes. A Bootstrap/Index-only process must not mention Relay.
 
 ## Topic-neutral Announcement Stream
 

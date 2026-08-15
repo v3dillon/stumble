@@ -29,6 +29,16 @@ impl AgentTools {
         self
     }
 
+    /// Enables or disables the independent signed Pod Event Relay capability.
+    ///
+    /// Relay caches and serves Origin-signed Pod snapshots without authority to
+    /// alter them. Enabling Relay never re-signs and never proxies the Origin.
+    #[must_use]
+    pub fn with_relay_capability(mut self, enabled: bool) -> Self {
+        self.relay = RelayCapability { enabled };
+        self
+    }
+
     /// Returns whether this process currently enables open Bootstrap admission.
     #[must_use]
     pub fn bootstrap_enabled(&self) -> bool {
@@ -39,6 +49,12 @@ impl AgentTools {
     #[must_use]
     pub fn index_enabled(&self) -> bool {
         self.index.enabled
+    }
+
+    /// Returns whether this process currently serves the signed Pod Event Relay.
+    #[must_use]
+    pub fn relay_enabled(&self) -> bool {
+        self.relay.enabled
     }
 
     /// Injects the reachability probe used for Discovery Peer enablement and

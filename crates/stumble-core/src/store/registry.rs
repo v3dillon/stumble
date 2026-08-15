@@ -115,6 +115,8 @@ store_collections! {
         fields: &["origin_node_id", "pod_slug"],
     },
     #[serde(default)]
+    relay_publications: RelayPublication => KeySpec::Fields(&["origin_node_id", "pod_slug"]),
+    #[serde(default)]
     announcement_stream_entries: AnnouncementStreamEntry => KeySpec::Fields(&["sequence"]),
     #[serde(default)]
     discovery_peer_stream_entries: AnnouncementStreamEntry => KeySpec::Fields(&["sequence"]),
@@ -383,6 +385,7 @@ impl From<&InMemoryStore> for PersistedStore {
             trusted_peers: store.trusted_peers.values().cloned().collect(),
             known_pod_announcements: store.known_pod_announcements.values().cloned().collect(),
             known_pod_withdrawals: store.known_pod_withdrawals.values().cloned().collect(),
+            relay_publications: store.relay_publications.values().cloned().collect(),
             announcement_stream_entries: store
                 .announcement_stream_entries
                 .values()
@@ -636,6 +639,16 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                             known.withdrawal.pod_slug.clone(),
                         ),
                         known,
+                    )
+                })
+                .collect(),
+            relay_publications: snapshot
+                .relay_publications
+                .into_iter()
+                .map(|publication| {
+                    (
+                        (publication.origin_node_id, publication.pod_slug.clone()),
+                        publication,
                     )
                 })
                 .collect(),

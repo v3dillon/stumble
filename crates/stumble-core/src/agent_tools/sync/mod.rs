@@ -3,6 +3,7 @@ mod bootstrap;
 mod capability;
 mod helpers;
 mod peer;
+mod relay;
 mod subscription;
 mod trust;
 pub use helpers::canonical_public_pod_url;

@@ -125,6 +125,8 @@ pub struct InMemoryStore {
     pub trusted_peers: HashMap<PeerId, TrustedPeer>,
     pub known_pod_announcements: HashMap<(NodeIdentityId, String), KnownPodAnnouncement>,
     pub known_pod_withdrawals: HashMap<(NodeIdentityId, String), KnownPodWithdrawal>,
+    /// Origin-signed snapshots cached by the optional Relay capability.
+    pub relay_publications: HashMap<(NodeIdentityId, String), RelayPublication>,
     /// Topic-neutral Announcement Stream log keyed by monotonic sequence.
     pub announcement_stream_entries: BTreeMap<u64, AnnouncementStreamEntry>,
     /// Peer-local Announcement Stream log (separate sequence from Bootstrap).

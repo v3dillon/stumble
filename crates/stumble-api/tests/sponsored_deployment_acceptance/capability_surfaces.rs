@@ -71,6 +71,62 @@ async fn runtime_enables_bootstrap_and_index_independently_without_relay() {
     assert_eq!(body["code"], "bootstrap_disabled");
 }
 
+// ─── Relay is a third independent capability flag ────────────────────────────
+
+#[tokio::test]
+async fn runtime_enables_relay_independently_and_advertises_only_when_on() {
+    // Relay-only process: Relay keys advertised, Bootstrap/Index absent.
+    let relay_only = AgentTools::new(seed_store()).with_relay_capability(true);
+    assert!(!relay_only.bootstrap_enabled());
+    assert!(!relay_only.index_enabled());
+    assert!(relay_only.relay_enabled());
+    let app = router(relay_only);
+    let (status, wk) = http_json(&app, "GET", "/.well-known/stumble-node", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let endpoints = wk["endpoints"].as_object().unwrap();
+    assert!(endpoints.contains_key("relay_publications"));
+    assert!(endpoints.contains_key("relay_pod_snapshot_template"));
+    assert!(!endpoints.contains_key("bootstrap_announcements"));
+    assert!(!endpoints.contains_key("index_search_announcements"));
+    // Bootstrap routes stay disabled on a Relay-only process.
+    let (status, body) =
+        http_json(&app, "GET", "/bootstrap/announcements/stream", None, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["code"], "bootstrap_disabled");
+
+    // All three capabilities on one process, still independent flags.
+    let all_three = AgentTools::new(seed_store())
+        .with_bootstrap_capability(true, Arc::new(UnreachableOriginProbe))
+        .with_index_capability(true)
+        .with_relay_capability(true);
+    assert!(all_three.bootstrap_enabled());
+    assert!(all_three.index_enabled());
+    assert!(all_three.relay_enabled());
+    let app = router(all_three);
+    let (status, wk) = http_json(&app, "GET", "/.well-known/stumble-node", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let endpoints = wk["endpoints"].as_object().unwrap();
+    assert!(endpoints.contains_key("bootstrap_announcements"));
+    assert!(endpoints.contains_key("index_search_announcements"));
+    assert!(endpoints.contains_key("relay_publications"));
+    assert!(endpoints.contains_key("relay_pod_snapshot_template"));
+
+    // No capabilities: Relay routes report the Bootstrap-style disabled pattern.
+    let none = AgentTools::new(seed_store());
+    assert!(!none.relay_enabled());
+    let app = router(none);
+    let (status, body) = http_json(
+        &app,
+        "GET",
+        "/relay/pods/00000000-0000-0000-0000-000000000002/example",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["code"], "relay_disabled");
+}
+
 // ─── Browser Candidates stay in Discovery Result Batches ─────────────────────
 
 #[tokio::test]

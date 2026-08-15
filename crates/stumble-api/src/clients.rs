@@ -296,6 +296,43 @@ impl OriginProbe for ReqwestOriginProbe {
         public_pod_url: &str,
         pod_slug: &str,
     ) -> Result<OriginPublicManifestView, OriginProbeError> {
+        // A Relay-shaped URL is reachable without the private Origin being on
+        // the internet: the Relay serves the whole Origin-signed snapshot, and
+        // the view is built from the Origin manifest plus `snapshot.node`.
+        let is_relay_shaped = reqwest::Url::parse(public_pod_url)
+            .ok()
+            .and_then(|url| relay_public_pod_url_parts(url.path()))
+            .is_some();
+        if is_relay_shaped {
+            let snapshot_url = public_pod_url.trim_end_matches('/').to_string();
+            let expected_slug = pod_slug.to_string();
+            return probe_on_own_thread(async move {
+                let snapshot: FederationPodSnapshot = http_client()
+                    .get(&snapshot_url)
+                    .send()
+                    .await
+                    .map_err(|_| OriginProbeError::Unreachable)?
+                    .error_for_status()
+                    .map_err(|_| OriginProbeError::ManifestUnavailable)?
+                    .json()
+                    .await
+                    .map_err(|_| OriginProbeError::ManifestUnavailable)?;
+                if snapshot.manifest.pod.slug != expected_slug {
+                    return Err(OriginProbeError::ManifestUnavailable);
+                }
+                Ok(OriginPublicManifestView {
+                    protocol_version: snapshot.node.supported_protocol_version,
+                    pod_slug: snapshot.manifest.pod.slug.clone(),
+                    pod_name: snapshot.manifest.pod.name.clone(),
+                    subject: snapshot.manifest.pod.description.clone(),
+                    package_version: snapshot.manifest.skill_pack_version,
+                    latest_event_hash: snapshot.manifest.latest_known_event_hash,
+                    visibility_public: snapshot.manifest.pod.visibility == Visibility::Public,
+                    origin_node_id: snapshot.manifest.pod.origin_node_id,
+                })
+            })
+            .unwrap_or(Err(OriginProbeError::Unreachable));
+        }
         let manifest_url = format!("{}/manifest", public_pod_url.trim_end_matches('/'));
         let node_url = public_pod_url
             .split("/federation/pods/")
@@ -383,10 +420,7 @@ pub async fn submit_pod_announcement_to_bootstrap(
     base_url: &str,
     announcement: &PodAnnouncement,
 ) -> Result<serde_json::Value, String> {
-    let url = format!(
-        "{}/bootstrap/announcements",
-        base_url.trim_end_matches('/')
-    );
+    let url = format!("{}/bootstrap/announcements", base_url.trim_end_matches('/'));
     let response = http_client()
         .post(&url)
         .json(announcement)
@@ -401,13 +435,40 @@ pub async fn submit_pod_announcement_to_bootstrap(
     if status.is_success() {
         Ok(body)
     } else {
-        Err(body
-            .get("code")
-            .and_then(|code| code.as_str())
-            .map_or_else(
-                || format!("bootstrap admission HTTP {status}"),
-                ToString::to_string,
-            ))
+        Err(body.get("code").and_then(|code| code.as_str()).map_or_else(
+            || format!("bootstrap admission HTTP {status}"),
+            ToString::to_string,
+        ))
+    }
+}
+
+/// Pushes an Origin-signed public Pod snapshot to one Relay endpoint.
+///
+/// `relay_pod_url` is the canonical Relay address
+/// `{base}/relay/pods/{origin_node_id}/{slug}`. Used by `stumble pod publish
+/// --via-relay` and `stumble pod relay-push`.
+pub async fn submit_pod_snapshot_to_relay(
+    relay_pod_url: &str,
+    snapshot: &FederationPodSnapshot,
+) -> Result<serde_json::Value, String> {
+    let response = http_client()
+        .post(relay_pod_url.trim_end_matches('/'))
+        .json(snapshot)
+        .send()
+        .await
+        .map_err(|error| format!("relay unreachable: {error}"))?;
+    let status = response.status();
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .unwrap_or_else(|_| serde_json::json!({"status": status.as_u16()}));
+    if status.is_success() {
+        Ok(body)
+    } else {
+        Err(body.get("code").and_then(|code| code.as_str()).map_or_else(
+            || format!("relay admission HTTP {status}"),
+            ToString::to_string,
+        ))
     }
 }
 
@@ -482,13 +543,10 @@ pub async fn submit_pod_endorsement_to_bootstrap(
     if status.is_success() {
         Ok(body)
     } else {
-        Err(body
-            .get("code")
-            .and_then(|code| code.as_str())
-            .map_or_else(
-                || format!("bootstrap endorsement HTTP {status}"),
-                ToString::to_string,
-            ))
+        Err(body.get("code").and_then(|code| code.as_str()).map_or_else(
+            || format!("bootstrap endorsement HTTP {status}"),
+            ToString::to_string,
+        ))
     }
 }
 

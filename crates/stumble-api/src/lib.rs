@@ -13,13 +13,15 @@ mod clients;
 mod docs;
 mod error;
 mod federation;
+mod relay;
 
 pub use cli::run;
 pub use clients::{
     fetch_pod_endorsements_from_bootstrap, submit_pod_announcement_to_bootstrap,
-    submit_pod_endorsement_to_bootstrap, ReqwestAnnouncementStreamClient,
-    ReqwestDiscoveryPeerProbe, ReqwestDiscoveryPeerStreamClient, ReqwestIndexSearchClient,
-    ReqwestOriginExploreSampleClient, ReqwestOriginProbe, ReqwestPeerAdvertisementSampleClient,
+    submit_pod_endorsement_to_bootstrap, submit_pod_snapshot_to_relay,
+    ReqwestAnnouncementStreamClient, ReqwestDiscoveryPeerProbe, ReqwestDiscoveryPeerStreamClient,
+    ReqwestIndexSearchClient, ReqwestOriginExploreSampleClient, ReqwestOriginProbe,
+    ReqwestPeerAdvertisementSampleClient,
 };
 pub use docs::ApiRouteDoc;
 pub use error::ApiError;
@@ -35,6 +37,7 @@ use axum::{
 };
 use docs::route_docs;
 use federation::*;
+use relay::*;
 use serde_json::json;
 use std::net::SocketAddr;
 use stumble_core::*;
@@ -61,7 +64,6 @@ impl Default for RouterOptions {
         }
     }
 }
-
 
 pub fn router(tools: AgentTools) -> Router {
     router_with_base_url(tools, "http://127.0.0.1:8787")
@@ -147,6 +149,18 @@ pub fn router_with_options(
             "/federation/sync/:peer_id/:pod_slug",
             post(federation_sync_pod),
         )
+        .route(
+            "/relay/pods/:origin_node_id/:slug",
+            post(relay_admit_snapshot).get(relay_pod_snapshot),
+        )
+        .route(
+            "/relay/pods/:origin_node_id/:slug/manifest",
+            get(relay_pod_manifest),
+        )
+        .route(
+            "/relay/pods/:origin_node_id/:slug/events",
+            get(relay_pod_events),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             refresh_store_state,
@@ -227,7 +241,6 @@ fn auth_or_default(state: &ApiState, headers: &HeaderMap) -> Result<AuthContext,
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,11 +258,7 @@ mod tests {
     #[tokio::test]
     async fn llms_txt_is_served_with_the_node_base_url_filled_in() {
         let response = router_with_base_url(AgentTools::new(seed_store()), "https://boot.example")
-            .oneshot(
-                Request::get("/llms.txt")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::get("/llms.txt").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);

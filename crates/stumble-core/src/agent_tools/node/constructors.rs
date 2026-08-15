@@ -9,6 +9,7 @@ impl AgentTools {
             persistence: None,
             bootstrap: BootstrapCapability::default(),
             index: IndexCapability::default(),
+            relay: RelayCapability::default(),
             discovery_peer_probe: Arc::new(UnreachableDiscoveryPeerProbe),
         }
     }
@@ -26,6 +27,7 @@ impl AgentTools {
             }),
             bootstrap: BootstrapCapability::default(),
             index: IndexCapability::default(),
+            relay: RelayCapability::default(),
             discovery_peer_probe: Arc::new(UnreachableDiscoveryPeerProbe),
         }
     }

@@ -90,6 +90,12 @@ pub enum AgentToolsError {
     /// Public Index search failed with a bounded typed outcome.
     #[error(transparent)]
     IndexSearch(#[from] IndexSearchFailure),
+    /// The signed Pod Event Relay capability is not enabled on this process.
+    #[error("relay is not enabled on this node")]
+    RelayDisabled,
+    /// The pushed snapshot exceeds the bounded size open Relay admission accepts.
+    #[error("relay snapshot exceeds the bounded payload size")]
+    RelayPayloadTooLarge,
     /// Discovery Peer enablement, admission, or serving was rejected.
     #[error("discovery peer rejected: {reason}")]
     DiscoveryPeerRejected {
@@ -111,6 +117,8 @@ pub struct AgentTools {
     bootstrap: BootstrapCapability,
     /// Independent Index capability (may share a process with Bootstrap).
     index: IndexCapability,
+    /// Independent Relay capability (may share a process with Bootstrap/Index).
+    relay: RelayCapability,
     /// Injectable reachability probe for Discovery Peer enablement and admission.
     discovery_peer_probe: Arc<dyn DiscoveryPeerProbe>,
 }
@@ -138,6 +146,18 @@ struct IndexCapability {
 }
 
 impl Default for IndexCapability {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
+/// Runtime configuration for the optional signed Pod Event Relay role.
+#[derive(Clone)]
+struct RelayCapability {
+    enabled: bool,
+}
+
+impl Default for RelayCapability {
     fn default() -> Self {
         Self { enabled: false }
     }

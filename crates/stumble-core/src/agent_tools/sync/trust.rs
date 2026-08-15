@@ -206,6 +206,18 @@ impl AgentTools {
                 format!("{base}/discovery/announcements"),
             );
         }
+        // Relay endpoints are advertised only while the independent Relay
+        // capability is on; a Bootstrap/Index-only process never mentions Relay.
+        if self.relay.enabled {
+            endpoints.insert(
+                "relay_publications".to_string(),
+                format!("{base}/relay/pods/{{origin_node_id}}/{{slug}}"),
+            );
+            endpoints.insert(
+                "relay_pod_snapshot_template".to_string(),
+                format!("{base}/relay/pods/{{origin_node_id}}/{{slug}}"),
+            );
+        }
         // Discovery Peer inbound endpoints are advertised only while the User has
         // explicitly opted into announcement serving (ADR-0044 / ADR-0049).
         if self.discovery_peer_service_enabled() {

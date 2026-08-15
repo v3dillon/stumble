@@ -117,12 +117,25 @@ stumble pod create --name "..." --slug "..." --description "..." --visibility pr
 stumble pod skill install <slug>       # user runs this themselves — owner-only
 ```
 
-Set expectations honestly: the Pod is private and local. *Discovering others*
-works today — `stumble pod explore --query "..."` already searches the
-friend's network, with signed content previews, and subscribing is one
-command. *Being discovered* needs their node reachable from the internet
-(`stumble pod publish` + serving `stumble-api`, already on `PATH` from the
-same Stage 1 install) — offer to set that up another day rather than now.
+Sharing works today, without serving anything. If the `BOOTSTRAP_URL` line at
+the top of this file is set (it does not say REPLACE), offer to publish the
+new Pod through that node's Relay:
+
+```bash
+stumble pod publish <slug> --via-relay --base-url $BOOTSTRAP_URL
+```
+
+This pushes the signed snapshot to the Relay and prints a `share_url`
+(`$BOOTSTRAP_URL/relay/pods/<origin-node-id>/<slug>`). Friends run
+`stumble pod subscribe <share_url>` — their nodes verify everything with this
+node's Origin key, and this machine never needs a public address. After new
+items land, `stumble pod announce` refreshes the Relay copy.
+
+If the `BOOTSTRAP_URL` line still says REPLACE, skip publishing and say why:
+there is no Relay to push to yet, so ask the user for their friend's
+Bootstrap URL first. *Discovering others* works either way —
+`stumble pod explore --query "..."` already searches the friend's network,
+with signed content previews, and subscribing is one command.
 
 ## Stage 6 — Offer the morning brief
 

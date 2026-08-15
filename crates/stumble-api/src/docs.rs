@@ -9,7 +9,6 @@ pub struct ApiRouteDoc {
     pub description: &'static str,
 }
 
-
 pub(crate) fn route_docs() -> Vec<ApiRouteDoc> {
     vec![
         ApiRouteDoc {
@@ -136,6 +135,26 @@ pub(crate) fn route_docs() -> Vec<ApiRouteDoc> {
             method: "POST",
             path: "/federation/sync/:peer_id/:pod_slug",
             description: "synchronize signed events from a trusted peer",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/relay/pods/:origin_node_id/:slug",
+            description: "Relay admission of an Origin-signed public Pod snapshot, stored unchanged",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/relay/pods/:origin_node_id/:slug",
+            description: "stored Origin-signed Pod snapshot (Origin node + manifest + events)",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/relay/pods/:origin_node_id/:slug/manifest",
+            description: "stored Origin manifest served by the Relay unchanged",
+        },
+        ApiRouteDoc {
+            method: "GET",
+            path: "/relay/pods/:origin_node_id/:slug/events",
+            description: "stored Origin-signed events served by the Relay unchanged",
         },
     ]
 }

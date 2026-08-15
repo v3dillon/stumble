@@ -107,6 +107,8 @@ pub(super) enum PodWorkflow {
     Endorse(EndorsePodArgs),
     /// Re-sign current announcements and push them to Bootstrap endpoints
     Announce(AnnouncePodArgs),
+    /// Push the current signed snapshot of a published Pod to a Relay
+    RelayPush(RelayPushPodArgs),
     /// Subscribe to a local Pod by slug or a public Pod by its federation URL
     Subscribe(PodArgs),
     Unsubscribe(PodArgs),
@@ -661,6 +663,18 @@ pub(super) struct PublishPodArgs {
     /// used to build the share URL and issue the Pod Announcement
     #[arg(long, env = "STUMBLE_BASE_URL")]
     pub(super) base_url: Option<String>,
+    /// Push the signed snapshot to a Relay at --base-url and share the Relay
+    /// URL, so this private node never needs a public listener
+    #[arg(long, requires = "base_url")]
+    pub(super) via_relay: bool,
+}
+
+#[derive(Args)]
+pub(super) struct RelayPushPodArgs {
+    pub(super) pod: String,
+    /// Relay base URL (e.g. https://relay.example) that stores the snapshot
+    #[arg(long)]
+    pub(super) relay_url: String,
 }
 
 #[derive(Args)]

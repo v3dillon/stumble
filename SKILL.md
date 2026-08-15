@@ -229,11 +229,16 @@ phrased:
 ## Sharing Pods between friends
 
 When the user wants to share a Pod, or pastes a Stumble URL a friend sent
-(shaped like `https://host/federation/pods/<slug>`):
+(shaped like `https://host/federation/pods/<slug>` or
+`https://host/relay/pods/<origin-node-id>/<slug>`):
 
 ```bash
-# Share: make it public and get the URL to send (needs the node's public base URL)
+# Share (node has a public address): make it public and get the URL to send
 stumble pod publish <slug> --base-url https://their-node.example
+
+# Share (no public address): push the signed snapshot to a Relay instead —
+# a Bootstrap URL with the Relay role on works. Publishing needs no serving.
+stumble pod publish <slug> --base-url https://relay.example --via-relay
 
 # Receive: subscribe by the URL — content AND the Pod's CONTEXT/SKILL arrive
 stumble pod subscribe "https://their-node.example/federation/pods/<slug>"
@@ -242,9 +247,18 @@ stumble pod subscribe "https://their-node.example/federation/pods/<slug>"
 stumble sync pod run <slug>
 ```
 
+With `--via-relay`, the command prints a `share_url` of the shape
+`https://relay.example/relay/pods/<origin-node-id>/<slug>`. Send the friend
+that URL; they subscribe to it the same way, and their node verifies every
+event with this node's Origin key — the Relay cannot alter anything. After
+new items land, `stumble pod relay-push <slug> --relay-url https://relay.example`
+(or the next `stumble pod announce`) refreshes the Relay copy.
+
 After subscribing, the Pod's items flow into `feed batch get` automatically,
 and `stumble pod package show <slug>` gives you the friend's curation context
-to work with. The sharer's node must be running `stumble-api` to be reachable
+to work with. On the Origin-served path the sharer's node must be running
+`stumble-api` to be reachable; on the Relay path the Relay serves the snapshot
+and the sharer's node stays private
 (same install as the CLI — `curl -fsSL https://raw.githubusercontent.com/v3dillon/stumble/main/scripts/install.sh | bash`
 puts `stumble`, `stumble-api`, and `stumble-runner` on `PATH`).
 
