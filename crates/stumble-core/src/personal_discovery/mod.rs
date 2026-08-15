@@ -313,6 +313,7 @@ pub(crate) fn build_plan(
                 rationale: "corroborated aggregate User evidence".into(),
                 temporary: false,
                 role: DiscoveryPlanSourceRole::Proven,
+                watch: None,
             },
         })
         .collect::<Vec<_>>();
@@ -332,6 +333,7 @@ pub(crate) fn build_plan(
                 rationale: "temporary similar-link intent for this run".into(),
                 temporary: true,
                 role: DiscoveryPlanSourceRole::Proven,
+                watch: None,
             },
         });
     }
@@ -353,6 +355,20 @@ pub(crate) fn build_plan(
         .iter()
         .map(|source| source.signal.clone())
         .collect();
+
+    // Due User watches are first-class neighborhoods ahead of proven affinities
+    // and inferred adjacent leads. They carry the exact URL and skill so the
+    // worker can open and judge them, and never count against the affinity cap.
+    let watch_neighborhoods = due_watch_neighborhoods(store, user_id, tenant_id, now);
+    for neighborhood in &watch_neighborhoods {
+        seen_sources.insert(neighborhood.signal.clone());
+    }
+    source_neighborhoods.retain(|source| {
+        !watch_neighborhoods
+            .iter()
+            .any(|watch| watch.signal.eq_ignore_ascii_case(&source.signal))
+    });
+    source_neighborhoods.splice(0..0, watch_neighborhoods);
 
     // Network leads only occupy remaining neighborhood slots and only as adjacent.
     // Capacity counts successfully inserted neighborhoods only so proven-signal
@@ -424,6 +440,60 @@ pub(crate) fn build_plan(
         intent: persisted_intent,
         created_at: now,
     })
+}
+
+/// Builds first-class plan neighborhoods for the User's due watches.
+fn due_watch_neighborhoods(
+    store: &InMemoryStore,
+    user_id: UserId,
+    tenant_id: Option<TenantId>,
+    now: chrono::DateTime<Utc>,
+) -> Vec<DiscoveryPlanSourceNeighborhood> {
+    let mut watches: Vec<&UserWatch> = store
+        .user_watches
+        .values()
+        .filter(|watch| {
+            watch.user_id == user_id && watch.tenant_id == tenant_id && watch.is_due(now)
+        })
+        .collect();
+    watches.sort_by_key(|watch| (watch.created_at, watch.id));
+    watches
+        .into_iter()
+        .filter_map(|watch| {
+            let domain = Url::parse(&watch.url)
+                .ok()?
+                .domain()
+                .map(str::to_lowercase)?;
+            Some(DiscoveryPlanSourceNeighborhood {
+                signal: SourceAffinitySignal::Source(domain),
+                rationale: "due User watch".into(),
+                temporary: false,
+                role: DiscoveryPlanSourceRole::Proven,
+                watch: Some(DiscoveryPlanWatch {
+                    watch_id: watch.id,
+                    url: watch.url.clone(),
+                    kind: watch.kind,
+                    skill: watch.skill.clone(),
+                }),
+            })
+        })
+        .collect()
+}
+
+/// Marks the plan's watches as planned for the current cadence period.
+pub(crate) fn stamp_planned_watches(
+    store: &mut InMemoryStore,
+    plan: &DiscoveryPlan,
+    now: chrono::DateTime<Utc>,
+) {
+    for neighborhood in &plan.source_neighborhoods {
+        let Some(watch) = &neighborhood.watch else {
+            continue;
+        };
+        if let Some(stored) = store.user_watches.get_mut(&watch.watch_id) {
+            stored.last_planned_at = Some(stored.cadence.period_start(now));
+        }
+    }
 }
 
 struct RankedTopic {
@@ -520,6 +590,63 @@ mod tests {
         assert_eq!(selected.len(), 5);
         assert!(!selected.contains(&"a.example"));
         assert!(selected.contains(&"f.example"));
+    }
+
+    #[test]
+    fn due_watches_lead_the_plan_and_stamp_out_for_the_period() {
+        let user_id = Uuid::now_v7();
+        let mut store = InMemoryStore::default();
+        for _ in 0..3 {
+            store.taste_learning_evidence.push(TasteLearningEvidence {
+                id: Uuid::now_v7(),
+                user_id,
+                tenant_id: None,
+                signal: LearnedTasteSignal::Source("taste.example".into()),
+                kind: LearnedTasteEvidenceKind::MoreLikeThis,
+                direction: TasteEvidenceDirection::Supporting,
+                created_at: Utc::now(),
+            });
+        }
+        let watch = UserWatch {
+            id: Uuid::now_v7().into(),
+            user_id,
+            tenant_id: None,
+            url: "https://x.com/home".into(),
+            kind: UserWatchKind::Timeline,
+            cadence: UserWatchCadence::Daily,
+            skill: Some("watch-x".into()),
+            last_availability: None,
+            last_planned_at: None,
+            created_at: Utc::now(),
+        };
+        store.user_watches.insert(watch.id, watch.clone());
+
+        let now = Utc::now();
+        let request = || PreparedPersonalDiscoveryRequest {
+            result_count: 10,
+            intent: None,
+            focus_topics: Vec::new(),
+            avoid_topics: Vec::new(),
+            browser_grant_eligible_sources: None,
+        };
+        let plan = build_plan(&store, user_id, None, request(), now).unwrap();
+        let first = &plan.source_neighborhoods[0];
+        assert_eq!(
+            first.watch.as_ref().map(|payload| payload.url.as_str()),
+            Some("https://x.com/home")
+        );
+        assert_eq!(
+            first.watch.as_ref().unwrap().skill.as_deref(),
+            Some("watch-x")
+        );
+
+        stamp_planned_watches(&mut store, &plan, now);
+        assert!(!store.user_watches[&watch.id].is_due(now));
+        let replanned = build_plan(&store, user_id, None, request(), now).unwrap();
+        assert!(replanned
+            .source_neighborhoods
+            .iter()
+            .all(|neighborhood| neighborhood.watch.is_none()));
     }
 
     #[test]

@@ -40,6 +40,16 @@ pub(super) enum Workflow {
         #[command(subcommand)]
         command: DiscoverWorkflow,
     },
+    /// Inspect or set the private User Context briefing packet
+    Context {
+        #[command(subcommand)]
+        command: ContextWorkflow,
+    },
+    /// Compose presentation surfaces from existing node state
+    Brief {
+        #[command(subcommand)]
+        command: BriefWorkflow,
+    },
     Feed {
         #[command(subcommand)]
         command: FeedWorkflow,
@@ -216,10 +226,29 @@ pub(super) enum PackageWorkflow {
 }
 
 #[derive(Subcommand)]
+pub(super) enum ContextWorkflow {
+    /// Show the one briefing packet: context_md, taste, watches, readiness
+    Show,
+    /// Replace the User Context prose from a JSON file: { "context_md": "..." }
+    Set(InputArgs),
+}
+
+#[derive(Subcommand)]
+pub(super) enum BriefWorkflow {
+    /// Compose the morning brief: user, outside, network, gaps
+    Get,
+}
+
+#[derive(Subcommand)]
 pub(super) enum DiscoverWorkflow {
     Personal {
         #[command(subcommand)]
         command: PersonalDiscoveryWorkflow,
+    },
+    /// Manage User-scoped watches over trusted sources
+    Watch {
+        #[command(subcommand)]
+        command: WatchWorkflow,
     },
     Task {
         #[command(subcommand)]
@@ -229,6 +258,41 @@ pub(super) enum DiscoverWorkflow {
         #[command(subcommand)]
         command: CandidateWorkflow,
     },
+}
+
+#[derive(Subcommand)]
+pub(super) enum WatchWorkflow {
+    /// Add a watch; due watches join the next Personal Discovery plan
+    Add(WatchAddArgs),
+    /// List the User's watches with last availability
+    List,
+}
+
+#[derive(Args)]
+pub(super) struct WatchAddArgs {
+    /// URL the harness opens with its own browser session
+    pub(super) url: String,
+    #[arg(long, value_enum)]
+    pub(super) kind: WatchKind,
+    #[arg(long, value_enum, default_value_t = WatchCadence::Daily)]
+    pub(super) cadence: WatchCadence,
+    /// Harness skill to apply (default watch-x for x.com timelines/accounts)
+    #[arg(long)]
+    pub(super) skill: Option<String>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(super) enum WatchKind {
+    Timeline,
+    Account,
+    Site,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(super) enum WatchCadence {
+    Hourly,
+    Daily,
+    Weekly,
 }
 
 #[derive(Subcommand)]

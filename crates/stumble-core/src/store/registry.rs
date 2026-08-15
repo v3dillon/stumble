@@ -180,6 +180,10 @@ store_collections! {
     #[serde(default)]
     feed_batches: FeedBatch => KeySpec::Fields(&["id"]),
     briefs: Brief => KeySpec::Fields(&["id"]),
+    #[serde(default)]
+    user_contexts: UserContext => KeySpec::Fields(&["user_id", "tenant_id"]),
+    #[serde(default)]
+    user_watches: UserWatch => KeySpec::Fields(&["id"]),
     saves: PersistedUserSubmission => KeySpec::Fields(&["user_id", "submission_id"]),
     private_notes: PersistedPrivateNote => KeySpec::Fields(&["user_id", "submission_id"]),
     reading_history: PersistedUserSubmission => KeySpec::Fields(&["user_id", "submission_id"]),
@@ -436,6 +440,8 @@ impl From<&InMemoryStore> for PersistedStore {
             taste_learning_evidence: store.taste_learning_evidence.clone(),
             feed_batches: store.feed_batches.values().cloned().collect(),
             briefs: store.briefs.values().cloned().collect(),
+            user_contexts: store.user_contexts.values().cloned().collect(),
+            user_watches: store.user_watches.values().cloned().collect(),
             saves: store
                 .saves
                 .iter()
@@ -742,6 +748,16 @@ impl TryFrom<PersistedStore> for InMemoryStore {
                 .briefs
                 .into_iter()
                 .map(|brief| (brief.id, brief))
+                .collect(),
+            user_contexts: snapshot
+                .user_contexts
+                .into_iter()
+                .map(|context| ((context.user_id, context.tenant_id), context))
+                .collect(),
+            user_watches: snapshot
+                .user_watches
+                .into_iter()
+                .map(|watch| (watch.id, watch))
                 .collect(),
             saves: snapshot
                 .saves

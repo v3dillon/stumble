@@ -49,6 +49,7 @@ pub(super) fn select_adjacent_from_matched(
             continue;
         }
         adjacent.push(DiscoveryPlanSourceNeighborhood {
+            watch: None,
             signal: lead.signal,
             rationale: network_lead_rationale(&lead.provenance),
             temporary: false,

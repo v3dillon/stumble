@@ -96,9 +96,32 @@ Stumble plans, your harness browses, you wake up to a shortlist. A daily Persona
 | `stumble`                | Press the button: one new item per press — from your Feed, or from the network when caught up. Prints a text card; `--format json` for harnesses.    |
 | `stumble add <url>`      | Add a link to a Pod and your Feed in one step (`--pod`, `--title`, `--summary`, `--excerpt`, `--tag`, `--note`, `--image`, `--cover`, `--snapshot`). |
 | `stumble search <query>` | Local BM25 full-text search over everything saved on this node — titles, summaries, tags, notes, snapshots (`--limit`, 1-50, default 10).            |
+| `stumble context show`   | Show the private briefing packet: your User Context prose, taste, watches, readiness (`context set --input` replaces the prose).                     |
+| `stumble brief get`      | Compose the morning brief in one call: `outside`, `network.feed`, `network.explore`, `gaps`. The node fills every section.                           |
 
 
-The rest of the CLI is JSON-first and organized into five workflow families. Add `--help` at any command level for arguments and defaults.
+The rest of the CLI is JSON-first and organized into five workflow families, plus top-level `context` and `brief`. Add `--help` at any command level for arguments and defaults.
+
+## `context`
+
+Load the User before you save, discover, or write a brief.
+
+
+| Command                     | Description                                                                 |
+| --------------------------- | --------------------------------------------------------------------------- |
+| `stumble context show`      | Show the private briefing packet: User Context, taste, watches, readiness.  |
+| `stumble context set`       | Replace the User Context prose (`--input` JSON with `context_md`).          |
+
+
+## `brief`
+
+Compose one morning brief. The node fills every section.
+
+
+| Command              | Description                                                                              |
+| -------------------- | ---------------------------------------------------------------------------------------- |
+| `stumble brief get`  | Return `user`, `outside` (Discovery Result Batch), `network` (Feed + Explore), and `gaps`. |
+
 
 ## `node`
 
@@ -180,6 +203,8 @@ does not need to name platforms.
 | `stumble discover personal schedule update`  | Update schedule configuration.                      |
 | `stumble discover personal schedule disable` | Disable a schedule.                                 |
 | `stumble discover personal schedule remove`  | Remove a schedule.                                  |
+| `stumble discover watch add <url>`           | Add a User-scoped watch (`--kind`, `--cadence`, `--skill`). |
+| `stumble discover watch list`                | List watches with last availability.                |
 | `stumble discover task list`                 | List discovery tasks.                               |
 | `stumble discover task show`                 | Show one discovery task.                            |
 | `stumble discover task claim`                | Claim a task lease.                                 |

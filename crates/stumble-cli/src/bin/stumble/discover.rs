@@ -5,10 +5,12 @@ use super::{
 };
 use crate::parser::{
     CandidateStatus, CandidateWorkflow, DiscoverWorkflow, PersonalDiscoveryWorkflow,
-    PersonalScheduleWorkflow, ReviewDecision, TaskStateFilter, TaskWorkflow,
+    PersonalScheduleWorkflow, ReviewDecision, TaskStateFilter, TaskWorkflow, WatchCadence,
+    WatchKind, WatchWorkflow,
 };
 use serde_json::json;
 use stumble_cli::{read_json_input, ErrorBody, ExitStatusCategory};
+use stumble_core::AddUserWatchRequest;
 use stumble_core::{
     AgentTools, AuthContext, CandidateConfidence, CandidateId, CandidateReviewState,
     CandidateSubmissionRequest, CompleteDiscoveryResultBatchRequest,
@@ -16,7 +18,7 @@ use stumble_core::{
     DiscoveryResultBatchId, DiscoveryTask, DiscoveryTaskId, DiscoveryTaskState,
     PersonalDiscoveryScheduleId, PlacementReviewDecision, RequestPersonalDiscovery,
     ReviewDiscoveryResultItemRequest, RouteCandidatePlacementRequest, StoreError,
-    UpdatePersonalDiscoveryScheduleRequest,
+    UpdatePersonalDiscoveryScheduleRequest, UserWatchCadence, UserWatchKind,
 };
 
 pub(super) fn execute(
@@ -26,8 +28,40 @@ pub(super) fn execute(
 ) -> CliResult {
     match command {
         DiscoverWorkflow::Personal { command } => execute_personal(command, tools, actor),
+        DiscoverWorkflow::Watch { command } => execute_watch(command, tools, actor),
         DiscoverWorkflow::Task { command } => execute_task(command, tools, actor),
         DiscoverWorkflow::Candidate { command } => execute_candidate(command, tools, actor),
+    }
+}
+
+fn execute_watch(command: WatchWorkflow, tools: &AgentTools, actor: &AuthContext) -> CliResult {
+    match command {
+        WatchWorkflow::Add(args) => {
+            let request = AddUserWatchRequest {
+                url: args.url,
+                kind: match args.kind {
+                    WatchKind::Timeline => UserWatchKind::Timeline,
+                    WatchKind::Account => UserWatchKind::Account,
+                    WatchKind::Site => UserWatchKind::Site,
+                },
+                cadence: Some(match args.cadence {
+                    WatchCadence::Hourly => UserWatchCadence::Hourly,
+                    WatchCadence::Daily => UserWatchCadence::Daily,
+                    WatchCadence::Weekly => UserWatchCadence::Weekly,
+                }),
+                skill: args.skill,
+            };
+            serde_json::to_value(
+                tools
+                    .add_user_watch(actor, request, chrono::Utc::now())
+                    .map_err(agent_tools_error)?,
+            )
+            .map_err(internal_error)
+        }
+        WatchWorkflow::List => {
+            serde_json::to_value(tools.list_user_watches(actor).map_err(agent_tools_error)?)
+                .map_err(internal_error)
+        }
     }
 }
 

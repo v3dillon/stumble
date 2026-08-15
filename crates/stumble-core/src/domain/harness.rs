@@ -454,6 +454,10 @@ pub enum HarnessWriteOperation {
     AttemptDiscoveryResultsReadyNotification,
     /// Submit local agent semantic evidence for Pod Similarity ranking.
     SubmitPodSimilarityAgentEvidence,
+    /// Replace the private User Context prose.
+    SetUserContext,
+    /// Add a private User-scoped watch.
+    AddUserWatch,
 }
 
 /// Local-only attribution record for a successful harness write.

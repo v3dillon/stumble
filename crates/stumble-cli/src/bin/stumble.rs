@@ -16,6 +16,10 @@ use stumble_core::{
     TasteProfile, PORTABLE_PACKAGE_FILES,
 };
 
+#[path = "stumble/brief.rs"]
+mod brief_workflow;
+#[path = "stumble/context.rs"]
+mod context_workflow;
 #[path = "stumble/discover.rs"]
 mod discover_workflow;
 #[path = "stumble/feed.rs"]
@@ -127,6 +131,14 @@ fn dispatch(
         Some(Workflow::Discover { command }) => {
             let (_, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
             discover_workflow::execute(command, &tools, &actor)
+        }
+        Some(Workflow::Context { command }) => {
+            let (_, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
+            context_workflow::execute(command, &tools, &actor)
+        }
+        Some(Workflow::Brief { command }) => {
+            let (_, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
+            brief_workflow::execute(command, &tools, &actor)
         }
         Some(Workflow::Feed { command }) => {
             let (_, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;

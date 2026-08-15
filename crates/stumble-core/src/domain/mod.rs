@@ -17,6 +17,7 @@ mod pods;
 mod requests;
 mod taste;
 mod trust;
+mod user_context;
 
 pub use announcements::*;
 pub use bootstrap::*;
@@ -33,6 +34,7 @@ pub use pods::*;
 pub use requests::*;
 pub use taste::*;
 pub use trust::*;
+pub use user_context::*;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
