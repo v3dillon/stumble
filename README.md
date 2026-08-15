@@ -100,7 +100,28 @@ Stumble plans, your harness browses, you wake up to a shortlist. A daily Persona
 | `stumble brief get`      | Compose the morning brief in one call: `outside`, `network.feed`, `network.explore`, `gaps`. The node fills every section.                           |
 
 
-The rest of the CLI is JSON-first and organized into five workflow families. Add `--help` at any command level for arguments and defaults.
+The rest of the CLI is JSON-first and organized into five workflow families, plus top-level `context` and `brief`. Add `--help` at any command level for arguments and defaults.
+
+## `context`
+
+Load the User before you save, discover, or write a brief.
+
+
+| Command                     | Description                                                                 |
+| --------------------------- | --------------------------------------------------------------------------- |
+| `stumble context show`      | Show the private briefing packet: User Context, taste, watches, readiness.  |
+| `stumble context set`       | Replace the User Context prose (`--input` JSON with `context_md`).          |
+
+
+## `brief`
+
+Compose one morning brief. The node fills every section.
+
+
+| Command              | Description                                                                              |
+| -------------------- | ---------------------------------------------------------------------------------------- |
+| `stumble brief get`  | Return `user`, `outside` (Discovery Result Batch), `network` (Feed + Explore), and `gaps`. |
+
 
 ## `node`
 

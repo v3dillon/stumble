@@ -21,6 +21,13 @@ stumble node show   # errors with node_not_initialized if there is no Home Node
 stumble node init   # one-time setup; add --demo only for throwaway fixture data
 ```
 
+## Load the user
+
+Before you save, discover, or write a brief, run `stumble context show`.
+Judge every find against `context_md` and explicit blocks.
+If context is empty, ask for two loved links and write the first draft.
+Then stop and show it. Do not invent a personality.
+
 ## The button
 
 Bare `stumble` is the StumbleUpon button: every press shows **one** new item —
@@ -44,11 +51,6 @@ Presses record delivery only — reactions still go through
 `stumble feed feedback record`, so relay them as usual.
 
 ## Saving a link (the main loop)
-
-> Before you save, discover, or write a brief, run `stumble context show`.
-> Judge every find against `context_md` and explicit blocks.
-> If context is empty, ask for two loved links and write the first draft.
-> Then stop and show it. Do not invent a personality.
 
 Treat a shared URL like a friend texting you an X post: open it, understand it,
 save it with that understanding attached.
