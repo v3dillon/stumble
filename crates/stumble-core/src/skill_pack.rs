@@ -101,13 +101,17 @@ enum InspectionKind {
     Website { url: CredentialFreeUrl },
     Domain { domain: DomainName },
     SearchTopic { topic: CredentialFreeText },
+    Timeline { url: CredentialFreeUrl },
+    Account { url: CredentialFreeUrl },
 }
 
 impl InspectionKind {
     fn is_empty(&self) -> bool {
         match self {
             Self::Publication { name } => name.0.trim().is_empty(),
-            Self::Website { url } => url.0.as_str().is_empty(),
+            Self::Website { url } | Self::Timeline { url } | Self::Account { url } => {
+                url.0.as_str().is_empty()
+            }
             Self::Domain { domain } => domain.0.is_empty(),
             Self::SearchTopic { topic } => topic.0.trim().is_empty(),
         }

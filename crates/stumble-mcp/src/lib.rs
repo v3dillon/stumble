@@ -191,6 +191,31 @@ impl McpToolRouter {
                     chrono::Utc::now(),
                 )?))
             }
+            GetUserContext => Ok(json!(self.tools.user_context_packet(&self.ctx)?)),
+            SetUserContext => {
+                let request = serde_json::from_value(call.arguments)?;
+                Ok(json!(self.tools.set_user_context(
+                    &self.ctx,
+                    request,
+                    chrono::Utc::now(),
+                )?))
+            }
+            AddUserWatch => {
+                let request = serde_json::from_value(call.arguments)?;
+                Ok(json!(self.tools.add_user_watch(
+                    &self.ctx,
+                    request,
+                    chrono::Utc::now(),
+                )?))
+            }
+            ListUserWatches => Ok(json!(self.tools.list_user_watches(&self.ctx)?)),
+            RemoveUserWatch => {
+                let watch_id = arg_string(&call.arguments, "watch_id")?.parse()?;
+                Ok(json!(self.tools.remove_user_watch(&self.ctx, watch_id)?))
+            }
+            GetBrief => Ok(json!(self
+                .tools
+                .compose_brief(&self.ctx, chrono::Utc::now())?)),
             InspectCandidate => {
                 let candidate_id = arg_string(&call.arguments, "candidate_id")?.parse()?;
                 Ok(json!(self
@@ -217,9 +242,12 @@ impl McpToolRouter {
                     .unwrap_or(300);
                 let lease_seconds = DiscoveryLeaseSeconds::new(lease_seconds)?;
                 let now = chrono::Utc::now();
-                Ok(json!(self
-                    .tools
-                    .claim_discovery_task(&self.ctx, task_id, now, lease_seconds)?))
+                Ok(json!(self.tools.claim_discovery_task(
+                    &self.ctx,
+                    task_id,
+                    now,
+                    lease_seconds
+                )?))
             }
             CompleteDiscoveryTask => {
                 let task_id = arg_string(&call.arguments, "task_id")?.parse()?;

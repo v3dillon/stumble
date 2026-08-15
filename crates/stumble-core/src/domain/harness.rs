@@ -458,6 +458,8 @@ pub enum HarnessWriteOperation {
     SetUserContext,
     /// Add a private User-scoped watch.
     AddUserWatch,
+    /// Remove a private User-scoped watch.
+    RemoveUserWatch,
 }
 
 /// Local-only attribution record for a successful harness write.

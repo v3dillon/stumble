@@ -21,27 +21,22 @@ impl AgentTools {
         &self,
         ctx: &AuthContext,
     ) -> Result<UserContextPacket, AgentToolsError> {
-        let (context_md, watches, readiness) = {
-            let store = self
-                .store
-                .read()
-                .map_err(|_| AgentToolsError::LockPoisoned)?;
-            authorize_personal_discovery_management(&store, ctx)?;
-            let user_id = ctx.user_id.ok_or_else(|| {
-                StoreError::Validation("User Context requires an authenticated User".into())
-            })?;
-            let context_md = store
-                .user_contexts
-                .get(&(user_id, ctx.tenant_id))
-                .map(|context| context.context_md.clone())
-                .unwrap_or_default();
-            (
-                context_md,
-                list_watches(&store, user_id, ctx.tenant_id),
-                readiness(&store, user_id, ctx.tenant_id),
-            )
-        };
-        let taste = self.taste_profile(ctx)?;
+        let store = self
+            .store
+            .read()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_management(&store, ctx)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("User Context requires an authenticated User".into())
+        })?;
+        let context_md = store
+            .user_contexts
+            .get(&(user_id, ctx.tenant_id))
+            .map(|context| context.context_md.clone())
+            .unwrap_or_default();
+        let watches = list_watches(&store, user_id, ctx.tenant_id);
+        let readiness = readiness(&store, user_id, ctx.tenant_id);
+        let taste = taste_profile_from_store(&store, ctx, user_id)?;
         Ok(UserContextPacket {
             context_md,
             taste,
@@ -173,6 +168,192 @@ impl AgentTools {
         })?;
         Ok(list_watches(&store, user_id, ctx.tenant_id))
     }
+
+    /// Removes one private User-scoped watch owned by the caller.
+    pub fn remove_user_watch(
+        &self,
+        ctx: &AuthContext,
+        watch_id: UserWatchId,
+    ) -> Result<UserWatch, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_personal_discovery_management(&store, ctx)?;
+        let user_id = ctx.user_id.ok_or_else(|| {
+            StoreError::Validation("watches require an authenticated User".into())
+        })?;
+        let watch = store
+            .user_watches
+            .get(&watch_id)
+            .ok_or_else(|| StoreError::NotFound("watch".into()))?
+            .clone();
+        if watch.user_id != user_id || watch.tenant_id != ctx.tenant_id {
+            return Err(AgentToolsError::Forbidden {
+                reason: "watch belongs to another User".into(),
+            });
+        }
+        let mut staged = store.clone();
+        staged.user_watches.remove(&watch_id);
+        record_harness_write(
+            &mut staged,
+            ctx,
+            HarnessWriteOperation::RemoveUserWatch,
+            None,
+        );
+        self.persist_locked(&mut staged)?;
+        *store = staged;
+        Ok(watch)
+    }
+
+    /// Composes one morning brief from existing Home Node operations.
+    ///
+    /// Every section is present. Missing Feed or Explore access yields an empty
+    /// network section and an inspectable gap instead of failing the brief.
+    pub fn compose_brief(
+        &self,
+        ctx: &AuthContext,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<MorningBrief, AgentToolsError> {
+        let packet = self.user_context_packet(ctx)?;
+        let taste_summary = taste_summary(&packet.taste);
+
+        let mut batches = self.list_discovery_result_batches(ctx)?;
+        batches.retain(|batch| batch.state == DiscoveryResultBatchState::Ready);
+        batches.sort_by_key(|batch| (batch.created_at, batch.id));
+        let outside = match batches.pop() {
+            Some(batch) => MorningBriefOutside {
+                batch_id: Some(batch.id),
+                items: batch.items,
+                source_availability: batch.source_availability,
+                reason: None,
+            },
+            None => MorningBriefOutside {
+                batch_id: None,
+                items: Vec::new(),
+                source_availability: Vec::new(),
+                reason: Some("no_unreviewed_batch".into()),
+            },
+        };
+
+        let mut gaps: Vec<MorningBriefGap> = Vec::new();
+        let feed = match FeedBatchRequest::new(7) {
+            Ok(request) => match self.get_feed_batch(ctx, request, now) {
+                Ok(batch) => batch.items,
+                Err(AgentToolsError::Forbidden { .. }) => {
+                    gaps.push(MorningBriefGap {
+                        state: "feed_read_required".into(),
+                        source: None,
+                        watch_id: None,
+                        url: None,
+                        fingerprint: None,
+                    });
+                    Vec::new()
+                }
+                Err(error) => return Err(error),
+            },
+            Err(_) => Vec::new(),
+        };
+
+        let explore = match ExploreRequest::new("", 1, 3) {
+            Ok(request) => match self.explore_public_pods(ctx, request) {
+                Ok(response) => {
+                    let mut results = response.results;
+                    results.truncate(1);
+                    results
+                }
+                Err(AgentToolsError::Forbidden { .. }) => {
+                    if !gaps.iter().any(|gap| gap.state == "feed_read_required") {
+                        gaps.push(MorningBriefGap {
+                            state: "feed_read_required".into(),
+                            source: None,
+                            watch_id: None,
+                            url: None,
+                            fingerprint: None,
+                        });
+                    }
+                    Vec::new()
+                }
+                Err(error) => return Err(error),
+            },
+            Err(_) => Vec::new(),
+        };
+
+        for watch in &packet.watches {
+            if let Some(availability) = &watch.last_availability {
+                if availability.state.authentication_required() {
+                    gaps.push(MorningBriefGap {
+                        state: availability.state.fingerprint_label().to_string(),
+                        source: Some(availability.source.clone()),
+                        watch_id: Some(watch.id),
+                        url: Some(watch.url.clone()),
+                        fingerprint: None,
+                    });
+                }
+            }
+        }
+        for notice in self
+            .list_authentication_needed_notices(ctx)?
+            .into_iter()
+            .filter(|notice| notice.delivery_pending)
+        {
+            if gaps
+                .iter()
+                .any(|gap| gap.source.as_deref() == Some(notice.source.as_str()))
+            {
+                continue;
+            }
+            gaps.push(MorningBriefGap {
+                state: "authentication_required".into(),
+                source: Some(notice.source),
+                watch_id: None,
+                url: None,
+                fingerprint: Some(notice.state_fingerprint),
+            });
+        }
+        if explore.is_empty() && !gaps.iter().any(|gap| gap.state == "feed_read_required") {
+            gaps.push(MorningBriefGap {
+                state: "no_announcements".into(),
+                source: None,
+                watch_id: None,
+                url: None,
+                fingerprint: None,
+            });
+        }
+
+        Ok(MorningBrief {
+            user: MorningBriefUser {
+                context_md: packet.context_md,
+                taste_summary,
+            },
+            outside,
+            network: MorningBriefNetwork { feed, explore },
+            gaps,
+        })
+    }
+}
+
+fn taste_summary(taste: &TasteProfile) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !taste.explicit.interests.is_empty() {
+        parts.push(format!(
+            "interests: {}",
+            taste.explicit.interests.join(", ")
+        ));
+    }
+    if !taste.explicit.blocked_topics.is_empty() {
+        parts.push(format!(
+            "blocked topics: {}",
+            taste.explicit.blocked_topics.join(", ")
+        ));
+    }
+    if !taste.explicit.blocked_sources.is_empty() {
+        parts.push(format!(
+            "blocked sources: {}",
+            taste.explicit.blocked_sources.join(", ")
+        ));
+    }
+    parts.join("; ")
 }
 
 fn list_watches(
