@@ -5,6 +5,7 @@ FROM rust:bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY llms.txt ./
 RUN cargo build --release --locked -p stumble-cli
 
 FROM debian:bookworm-slim
