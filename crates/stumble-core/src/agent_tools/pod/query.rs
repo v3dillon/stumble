@@ -69,6 +69,13 @@ impl AgentTools {
                 .find(|assignment| assignment.user_id == user_id && assignment.pod_id == pod_id)
                 .map(|assignment| assignment.role.clone())
         });
+        let pod = store.pods.get(&pod_id);
+        let local_origin = pod.is_some_and(|pod| {
+            store.node_for_tenant(ctx.tenant_id).is_ok_and(|node| {
+                pod.origin_node_id
+                    .is_none_or(|origin_node_id| origin_node_id == node.id)
+            })
+        });
         let mut actions = Vec::new();
         if capability(HarnessCapability::SubscriptionManagement) {
             if subscribed {
@@ -88,6 +95,9 @@ impl AgentTools {
                     PodAllowedAction::RoleGrant,
                     PodAllowedAction::RoleRevoke,
                 ]);
+                if local_origin && pod.is_some_and(|pod| !is_private_inbox(pod)) {
+                    actions.push(PodAllowedAction::Delete);
+                }
             }
         }
         Ok(actions)

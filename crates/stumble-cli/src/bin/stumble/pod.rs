@@ -46,6 +46,22 @@ pub(super) fn execute(command: PodWorkflow, tools: &AgentTools, actor: &AuthCont
             Ok(result)
         }
         PodWorkflow::Create(args) => create_pod(args, tools, actor),
+        PodWorkflow::Delete(args) => {
+            let pod = resolve_pod(tools, actor, &args.pod)?;
+            let outcome = tools
+                .request_delete_pod(actor, pod.id, chrono::Utc::now())
+                .map_err(agent_tools_error)?;
+            match outcome {
+                stumble_core::DeletePodOutcome::Deleted(deleted) => Ok(json!({
+                    "status": "deleted",
+                    "result": deleted,
+                })),
+                stumble_core::DeletePodOutcome::PendingApproval(proposal) => Ok(json!({
+                    "status": "pending_approval",
+                    "result": proposal,
+                })),
+            }
+        }
         PodWorkflow::Explore(args) => {
             let sample_size = usize::from(args.sample_size);
             let request = ExploreRequest::new(args.query.unwrap_or_default(), 50, sample_size)

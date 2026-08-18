@@ -156,6 +156,7 @@ Find, subscribe to, curate, and govern Pods.
 | `stumble pod list`             | List local Pods.                                                                |
 | `stumble pod show`             | Show one Pod.                                                                   |
 | `stumble pod create`           | Create a Pod.                                                                   |
+| `stumble pod delete`           | Delete a Pod that you own. The Inbox cannot be deleted.                         |
 | `stumble pod explore`          | Explore public Pods.                                                            |
 | `stumble pod publish`          | Make a Pod public and print its shareable URL.                                  |
 | `stumble pod endorse`          | Sign a recommendation of another public Pod (`--from`, `--reason`).             |

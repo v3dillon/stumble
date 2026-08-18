@@ -1,8 +1,8 @@
 use super::prelude::*;
 use super::{
-    apply_trust_policy_change, create_pod_lifecycle_locked, curation_actor, feed_content_reference,
-    normalize_pod_ids, origin_placement_identity, pod_roles_value, visibility_exposure,
-    AgentToolsError, PodCreationMode,
+    apply_trust_policy_change, create_pod_lifecycle_locked, curation_actor,
+    delete_owned_pod_locked, feed_content_reference, normalize_pod_ids, origin_placement_identity,
+    pod_roles_value, visibility_exposure, AgentToolsError, PodCreationMode,
 };
 
 /// Cryptographic server entropy used for production peer-advertisement sampling.
@@ -832,6 +832,9 @@ pub(crate) fn apply_sensitive_change(
             if store.pod_roles.len() == before {
                 return Err(StoreError::NotFound(format!("Pod Role for User {user_id}")).into());
             }
+        }
+        SensitiveChange::DeletePod { pod_id } => {
+            delete_owned_pod_locked(store, ctx, *pod_id, Utc::now())?;
         }
     }
     Ok(())

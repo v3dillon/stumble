@@ -171,6 +171,82 @@ impl AgentTools {
         Ok(PodVisibilityOutcome::Updated(result))
     }
 
+    /// Deletes a locally owned Pod. A harness that targets a public Pod
+    /// receives a Pending Proposal; the Home Node Owner applies the change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the caller is not the Owner, the Pod is the
+    /// Inbox or a remote replica, authorization is denied, or persistence fails.
+    pub fn request_delete_pod(
+        &self,
+        ctx: &AuthContext,
+        pod_id: PodId,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<DeletePodOutcome, AgentToolsError> {
+        let is_public = {
+            let store = self
+                .store
+                .read()
+                .map_err(|_| AgentToolsError::LockPoisoned)?;
+            authorize_pod_role_owner(&store, ctx, pod_id)?;
+            let pod = store
+                .pods
+                .get(&pod_id)
+                .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+            store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+            if is_private_inbox(pod) {
+                return Err(
+                    StoreError::Validation("the private Inbox cannot be deleted".into()).into(),
+                );
+            }
+            let node = store.node_for_tenant(ctx.tenant_id)?;
+            if pod
+                .origin_node_id
+                .is_some_and(|origin_node_id| origin_node_id != node.id)
+            {
+                return Err(StoreError::Validation(
+                    "this Pod is a replica of a remote Origin; unsubscribe instead of deleting"
+                        .into(),
+                )
+                .into());
+            }
+            pod.visibility == Visibility::Public
+        };
+        if is_public && ctx.harness_id.is_some() {
+            return self
+                .create_pending_proposal_from_request(
+                    ctx,
+                    CreatePendingProposalRequest {
+                        requested_change: SensitiveChange::DeletePod { pod_id },
+                        expires_in_seconds: DEFAULT_PENDING_PROPOSAL_SECONDS,
+                    },
+                    now,
+                )
+                .map(|proposal| DeletePodOutcome::PendingApproval(Box::new(proposal)));
+        }
+        self.delete_pod_immediately(ctx, pod_id, now)
+            .map(DeletePodOutcome::Deleted)
+    }
+
+    pub(crate) fn delete_pod_immediately(
+        &self,
+        ctx: &AuthContext,
+        pod_id: PodId,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<DeletedPod, AgentToolsError> {
+        let mut store = self
+            .store
+            .write()
+            .map_err(|_| AgentToolsError::LockPoisoned)?;
+        authorize_pod_role_owner(&store, ctx, pod_id)?;
+        let mut staged = store.clone();
+        let deleted = delete_owned_pod_locked(&mut staged, ctx, pod_id, now)?;
+        self.persist_locked(&mut staged)?;
+        *store = staged;
+        Ok(deleted)
+    }
+
     pub fn create_pod(
         &self,
         ctx: &AuthContext,

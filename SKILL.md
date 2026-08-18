@@ -202,6 +202,7 @@ stumble pod list
 stumble pod create --name "Tools for Thought" --slug tools-for-thought --visibility private
 stumble add "<url>" --pod tools-for-thought --note "canonical essay for this Pod"
 stumble pod content list <slug>
+stumble pod delete <slug>           # owner only; the Inbox cannot be deleted
 ```
 
 A Pod ships a Pod Package (`CONTEXT.md` + `SKILL.md`) describing its subject and
@@ -443,6 +444,8 @@ stumble pod endorse <slug-or-url> --from <their-pod-slug> --reason "why it's gre
 - `node_not_initialized` → run `stumble node init`, then retry.
 - `not_found` for a `--pod` slug → `stumble pod list` and use an existing slug,
   or create the Pod first (explicit slugs are never auto-created).
+- `validation_error` on `pod delete` for the Inbox or a subscribed replica →
+  the Inbox cannot be deleted; for a replica, `stumble pod unsubscribe` instead.
 - `forbidden` under a harness credential (`STUMBLE_HARNESS_CREDENTIAL`) → the
   grant lacks a capability; ask the user to re-register the harness or run the
   command without the credential as the node owner.

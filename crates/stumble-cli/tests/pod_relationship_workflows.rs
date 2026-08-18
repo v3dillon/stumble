@@ -89,7 +89,8 @@ fn owner_subscribes_sets_priority_and_unsubscribes_without_losing_authority() {
             "role_list",
             "visibility_set",
             "role_grant",
-            "role_revoke"
+            "role_revoke",
+            "delete"
         ])
     );
 

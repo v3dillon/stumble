@@ -1,0 +1,3 @@
+# Delete locally owned Pods
+
+A Pod Owner may delete a Pod they govern on this Home Node. Delete is a local collection removal, distinct from Unsubscribe (Feed eligibility) and from Pod Withdrawal (network discovery). Deleting a public Origin Pod issues a Pod Withdrawal first so new discovery stops; existing Subscriptions and previously synchronized copies on other nodes stay (ADR-0043). The private Inbox cannot be deleted. A subscribed replica cannot be deleted — the User unsubscribes instead. A harness that targets a public Pod receives a Pending Proposal; the Home Node Owner applies the change directly.

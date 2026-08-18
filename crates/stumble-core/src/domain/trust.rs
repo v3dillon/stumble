@@ -41,6 +41,7 @@ pub enum PodAllowedAction {
     RoleList,
     RoleGrant,
     RoleRevoke,
+    Delete,
 }
 
 /// Package material selected for a new Pod.

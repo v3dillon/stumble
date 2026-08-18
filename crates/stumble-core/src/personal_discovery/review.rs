@@ -122,8 +122,14 @@ pub(crate) fn ensure_private_inbox(
     Ok(pod)
 }
 
-fn private_inbox_slug(user_id: UserId) -> String {
+pub(crate) fn private_inbox_slug(user_id: UserId) -> String {
     format!("inbox-{user_id}")
+}
+
+/// Whether this Pod is the User's private Inbox, which the owner cannot delete.
+pub(crate) fn is_private_inbox(pod: &Pod) -> bool {
+    pod.created_by
+        .is_some_and(|user_id| pod.slug == private_inbox_slug(user_id))
 }
 
 /// Parameters for replaceable discovery-result learning evidence.

@@ -202,6 +202,8 @@ pub enum SensitiveChange {
         user_id: UserId,
         role: PodRole,
     },
+    /// Delete a locally owned public Pod after independent approval.
+    DeletePod { pod_id: PodId },
 }
 
 /// Auditable lifecycle state of a [`PendingProposal`].
@@ -303,6 +305,25 @@ pub enum ProposalResource {
 #[serde(tag = "status", content = "result", rename_all = "snake_case")]
 pub enum CreatePodOutcome {
     Created(Pod),
+    PendingApproval(Box<PendingProposal>),
+}
+
+/// Local result of deleting an owned Pod.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletedPod {
+    /// Removed local Pod identity.
+    pub pod_id: PodId,
+    /// Origin-local slug of the removed Pod.
+    pub slug: String,
+    /// Whether an Origin-signed Pod Withdrawal was issued.
+    pub withdrawn: bool,
+}
+
+/// Outcome of requesting Pod deletion through the sensitive-change policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "result", rename_all = "snake_case")]
+pub enum DeletePodOutcome {
+    Deleted(DeletedPod),
     PendingApproval(Box<PendingProposal>),
 }
 
@@ -409,6 +430,8 @@ pub enum HarnessWriteOperation {
     EndorsePublicPod,
     ImportPodEvents,
     CreatePod,
+    /// Remove a locally owned Pod from this Home Node.
+    DeletePod,
     JoinPod,
     SetPrioritySubscription,
     SubscribePublicPod,

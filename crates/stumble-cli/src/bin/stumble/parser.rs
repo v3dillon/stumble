@@ -100,6 +100,8 @@ pub(super) enum PodWorkflow {
     List(ListArgs),
     Show(PodArgs),
     Create(CreatePodArgs),
+    /// Delete a Pod that you own
+    Delete(PodArgs),
     Explore(ExploreArgs),
     /// Make a Pod public and print its shareable federation URL
     Publish(PublishPodArgs),

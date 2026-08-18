@@ -473,6 +473,51 @@ impl AgentTools {
                     }],
                 )
             }
+            SensitiveChange::DeletePod { pod_id } => {
+                authorize_pod_role_owner(&store, ctx, *pod_id)?;
+                let pod = store
+                    .pods
+                    .get(pod_id)
+                    .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+                store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+                if is_private_inbox(pod) {
+                    return Err(StoreError::Validation(
+                        "the private Inbox cannot be deleted".into(),
+                    )
+                    .into());
+                }
+                let node = store.node_for_tenant(ctx.tenant_id)?;
+                if pod
+                    .origin_node_id
+                    .is_some_and(|origin_node_id| origin_node_id != node.id)
+                {
+                    return Err(StoreError::Validation(
+                        "this Pod is a replica of a remote Origin; unsubscribe instead of deleting"
+                            .into(),
+                    )
+                    .into());
+                }
+                if pod.visibility != Visibility::Public {
+                    return Err(StoreError::Validation(
+                        "this proposal type requires a public Pod".to_string(),
+                    )
+                    .into());
+                }
+                let resource = ProposalResource::Pod(*pod_id);
+                (
+                    vec![resource.clone()],
+                    vec![
+                        "The local Pod and its local placements are removed.".into(),
+                        "A Pod Withdrawal ends new public discovery.".into(),
+                        "Existing Subscriptions and previously synchronized copies on other nodes stay.".into(),
+                    ],
+                    vec![ProposalResourceDiff {
+                        resource,
+                        before: json!({"visibility": pod.visibility}),
+                        after: serde_json::Value::Null,
+                    }],
+                )
+            }
             SensitiveChange::RevokePodRole {
                 pod_id,
                 user_id,

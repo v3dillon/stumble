@@ -613,6 +613,131 @@ pub(crate) fn pod_roles_value(store: &InMemoryStore, pod_id: PodId) -> serde_jso
     json!(roles)
 }
 
+/// Deletes a locally owned Pod and its local associations.
+///
+/// Public Origin Pods first receive a Pod Withdrawal so new discovery stops.
+/// Content Items remain when another placement or a Save still refers to them.
+pub(crate) fn delete_owned_pod_locked(
+    store: &mut InMemoryStore,
+    ctx: &AuthContext,
+    pod_id: PodId,
+    now: chrono::DateTime<Utc>,
+) -> Result<DeletedPod, AgentToolsError> {
+    let pod = store
+        .pods
+        .get(&pod_id)
+        .cloned()
+        .ok_or_else(|| StoreError::NotFound(format!("pod {pod_id}")))?;
+    store.assert_tenant(pod.tenant_id, ctx.tenant_id)?;
+    if is_private_inbox(&pod) {
+        return Err(StoreError::Validation("the private Inbox cannot be deleted".into()).into());
+    }
+    let node = store.node_for_tenant(ctx.tenant_id)?;
+    if pod
+        .origin_node_id
+        .is_some_and(|origin_node_id| origin_node_id != node.id)
+    {
+        return Err(StoreError::Validation(
+            "this Pod is a replica of a remote Origin; unsubscribe instead of deleting".into(),
+        )
+        .into());
+    }
+
+    let withdrawn = if pod.visibility == Visibility::Public {
+        issue_origin_pod_withdrawal(store, &node, &pod.slug, None, now)?;
+        record_harness_write_at(
+            store,
+            ctx,
+            HarnessWriteOperation::WithdrawPublicPod,
+            Some(pod_id),
+            now,
+        );
+        true
+    } else {
+        false
+    };
+
+    let submission_ids = store
+        .submission_pods
+        .iter()
+        .filter(|link| link.pod_id == pod_id)
+        .map(|link| link.submission_id)
+        .collect::<Vec<_>>();
+    store.submission_pods.retain(|link| link.pod_id != pod_id);
+    store
+        .accepted_placement_projections
+        .retain(|(_, placed_pod_id), _| *placed_pod_id != pod_id);
+    store
+        .pod_placements
+        .retain(|(_, placed_pod_id), _| *placed_pod_id != pod_id);
+    for submission_id in submission_ids {
+        let still_placed = store
+            .submission_pods
+            .iter()
+            .any(|link| link.submission_id == submission_id);
+        let saved = store
+            .saves
+            .iter()
+            .any(|(_, saved_id)| *saved_id == submission_id);
+        if !still_placed && !saved {
+            store.submissions.remove(&submission_id);
+            store
+                .submission_assets
+                .retain(|_, asset| asset.submission_id != submission_id);
+            store
+                .reading_history
+                .retain(|(_, saved_id)| *saved_id != submission_id);
+            store
+                .private_notes
+                .retain(|(_, saved_id), _| *saved_id != submission_id);
+        }
+    }
+
+    let removed_task_ids = store
+        .discovery_tasks
+        .iter()
+        .filter(|(_, task)| task.target.pod().is_some_and(|(id, _)| id == pod_id))
+        .map(|(id, _)| *id)
+        .collect::<Vec<_>>();
+    for task_id in removed_task_ids {
+        store.discovery_tasks.remove(&task_id);
+        store.discovery_task_source_availability.remove(&task_id);
+    }
+    store
+        .subscriptions
+        .retain(|_, subscription| subscription.local_pod_id != pod_id);
+    store
+        .pod_roles
+        .retain(|assignment| assignment.pod_id != pod_id);
+    store.pod_rules.remove(&pod_id);
+    store.pod_skill_packs.remove(&pod_id);
+    store
+        .pod_package_versions
+        .retain(|(id, _), _| *id != pod_id);
+    store.pod_curation_policies.remove(&pod_id);
+    store
+        .crawler_sources
+        .retain(|_, source| source.pod_id != pod_id);
+    for harness in store.agent_harnesses.values_mut() {
+        if let Some(pod_ids) = harness.grant.pod_ids.as_mut() {
+            pod_ids.retain(|id| *id != pod_id);
+        }
+    }
+    store.pods.remove(&pod_id);
+    record_harness_write_at(
+        store,
+        ctx,
+        HarnessWriteOperation::DeletePod,
+        Some(pod_id),
+        now,
+    );
+    Ok(DeletedPod {
+        pod_id,
+        slug: pod.slug,
+        withdrawn,
+    })
+}
+
 pub(crate) fn authorize_pod_role_owner(
     store: &InMemoryStore,
     ctx: &AuthContext,

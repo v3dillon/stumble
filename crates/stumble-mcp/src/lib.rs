@@ -150,6 +150,14 @@ impl McpToolRouter {
                     chrono::Utc::now(),
                 )?))
             }
+            DeletePod => {
+                let pod_id = arg_string(&call.arguments, "pod_id")?.parse()?;
+                Ok(json!(self.tools.request_delete_pod(
+                    &self.ctx,
+                    pod_id,
+                    chrono::Utc::now(),
+                )?))
+            }
             RouteCandidate => {
                 let request: RouteCandidateArguments = serde_json::from_value(call.arguments)?;
                 Ok(json!(self.tools.route_candidate_placement(

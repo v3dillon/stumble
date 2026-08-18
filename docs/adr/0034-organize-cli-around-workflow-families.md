@@ -12,7 +12,7 @@ stumble
 │   ├── harness  list | show | register | revoke
 │   └── proposal list | show | approve | reject
 ├── pod
-│   ├── list | show | create | explore | subscribe | unsubscribe
+│   ├── list | show | create | delete | explore | subscribe | unsubscribe
 │   ├── subscription set
 │   ├── visibility   set
 │   ├── role         list | grant | revoke
@@ -56,6 +56,7 @@ Command paths use resource-first grammar and short, unhyphenated words. Conventi
 ## Workflow semantics
 
 - `pod create` requires explicit `private`, `invite-only`, or `public` visibility and accepts either an initial package directory or mutually exclusive `--from-pod SOURCE`. Forking is therefore a provenance-preserving creation mode. Public creation returns a Pending Proposal.
+- `pod delete` removes a locally owned Pod from this Home Node. The Inbox cannot be deleted. A subscribed replica uses `unsubscribe` instead. A public Origin Pod issues a Pod Withdrawal first; a harness receives a Pending Proposal, while the Home Node Owner applies the change. Existing Subscriptions and previously synchronized copies on other nodes stay.
 - `pod visibility set` is the later visibility transition. Expanding exposure requires approval; an authorized restriction may apply directly.
 - Subscription controls Feed eligibility and grants no Pod authority. `subscribe` and `unsubscribe` replace `join`; Priority Subscription is changed through `pod subscription set`.
 - Pod authority uses only Owner and Curator roles. Ordinary subscribers have no Pod Role; Member and Admin roles are removed. Role changes require approval.

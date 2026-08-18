@@ -85,10 +85,9 @@ fn pod_create_list_and_show_use_explicit_visibility_canonical_references_and_act
         let shown = environment.run(&["pod", "show", reference]);
         assert_eq!(shown["data"]["pod_id"], pod_id);
         assert_eq!(shown["data"]["slug"], "rust");
-        assert!(shown["data"]["allowed_actions"]
-            .as_array()
-            .unwrap()
-            .contains(&Value::String("visibility_set".into())));
+        let actions = shown["data"]["allowed_actions"].as_array().unwrap();
+        assert!(actions.contains(&Value::String("visibility_set".into())));
+        assert!(actions.contains(&Value::String("delete".into())));
     }
 
     let listed = environment.run(&["pod", "list", "--limit", "1"]);
@@ -281,4 +280,184 @@ fn explore_returns_a_paginated_read_only_collection() {
         .as_array()
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn owner_deletes_a_private_pod_and_keeps_content_that_still_has_another_placement() {
+    let environment = Environment::new();
+    environment.run(&[
+        "pod",
+        "create",
+        "--name",
+        "Rust",
+        "--slug",
+        "rust",
+        "--visibility",
+        "private",
+    ]);
+    environment.run(&[
+        "pod",
+        "create",
+        "--name",
+        "Keep",
+        "--slug",
+        "keep",
+        "--visibility",
+        "private",
+    ]);
+    let only_here = environment.run(&[
+        "add",
+        "https://example.com/only-rust",
+        "--pod",
+        "rust",
+        "--title",
+        "Only Rust",
+        "--summary",
+        "Lives in one Pod",
+    ]);
+    let shared = environment.run(&[
+        "add",
+        "https://example.com/shared",
+        "--pod",
+        "rust",
+        "--title",
+        "Shared",
+        "--summary",
+        "Lives in two Pods",
+    ]);
+    let shared_id = shared["data"]["content_item"]["id"].as_str().unwrap();
+    environment.run(&["pod", "content", "add", "keep", shared_id]);
+
+    let deleted = environment.run(&["pod", "delete", "rust"]);
+    assert_eq!(deleted["data"]["status"], "deleted");
+    assert_eq!(deleted["data"]["result"]["slug"], "rust");
+    assert_eq!(deleted["data"]["result"]["withdrawn"], false);
+
+    let listed = environment.run(&["pod", "list"]);
+    let slugs = listed["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["slug"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(slugs.contains(&"keep".to_string()));
+    assert!(!slugs.contains(&"rust".to_string()));
+
+    let missing = environment
+        .command()
+        .args(["pod", "show", "rust"])
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(4));
+
+    let kept = environment.run(&["pod", "content", "list", "keep"]);
+    assert_eq!(kept["data"]["items"][0]["content_item"]["id"], shared_id);
+    let only_id = only_here["data"]["content_item"]["id"].as_str().unwrap();
+    let orphaned = environment
+        .command()
+        .args(["pod", "content", "show", "keep", only_id])
+        .output()
+        .unwrap();
+    assert!(!orphaned.status.success());
+}
+
+#[test]
+fn owner_cannot_delete_the_private_inbox() {
+    let environment = Environment::new();
+    let tools = AgentTools::open_initialized_home_node(&environment.data_dir).unwrap();
+    let owner = tools.local_owner_auth_context().unwrap();
+    let user_id = owner.user_id.unwrap();
+    let inbox_slug = format!("inbox-{user_id}");
+    environment.run(&[
+        "pod",
+        "create",
+        "--name",
+        "Inbox",
+        "--slug",
+        &inbox_slug,
+        "--visibility",
+        "private",
+    ]);
+    let failed = environment
+        .command()
+        .args(["pod", "delete", &inbox_slug])
+        .output()
+        .unwrap();
+    assert_eq!(failed.status.code(), Some(4));
+    let error: Value = serde_json::from_slice(&failed.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "validation_error");
+    assert_eq!(
+        environment.run(&["pod", "show", &inbox_slug])["data"]["slug"],
+        inbox_slug
+    );
+}
+
+#[test]
+fn owner_deletes_a_public_pod_immediately_and_a_harness_gets_a_proposal() {
+    let environment = Environment::new();
+    environment.run(&[
+        "pod",
+        "create",
+        "--name",
+        "Public",
+        "--slug",
+        "public",
+        "--visibility",
+        "private",
+    ]);
+    environment.run(&[
+        "pod",
+        "visibility",
+        "set",
+        "public",
+        "--visibility",
+        "public",
+    ]);
+    let deleted = environment.run(&["pod", "delete", "public"]);
+    assert_eq!(deleted["data"]["status"], "deleted");
+    assert_eq!(deleted["data"]["result"]["withdrawn"], true);
+
+    environment.run(&[
+        "pod",
+        "create",
+        "--name",
+        "Later",
+        "--slug",
+        "later",
+        "--visibility",
+        "private",
+    ]);
+    environment.run(&[
+        "pod",
+        "visibility",
+        "set",
+        "later",
+        "--visibility",
+        "public",
+    ]);
+    let registered = environment.run(&[
+        "node",
+        "harness",
+        "register",
+        "--label",
+        "delete proposer",
+        "--kind",
+        "interactive",
+        "--capability",
+        "pod_curation",
+    ]);
+    let credential = registered["data"]["credential"].as_str().unwrap();
+    let proposed = environment
+        .command()
+        .env("STUMBLE_HARNESS_CREDENTIAL", credential)
+        .args(["pod", "delete", "later"])
+        .output()
+        .unwrap();
+    assert!(proposed.status.success());
+    let proposed: Value = serde_json::from_slice(&proposed.stdout).unwrap();
+    assert_eq!(proposed["data"]["status"], "pending_approval");
+    assert_eq!(
+        environment.run(&["pod", "show", "later"])["data"]["slug"],
+        "later"
+    );
 }
