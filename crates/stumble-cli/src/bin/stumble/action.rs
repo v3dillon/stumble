@@ -7,13 +7,13 @@ use stumble_core::{
     SubmissionId,
 };
 
-/// Samples remembered so repeated presses keep surfacing new network finds.
+/// Samples remembered so later runs keep surfacing new network finds.
 const NETWORK_HISTORY_LIMIT: usize = 200;
 
-/// Presentation cursor for the bare `stumble` press. This is surface state,
+/// Presentation cursor for the bare `stumble` command. This is surface state,
 /// not domain state: delivery and completion facts live in the Home Node
 /// store; this file only remembers what this surface already showed so every
-/// press lands on something new.
+/// run lands on something new.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct SurfaceState {
     #[serde(default)]
@@ -43,10 +43,10 @@ fn save_state(
     std::fs::write(state_path(data_dir), contents).map_err(internal_error)
 }
 
-/// One press of the button: the next unseen item from the current Feed Batch,
-/// a fresh batch once that one is walked, or — when the local Feed is caught
-/// up — a clearly labeled sample from an unsubscribed public Pod on the
-/// network. Nothing new anywhere reports `caught_up` with next steps.
+/// One Stumble: the next unseen item from the current Feed Batch, a fresh
+/// batch once that one is walked, or — when the local Feed is caught up — a
+/// clearly labeled sample from an unsubscribed public Pod on the network.
+/// Nothing new anywhere reports `caught_up` with next steps.
 pub(super) fn execute(data_dir: &Path, tools: &AgentTools, actor: &AuthContext) -> CliResult {
     let mut state = load_state(data_dir);
     let request = FeedBatchRequest::new(7).expect("the default Feed Batch size is valid");
@@ -155,7 +155,7 @@ fn network_sample(
             .map_err(internal_error)?;
         let sample_client =
             stumble_api::ReqwestOriginExploreSampleClient::new(runtime.handle().clone());
-        // Unreachable Origins never fail the press; they just yield no sample.
+        // Unreachable Origins never fail the action; they just yield no sample.
         let enriched = explored
             .results
             .iter()
@@ -230,8 +230,8 @@ fn caught_up_result() -> Value {
 const CARD_WIDTH: usize = 64;
 const TEXT_WIDTH: usize = 60;
 
-/// Renders the press result as a terminal card; other shapes fall back to the
-/// generic text rendering so `--format text` never loses information.
+/// Renders the Stumble result as a terminal card; other shapes fall back to
+/// the generic text rendering so `--format text` never loses information.
 pub(super) fn render_card(data: &Value) -> String {
     match data["kind"].as_str() {
         Some("feed_item") => feed_card(data),
@@ -258,7 +258,7 @@ fn feed_card(data: &Value) -> String {
         data["batch"]["position"].as_u64(),
         data["batch"]["total"].as_u64(),
     ) {
-        meta.push(format!("press {position} of {total}"));
+        meta.push(format!("{position} of {total}"));
     }
     let tags = strings_at(&reference["tags"], Value::as_str);
     if !tags.is_empty() {

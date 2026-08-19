@@ -32,8 +32,8 @@ mod node_workflow;
 mod parser;
 #[path = "stumble/pod.rs"]
 mod pod_workflow;
-#[path = "stumble/press.rs"]
-mod press_workflow;
+#[path = "stumble/action.rs"]
+mod action_workflow;
 #[path = "stumble/sync.rs"]
 mod sync_workflow;
 use parser::{Cli, Workflow};
@@ -55,18 +55,18 @@ fn main() -> ExitCode {
         }
     };
 
-    let pressed = cli.workflow.is_none();
+    let bare = cli.workflow.is_none();
     let format = cli
         .format
-        .unwrap_or_else(|| if pressed { "text" } else { "json" }.to_string());
+        .unwrap_or_else(|| if bare { "text" } else { "json" }.to_string());
     let data_dir = match selected_data_dir(cli.data_dir.as_deref()) {
         Ok(data_dir) => data_dir,
         Err(error) => return fail(error, ExitStatusCategory::Internal),
     };
     let owner_authority = owner_authority_store();
     match dispatch(cli.workflow, &data_dir, owner_authority.as_ref()) {
-        Ok(data) if pressed && format == "text" => {
-            print!("{}", press_workflow::render_card(&data));
+        Ok(data) if bare && format == "text" => {
+            print!("{}", action_workflow::render_card(&data));
             ExitCode::SUCCESS
         }
         Ok(data) => succeed(data, &format),
@@ -82,7 +82,7 @@ fn dispatch(
     match workflow {
         None => {
             let (data_dir, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;
-            press_workflow::execute(&data_dir, &tools, &actor)
+            action_workflow::execute(&data_dir, &tools, &actor)
         }
         Some(Workflow::Add(args)) => {
             let (data_dir, tools, actor) = open_home_node(selected_data_dir, owner_authority)?;

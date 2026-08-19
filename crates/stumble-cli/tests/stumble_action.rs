@@ -11,7 +11,7 @@ struct Environment {
 impl Environment {
     fn new(label: &str) -> Self {
         let root =
-            std::env::temp_dir().join(format!("stumble-press-{label}-{}", uuid::Uuid::now_v7()));
+            std::env::temp_dir().join(format!("stumble-action-{label}-{}", uuid::Uuid::now_v7()));
         let data_dir = root.join("home");
         fs::create_dir_all(&root).unwrap();
         let environment = Self { root, data_dir };
@@ -42,8 +42,8 @@ impl Environment {
         serde_json::from_slice::<Value>(&output.stdout).unwrap()["data"].clone()
     }
 
-    /// One press of the button with the machine-readable envelope.
-    fn press(&self) -> Value {
+    /// One Stumble with the machine-readable envelope.
+    fn stumble(&self) -> Value {
         self.run(&["--format", "json"])
     }
 
@@ -82,7 +82,7 @@ impl Drop for Environment {
 }
 
 #[test]
-fn pressing_stumble_walks_the_feed_one_new_item_at_a_time() {
+fn stumble_walks_the_feed_one_new_item_at_a_time() {
     let user = Environment::new("local");
     // Distinct source domains keep the constrained Feed Mix's per-source cap
     // from splitting these across batches.
@@ -118,44 +118,44 @@ fn pressing_stumble_walks_the_feed_one_new_item_at_a_time() {
         ]);
     }
 
-    // Three presses walk the whole batch without repeating an item.
+    // Three runs walk the whole batch without repeating an item.
     let mut shown_ids = Vec::new();
     for expected_position in 1..=3u64 {
-        let press = user.press();
-        assert_eq!(press["kind"], "feed_item", "{press}");
-        assert_eq!(press["batch"]["position"], expected_position, "{press}");
-        assert_eq!(press["batch"]["total"], 3, "{press}");
-        let reference = &press["item"]["content_reference"];
+        let item = user.stumble();
+        assert_eq!(item["kind"], "feed_item", "{item}");
+        assert_eq!(item["batch"]["position"], expected_position, "{item}");
+        assert_eq!(item["batch"]["total"], 3, "{item}");
+        let reference = &item["item"]["content_reference"];
         let title = reference["title"].as_str().unwrap();
         assert!(
             saved
                 .iter()
                 .any(|(_, saved_title, _)| *saved_title == title),
-            "{press}"
+            "{item}"
         );
-        assert_eq!(press["item"]["placements"][0]["slug"], "saved", "{press}");
+        assert_eq!(item["item"]["placements"][0]["slug"], "saved", "{item}");
         // The page image travels as a reference-first submission asset.
-        assert_eq!(press["assets"][0]["source"], "page_image", "{press}");
+        assert_eq!(item["assets"][0]["source"], "page_image", "{item}");
         let content_item_id = reference["content_item_id"].as_str().unwrap().to_string();
-        assert!(!shown_ids.contains(&content_item_id), "{press}");
+        assert!(!shown_ids.contains(&content_item_id), "{item}");
         assert!(
-            press["hints"][0]
+            item["hints"][0]
                 .as_str()
                 .unwrap()
                 .contains(&content_item_id),
-            "{press}"
+            "{item}"
         );
         shown_ids.push(content_item_id);
     }
 
     // The deck is exhausted and no announcements are known: caught up.
-    let press = user.press();
-    assert_eq!(press["kind"], "caught_up", "{press}");
-    assert!(press["hints"]
+    let item = user.stumble();
+    assert_eq!(item["kind"], "caught_up", "{item}");
+    assert!(item["hints"]
         .as_array()
         .is_some_and(|hints| !hints.is_empty()));
 
-    // New content revives the button, and the bare press renders a text card.
+    // New content revives the action, and the bare command renders a text card.
     user.run(&[
         "add",
         "https://example.com/new-find",
@@ -168,14 +168,14 @@ fn pressing_stumble_walks_the_feed_one_new_item_at_a_time() {
     assert!(card.starts_with("── stumble "), "{card}");
     assert!(card.contains("A brand new find"), "{card}");
     assert!(card.contains("https://example.com/new-find"), "{card}");
-    assert!(card.contains("press 1 of 1"), "{card}");
+    assert!(card.contains("1 of 1"), "{card}");
 
-    let press = user.press();
-    assert_eq!(press["kind"], "caught_up", "{press}");
+    let item = user.stumble();
+    assert_eq!(item["kind"], "caught_up", "{item}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pressing_stumble_falls_back_to_network_samples_when_caught_up() {
+async fn stumble_falls_back_to_network_samples_when_caught_up() {
     // ── A live Bootstrap node with open admission and a real Origin probe ────
     let bootstrap_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bootstrap_base = format!("http://{}", bootstrap_listener.local_addr().unwrap());
@@ -240,7 +240,7 @@ async fn pressing_stumble_falls_back_to_network_samples_when_caught_up() {
     ]);
     assert_eq!(published["bootstrap_submissions"][0]["status"], "admitted");
 
-    // ── Bob has an empty feed: the press reaches through to the network ──────
+    // ── Bob has an empty feed: the action reaches through to the network ─────
     let bob = Environment::new("bob");
     bob.use_bootstrap(&bootstrap_base);
     let report = bob.run(&["sync", "bootstrap", "run"]);
@@ -248,33 +248,33 @@ async fn pressing_stumble_falls_back_to_network_samples_when_caught_up() {
 
     let mut sample_titles = Vec::new();
     for _ in 0..2 {
-        let press = bob.press();
-        assert_eq!(press["kind"], "network_sample", "{press}");
-        assert_eq!(press["pod"]["slug"], "distributed-craft", "{press}");
+        let item = bob.stumble();
+        assert_eq!(item["kind"], "network_sample", "{item}");
+        assert_eq!(item["pod"]["slug"], "distributed-craft", "{item}");
         assert_eq!(
-            press["pod"]["public_pod_url"].as_str().unwrap(),
+            item["pod"]["public_pod_url"].as_str().unwrap(),
             format!("{alice_base}/federation/pods/distributed-craft"),
-            "{press}"
+            "{item}"
         );
         assert!(
-            press["hints"][0]
+            item["hints"][0]
                 .as_str()
                 .unwrap()
                 .starts_with("stumble pod subscribe "),
-            "{press}"
+            "{item}"
         );
-        sample_titles.push(press["sample"]["title"].as_str().unwrap().to_string());
+        sample_titles.push(item["sample"]["title"].as_str().unwrap().to_string());
     }
-    // Both curated items surfaced exactly once across the two presses.
+    // Both curated items surfaced exactly once across the two runs.
     sample_titles.sort();
     assert_eq!(
         sample_titles,
         ["Paxos made live", "Raft explained visually"]
     );
 
-    // Every signed sample has been shown, so the button reports caught up.
-    let press = bob.press();
-    assert_eq!(press["kind"], "caught_up", "{press}");
+    // Every signed sample has been shown, so the action reports caught up.
+    let item = bob.stumble();
+    assert_eq!(item["kind"], "caught_up", "{item}");
 
     alice_server.abort();
     bootstrap_server.abort();

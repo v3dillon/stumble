@@ -43,10 +43,11 @@ evidence, discovery provenance, Attention Value evidence, exploration label, cur
 feedback state, and permission-derived next actions. Feedback supports Save, More
 like this, Less like this, Dismiss, source block, and topic block; the existing Add to
 Pod operation creates an Accepted Placement while preserving provenance. Stumble
-does not collect dwell time or session duration. On the bare `stumble` press,
-each shown item additionally carries its locally stored assets — the generated
-cover and readable snapshot, when present — resolved at presentation time; this
-is press-only, and `stumble feed batch get` returns items without assets.
+does not collect dwell time or session duration. On the bare `stumble`
+command, each shown item additionally carries its locally stored assets — the
+generated cover and readable snapshot, when present — resolved at presentation
+time. The bare command includes those assets; `stumble feed batch get` returns
+items without assets.
 
 ## Private Taste Profile
 
@@ -69,14 +70,14 @@ Harness adapters expose the same contract:
 - CLI: `stumble feed batch get`, `stumble feed batch complete`,
   `stumble feed feedback record`, and `stumble feed taste retract`.
 
-The bare `stumble` press is a CLI presentation surface composed from these
-same operations: each press shows the next not-yet-shown item of the current
+The bare `stumble` command is a CLI presentation surface composed from these
+same operations: each run shows the next not-yet-shown item of the current
 stable batch, completes the batch once fully shown, and requests the next one.
-The press cursor is surface state kept beside the store
+The surface cursor is surface state kept beside the store
 (`stumble_surface.json`), never domain state. When the Feed is caught up, the
-press falls back to Explore — a clearly labeled Origin-signed sample from an
-unsubscribed public Pod — which keeps Feed Batches subscription-only while
-still giving the button a network answer.
+command returns an Explore result — a clearly labeled Origin-signed sample from
+an unsubscribed public Pod — which keeps Feed Batches subscription-only while
+the action can still return a network item.
 
 The HTTP API serves only the node-to-node network surface (federation,
 Bootstrap, and Discovery Peer routes); the Feed is a local Harness surface.

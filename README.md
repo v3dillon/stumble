@@ -15,7 +15,7 @@ That installs three commands into `~/.local/bin` (override with `STUMBLE_INSTALL
 
 | Binary           | Role                                                        |
 | ---------------- | ----------------------------------------------------------- |
-| `stumble`        | Local CLI — save links, press the Feed, curate Pods         |
+| `stumble`        | Local CLI — save links, stumble for one item, curate Pods   |
 | `stumble-api`    | HTTP server — share Pods, federation, Bootstrap/Index/Relay roles |
 | `stumble-runner` | Long-running daemon — network sync, MCP, scheduled workers  |
 
@@ -28,7 +28,7 @@ stumble add "https://example.com/something-worth-keeping"
 stumble
 ```
 
-Initialize once, add links as you find them, and press `stumble` when you want something. Every bare press shows one new item — link, summary, cover — from your Feed, rolling into a fresh batch when the current one is walked; when your Feed is caught up it reaches out to the network for a clearly labeled sample from an unsubscribed public Pod. `stumble add` creates a private `saved` Pod on first use, places the link in it, and makes it Feed-eligible in one step. (`stumble feed batch get` reads the Feed as a batch instead of one press at a time.)
+Initialize once, add links as you find them, and run `stumble` when you want one new item. Each run of the bare command shows one new item — link, summary, cover — from your Feed. The command starts a fresh batch after it shows every item in the current batch. When your Feed is caught up, the command returns a clearly labeled sample from an unsubscribed public Pod on the network. `stumble add` creates a private `saved` Pod on first use, places the link in it, and makes it Feed-eligible in one step. (`stumble feed batch get` reads the Feed as a batch instead of one item at a time.)
 
 Stumble stores its Home Node under `~/.stumble/nodes/home` by default. Set `STUMBLE_DATA_DIR` or pass `--data-dir` to use another directory. `stumble node init` also records the local Owner credential in the operating system's credential store; later local commands detect its presence automatically. Pass `--demo` to `node init` for throwaway fixture data.
 
@@ -97,7 +97,7 @@ Stumble plans, your harness browses, you wake up to a shortlist. A daily Persona
 
 | Command                  | Description                                                                                                                                          |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `stumble`                | Press the button: one new item per press — from your Feed, or from the network when caught up. Prints a text card; `--format json` for harnesses.    |
+| `stumble`                | One new item from your Feed, or from the network when caught up. Prints a text card; `--format json` for harnesses.                                  |
 | `stumble add <url>`      | Add a link to a Pod and your Feed in one step (`--pod`, `--title`, `--summary`, `--excerpt`, `--tag`, `--note`, `--image`, `--cover`, `--snapshot`). |
 | `stumble search <query>` | Local BM25 full-text search over everything saved on this node — titles, summaries, tags, notes, snapshots (`--limit`, 1-50, default 10).            |
 | `stumble context show`   | Show the private briefing packet: your User Context prose, taste, watches, readiness (`context set --input` replaces the prose).                     |

@@ -8,12 +8,12 @@ use stumble_core::{
 #[derive(Parser)]
 #[command(
     name = "stumble",
-    about = "Operate a local Stumble Home Node. Bare `stumble` is the button: \
-             one new item from your Feed, or from the network when caught up.",
+    about = "Operate a local Stumble Home Node. Bare `stumble` returns one new \
+             item from your Feed, or from the network when caught up.",
     disable_help_subcommand = true
 )]
 pub(super) struct Cli {
-    /// Output format; the bare button defaults to text, every command to json
+    /// Output format; the bare command defaults to text, every other command to json
     #[arg(long, global = true, value_parser = ["json", "text"])]
     pub(super) format: Option<String>,
     #[arg(long, global = true, env = "STUMBLE_DATA_DIR", value_hint = ValueHint::DirPath)]

@@ -1,6 +1,6 @@
 ---
 name: stumble
-description: Save links into the user's Stumble feed, read the feed back, and run discovery for them. Use when the user shares a URL worth keeping ("add this to stumble", "save this"), pastes a bare link with little or no comment, asks for their feed ("what's in my stumble", "drip", "anything new"), wants one thing on demand ("stumble", "stumble me", "hit the button"), wants a morning brief or new content found ("go find me stuff", "scroll X for me"), or wants to curate or share Pods. Runs the local stumble CLI; browsing stays in this harness's own browser tools.
+description: Save links into the user's Stumble feed, read the feed back, and run discovery for them. Use when the user shares a URL worth keeping ("add this to stumble", "save this"), pastes a bare link with little or no comment, asks for their feed ("what's in my stumble", "drip", "anything new"), wants one new item ("stumble", "stumble me", "show me something"), wants a morning brief or new content found ("go find me stuff", "scroll X for me"), or wants to curate or share Pods. Runs the local stumble CLI; browsing stays in this harness's own browser tools.
 ---
 
 # Stumble
@@ -28,26 +28,27 @@ Judge every find against `context_md` and explicit blocks.
 If context is empty, ask for two loved links and write the first draft.
 Then stop and show it. Do not invent a personality.
 
-## The button
+## Stumble
 
-Bare `stumble` is the StumbleUpon button: every press shows **one** new item —
-link, summary, cover — and never repeats until the pool runs dry.
+The harness runs the bare `stumble` command to get one new item from the Feed
+or the network. Each run returns **one** item — link, summary, cover. The
+command does not return the same item again while unseen items remain.
 
 ```bash
-stumble                 # human press: renders a text card
-stumble --format json   # harness press: same envelope as every other command
+stumble                 # person: renders a text card
+stumble --format json   # harness: same envelope as every other command
 ```
 
-A press walks the current Feed Batch one unseen item at a time, completes the
-batch when it is fully walked, and rolls into a fresh one. When the local Feed
-is caught up it falls back to the network: a clearly labeled, Origin-signed
-sample from an unsubscribed public Pod (`kind: "network_sample"`, with the
-subscribe URL in `hints`). Nothing new anywhere returns `kind: "caught_up"`
-with next steps.
+The command shows the next unseen item in the current Feed Batch, completes
+the batch when every item is shown, and then starts a fresh batch. When the
+local Feed is caught up, the command returns a network item: a clearly labeled,
+Origin-signed sample from an unsubscribed public Pod (`kind: "network_sample"`,
+with the subscribe URL in `hints`). Nothing new anywhere returns
+`kind: "caught_up"` with next steps.
 
-Use the press when the user wants *one* thing ("stumble", "hit me", "show me
-something"); use `feed batch get` below when they want to browse the batch.
-Presses record delivery only — reactions still go through
+Run `stumble` when the user wants *one* thing ("stumble", "stumble me", "show
+me something"); use `feed batch get` below when they want to browse the batch.
+The action records delivery only — reactions still go through
 `stumble feed feedback record`, so relay them as usual.
 
 ## Saving a link (the main loop)

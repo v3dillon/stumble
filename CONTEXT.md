@@ -124,9 +124,9 @@ _Avoid_: Dopamine score, infinite feed
 The explicit Feed state reached when the current Feed Batch has been consumed, before the User deliberately requests another batch.
 _Avoid_: Empty state, end of page
 
-**Press**:
-One press of the bare `stumble` one-press discovery button, yielding exactly one outcome: the next unseen Feed Batch item, a clearly labeled sample from an unsubscribed public Pod on the network, or a Caught Up report when nothing new exists anywhere.
-_Avoid_: Refresh, next page, random button
+**Stumble** (the action):
+The Agent Harness action of running the bare `stumble` command. Each run returns exactly one new item: the next unseen Feed Batch item, a clearly labeled sample from an unsubscribed public Pod on the network, or a Caught Up report when nothing new exists anywhere.
+_Avoid_: Press, button, refresh, next page
 
 **Delivered Item**:
 A Content Item included in a Feed Batch returned to an Agent Harness; delivery suppresses near-term repetition but does not permanently exclude the item.
