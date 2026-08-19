@@ -32,7 +32,7 @@ Initialize once, add links as you find them, and run `stumble` when you want one
 
 Stumble stores its Home Node under `~/.stumble/nodes/home` by default. Set `STUMBLE_DATA_DIR` or pass `--data-dir` to use another directory. `stumble node init` also records the local Owner credential in the operating system's credential store; later local commands detect its presence automatically. Pass `--demo` to `node init` for throwaway fixture data.
 
-Stumble is designed to be driven by an agent harness (Claude Code, Codex, Hermes, Pi, …). The harness owns the browser — it reads pages with your logged-in sessions — and Stumble owns the collection and the Feed. After the install above, install the skill globally so every harness can find it:
+Stumble is designed to be driven by an agent harness (Claude Code, Codex, Hermes, Pi, …). The harness owns source access — it reads sources with its own tools and your existing access — and Stumble owns the collection and the Feed. After the install above, install the skill globally so every harness can find it:
 
 ```bash
 npx skills add v3dillon/stumble -g -y   # global skill for your agents
@@ -41,7 +41,7 @@ npx skills update -g                    # refresh after the repo changes
 
 (`-g` installs under each agent’s user skills directory rather than only this checkout; `-y` skips prompts. Without npx, copy the repository’s root [`SKILL.md`](SKILL.md) to `~/.agents/skills/stumble/SKILL.md`.) Your harness then knows the loop: open a shared link, understand it, `stumble add` it, and read your Feed back on request. (Pod skills installed with `stumble pod skill install` update by re-running the install after a `sync pod run`.)
 
-For a guided first run, paste [`llms.txt`](llms.txt) into the harness — or point it at `https://your-bootstrap/llms.txt`, which every node serves with its own URL pre-filled. That script installs Stumble, connects to a Bootstrap, has you log into X in the harness browser, learns your taste from “send me something cool,” runs your first discovery scroll, and offers your first Pod.
+For a guided first run, paste [`llms.txt`](llms.txt) into the harness — or point it at `https://your-bootstrap/llms.txt`, which every node serves with its own URL pre-filled. That script installs Stumble, connects to a Bootstrap, learns your taste from “send me something cool,” runs your first discovery run, and offers your first Pod.
 
 ### Share a Pod with a friend
 
@@ -90,7 +90,7 @@ Point your own node at an Index with `stumble sync discovery index add --label <
 
 ### The morning brief
 
-Stumble plans, your harness browses, you wake up to a shortlist. A daily Personal Discovery schedule (`stumble discover personal schedule create`) materializes a browsing task each morning from your private taste evidence; the harness claims it, scrolls X and your other sources with its own logged-in browser, submits what fits, and presents the batch alongside your Feed as a conversational brief. Nothing enters your Feed or Pods until you say so — see the "Autonomous discovery" and "morning brief" workflows in [`SKILL.md`](SKILL.md).
+Stumble plans, your harness finds, you wake up to a shortlist. A daily Personal Discovery schedule (`stumble discover personal schedule create`) materializes a discovery task each morning from your private taste evidence; the harness claims it, reads your sources with its own tools, submits what fits, and presents the batch alongside your Feed as a conversational brief. Nothing enters your Feed or Pods until you say so — see the "Autonomous discovery" and "morning brief" workflows in [`SKILL.md`](SKILL.md).
 
 ## Quick actions
 

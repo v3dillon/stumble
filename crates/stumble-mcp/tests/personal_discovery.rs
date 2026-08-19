@@ -110,7 +110,7 @@ fn mcp_manager_and_worker_share_only_the_pinned_personal_plan() {
             arguments: json!({"url": "https://x.com/home", "kind": "timeline"}),
         })
         .unwrap();
-    assert_eq!(watch["skill"], "watch-x");
+    assert!(watch["skill"].is_null());
     let listed = manager
         .call(McpToolCall {
             tool: "list_user_watches".into(),

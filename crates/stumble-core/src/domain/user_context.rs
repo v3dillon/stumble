@@ -98,12 +98,12 @@ pub struct UserWatch {
     pub id: UserWatchId,
     pub user_id: UserId,
     pub tenant_id: Option<TenantId>,
-    /// URL the harness opens with its own browser session.
+    /// Source locator the harness reads with its own tools.
     pub url: String,
     pub kind: UserWatchKind,
     #[serde(default)]
     pub cadence: UserWatchCadence,
-    /// Harness skill applied when working this watch (for example `watch-x`).
+    /// Optional harness-local skill name, stored only when the caller sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill: Option<String>,
     /// Latest worker-reported availability fact; never auth material.

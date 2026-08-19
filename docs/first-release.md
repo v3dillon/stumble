@@ -161,10 +161,10 @@ When the User says something like “find me something interesting”:
    optional finite `result_count` (default 10). Do not select a Pod or source.
 4. With the worker grant: `list_ready_discovery_tasks` → `claim_discovery_task`
    → `get_discovery_plan` (only the minimized plan).
-5. Browse planned source neighborhoods through the User-approved Browser
-   Connector under Browser Grants. Inspect broadly; submit only a finite
-   shortlist of provenance-bearing Candidates bound to the task and allocation
-   role (`proven` / `adjacent`).
+5. Work planned source neighborhoods with this harness's own tools (official
+   APIs or plugins, browser sessions, or search). Inspect broadly; submit only
+   a finite shortlist of provenance-bearing Candidates bound to the task and
+   allocation role (`proven` / `adjacent`).
 6. Report availability facts without credentials via
    `report_discovery_source_availability`.
 7. Complete with `complete_discovery_result_batch` (this also completes the

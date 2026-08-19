@@ -114,7 +114,7 @@ fn cli_adds_and_lists_watches_and_plans_carry_due_watches() {
     );
     assert_eq!(added["data"]["kind"], "timeline");
     assert_eq!(added["data"]["cadence"], "daily");
-    assert_eq!(added["data"]["skill"], "watch-x");
+    assert!(added["data"]["skill"].is_null());
 
     let listed = environment.run(None, &["discover", "watch", "list"]);
     let watches = listed["data"].as_array().unwrap();
@@ -138,7 +138,7 @@ fn cli_adds_and_lists_watches_and_plans_carry_due_watches() {
         .unwrap();
     let first = &neighborhoods[0];
     assert_eq!(first["watch"]["url"], "https://x.com/home");
-    assert_eq!(first["watch"]["skill"], "watch-x");
+    assert!(first["watch"]["skill"].is_null());
     assert_eq!(first["rationale"], "due User watch");
 
     // The watch is stamped for this period and shows in the packet.

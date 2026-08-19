@@ -11,9 +11,6 @@ use super::super::*;
 const MAX_CONTEXT_MD_LEN: usize = 65_536;
 const MAX_WATCH_SKILL_LEN: usize = 120;
 
-/// Hosts whose timeline and account watches default to the `watch-x` skill.
-const WATCH_X_HOSTS: &[&str] = &["x.com", "twitter.com"];
-
 impl AgentTools {
     /// Returns the one interactive briefing packet: context, taste, watches,
     /// readiness, and allowed actions.
@@ -103,9 +100,7 @@ impl AgentTools {
     ) -> Result<UserWatch, AgentToolsError> {
         let url = parse_public_url(&request.url, "watch url")?;
         validate_public_scheme_and_host(&url, "watch url")?;
-        let host = url
-            .domain()
-            .map(str::to_lowercase)
+        url.domain()
             .ok_or_else(|| StoreError::Validation("watch url must have a domain".into()))?;
         let skill = match request.skill {
             Some(skill) => {
@@ -118,7 +113,7 @@ impl AgentTools {
                 }
                 Some(skill)
             }
-            None => default_watch_skill(&host, request.kind),
+            None => None,
         };
         let mut store = self
             .store
@@ -369,13 +364,4 @@ fn list_watches(
         .collect();
     watches.sort_by_key(|watch| (watch.created_at, watch.id));
     watches
-}
-
-/// The default skill for X timeline and account watches.
-fn default_watch_skill(host: &str, kind: UserWatchKind) -> Option<String> {
-    let x_host = WATCH_X_HOSTS
-        .iter()
-        .any(|candidate| host == *candidate || host.ends_with(&format!(".{candidate}")));
-    (x_host && matches!(kind, UserWatchKind::Timeline | UserWatchKind::Account))
-        .then(|| "watch-x".to_string())
 }

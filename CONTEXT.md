@@ -276,7 +276,7 @@ A mechanism that wakes discovery workers, supplied either by an Agent Harness or
 _Avoid_: Stumble scheduler, cron rule
 
 **Discovery-ready Event**:
-A notification that browser-required Discovery Tasks are waiting for an authorized Agent Harness to claim them.
+A notification that Discovery Tasks are waiting for an authorized Agent Harness to claim them.
 _Avoid_: Browser job, forced wake-up
 
 **Discovery-results-ready Event**:

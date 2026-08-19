@@ -357,8 +357,8 @@ pub(crate) fn build_plan(
         .collect();
 
     // Due User watches are first-class neighborhoods ahead of proven affinities
-    // and inferred adjacent leads. They carry the exact URL and skill so the
-    // worker can open and judge them, and never count against the affinity cap.
+    // and inferred adjacent leads. They lead the plan with a URL and never
+    // count against the affinity cap.
     let watch_neighborhoods = due_watch_neighborhoods(store, user_id, tenant_id, now);
     for neighborhood in &watch_neighborhoods {
         seen_sources.insert(neighborhood.signal.clone());
@@ -614,7 +614,7 @@ mod tests {
             url: "https://x.com/home".into(),
             kind: UserWatchKind::Timeline,
             cadence: UserWatchCadence::Daily,
-            skill: Some("watch-x".into()),
+            skill: None,
             last_availability: None,
             last_planned_at: None,
             created_at: Utc::now(),
@@ -635,10 +635,7 @@ mod tests {
             first.watch.as_ref().map(|payload| payload.url.as_str()),
             Some("https://x.com/home")
         );
-        assert_eq!(
-            first.watch.as_ref().unwrap().skill.as_deref(),
-            Some("watch-x")
-        );
+        assert!(first.watch.as_ref().unwrap().skill.is_none());
 
         stamp_planned_watches(&mut store, &plan, now);
         assert!(!store.user_watches[&watch.id].is_due(now));

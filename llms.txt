@@ -17,7 +17,7 @@ them before Stage 3.
 
 Ground rule for everything below: you never enter credentials, never complete
 purchases, and never move money as part of any Stumble workflow. Logins happen
-by the user's own hands in the browser.
+by the user's own hands.
 
 ## Stage 1 — Install and initialize (~2 minutes)
 
@@ -51,16 +51,15 @@ stumble sync bootstrap run
 Tell the user what just happened in one sentence: they now have a private
 node, and it quietly learned what public Pods the friend's network is sharing.
 
-## Stage 2 — Browser and X login
+## Stage 2 — Confirm you can read sources (optional)
 
-Confirm you have working browser tools. Then ask the user to log into the
-sites they actually read — X especially — *in your browser*, themselves:
+Check which of the user's sources you can already read with your own tools —
+official APIs or plugins, browser sessions, search. If a source needs a login
+you don't have, the user signs in themselves, in their own tool; you never see
+or store a password.
 
-> "Open x.com in my browser and sign in when you get a second — I'll use your
-> session to read your feed later, and I never see or store the password."
-
-If they skip this, everything still works; X just gets skipped in discovery
-runs (you'll report the gap and Stumble will remind them exactly once).
+If a source stays unreadable, everything still works; discovery skips it
+(you'll report the gap and Stumble will remind them exactly once).
 
 ## Stage 3 — "Send me something cool"
 
@@ -69,7 +68,7 @@ This is how Stumble learns taste: not a questionnaire, real examples. Ask:
 > "Send me two or three links you genuinely loved recently — an X post, an
 > essay, a video, anything. What's the coolest thing you've seen this week?"
 
-For each link: open it with your browser, understand it, and save it with
+For each link: read it with your own tools, understand it, and save it with
 your understanding attached:
 
 ```bash
@@ -99,9 +98,9 @@ stumble discover personal request --input <req.json>
 ```
 
 Read the plan aloud in human terms ("based on what you sent me, I'm going to
-look at X accounts around systems programming and a couple of adjacent
-blogs"). Claim the task with the worker credential, scroll the planned
-neighborhoods in your browser — judging each post as you scroll against the
+look at accounts around systems programming and a couple of adjacent
+blogs"). Claim the task with the worker credential, work the planned
+neighborhoods with your own tools — judging each find against the
 plan, submitting only clear passes — then complete the batch and present the
 shortlist with one-line why-it-matters summaries. Their verdicts
 (`save` / `not_for_me`) are the training signal.
@@ -145,7 +144,7 @@ with signed content previews, and subscribing is one command.
 ## Stage 6 — Offer the morning brief
 
 > "Want me to do this every morning? Stumble plans it from what you've taught
-> me, I scroll, and you get a shortlist with your feed over coffee."
+> me, I go find, and you get a shortlist with your feed over coffee."
 
 If yes, follow "The morning brief" in the Stumble skill: create the daily
 schedule, then schedule yourself to run it.
