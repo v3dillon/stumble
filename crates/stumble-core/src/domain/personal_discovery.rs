@@ -61,14 +61,15 @@ pub struct DiscoveryPlanSourceNeighborhood {
     /// Proven vs adjacent allocation role for this neighborhood.
     #[serde(default)]
     pub role: DiscoveryPlanSourceRole,
-    /// Present when this neighborhood is a due User watch: the exact URL to
-    /// open and the skill to apply. Never carries Taste Profile evidence.
+    /// Present when this neighborhood is a due User watch. Carries the URL and
+    /// an optional skill name only when the caller set one. Never carries
+    /// Taste Profile evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch: Option<DiscoveryPlanWatch>,
 }
 
-/// Minimized watch payload on a worker plan: enough to open the URL and apply
-/// the skill, without exposing the User Context or full Taste Profile.
+/// Minimized watch payload on a worker plan: the source URL and optional
+/// skill name, without the User Context or full Taste Profile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveryPlanWatch {
     pub watch_id: UserWatchId,

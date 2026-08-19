@@ -357,8 +357,8 @@ pub(crate) fn build_plan(
         .collect();
 
     // Due User watches are first-class neighborhoods ahead of proven affinities
-    // and inferred adjacent leads. They carry the exact URL and skill so the
-    // worker can open and judge them, and never count against the affinity cap.
+    // and inferred adjacent leads. They lead the plan with a URL and never
+    // count against the affinity cap.
     let watch_neighborhoods = due_watch_neighborhoods(store, user_id, tenant_id, now);
     for neighborhood in &watch_neighborhoods {
         seen_sources.insert(neighborhood.signal.clone());

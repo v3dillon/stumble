@@ -282,7 +282,7 @@ pub(super) struct WatchAddArgs {
     pub(super) kind: WatchKind,
     #[arg(long, value_enum, default_value_t = WatchCadence::Daily)]
     pub(super) cadence: WatchCadence,
-    /// Optional harness skill; no default
+    /// Optional harness-local skill name
     #[arg(long)]
     pub(super) skill: Option<String>,
 }
