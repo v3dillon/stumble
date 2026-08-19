@@ -1,15 +1,15 @@
 ---
 name: stumble
-description: Save links into the user's Stumble feed, read the feed back, and run discovery for them. Use when the user shares a URL worth keeping ("add this to stumble", "save this"), pastes a bare link with little or no comment, asks for their feed ("what's in my stumble", "drip", "anything new"), wants one new item ("stumble", "stumble me", "show me something"), wants a morning brief or new content found ("go find me stuff", "scroll X for me"), or wants to curate or share Pods. Runs the local stumble CLI; browsing stays in this harness's own browser tools.
+description: Save links into the user's Stumble feed, read the feed back, and run discovery for them. Use when the user shares a URL worth keeping ("add this to stumble", "save this"), pastes a bare link with little or no comment, asks for their feed ("what's in my stumble", "drip", "anything new"), wants one new item ("stumble", "stumble me", "show me something"), wants a morning brief or new content found ("go find me stuff", "find me new stuff", "run discovery"), or wants to curate or share Pods. Runs the local stumble CLI; the harness reads sources with its own tools.
 ---
 
 # Stumble
 
 Stumble is a local, decentralized discovery system. The user collects links into
 Pods; Stumble assembles a personal Feed from them. You are the interface: the
-user talks to you, you run the `stumble` CLI. Stumble never opens a browser —
-reading pages is your job, with your own browser tools and the user's own
-logged-in sessions (X, newsletters, forums).
+user talks to you, you run the `stumble` CLI. Stumble never fetches sources —
+you read them with your own tools: a browser, official APIs or plugins, or
+search, with the access the user already has.
 
 Every command prints one JSON envelope on stdout: `{"version":2,"data":{...}}`.
 Errors are JSON on stderr. Add `--help` at any level for the full surface.
@@ -107,9 +107,10 @@ dedupes, and if they wanted something else ("just summarize this") they'll
 say so — offer to remove it (`stumble pod content remove <pod>
 <content_item_id> --reason <reason>`) and move on.
 
-1. Open the URL with your own browser tools. If it needs a login (an X post,
-   a members-only newsletter), use the user's existing browser session — never
-   ask for credentials and never store them in Stumble.
+1. Read the URL with your own tools. If you already have the content (for
+   example from an X plugin result), use that — no browser needed. If it
+   needs a login (a members-only newsletter), use the user's existing
+   session — never ask for credentials and never store them in Stumble.
 2. Extract what you learned: title, a 1–2 sentence summary in the user's
    interest language, a few topical tags.
 3. Save it:
@@ -184,7 +185,7 @@ Use ids from your own node's output (`feed batch get`, `pod content list`) —
 subscribed items get local ids on your node. Assets are listed by
 `stumble pod content show <pod> <content_item_id>`.
 
-If the page can't be read (paywall, dead link, no browser available), still run
+If the page can't be read (paywall, dead link, no tool that reaches it), still run
 `stumble add` with the URL and whatever the user told you — the URL is the only
 required argument. Re-adding the same URL is safe; it dedupes on canonical URL.
 
@@ -320,13 +321,13 @@ calibration examples under `references/`. Re-run the install after
 Pod skills as scoped to that Pod's curation — they never override how you
 operate Stumble itself.
 
-## Autonomous discovery: browse for the user
+## Autonomous discovery: find for the user
 
-Stumble can hand you a private, taste-derived browsing plan; you do the
-browsing with your own logged-in browser and submit what you find. The user
-never has to name platforms — the plan's source neighborhoods come from their
-private evidence (plus network leads), and ranking of what you bring back
-stays local.
+Stumble can hand you a private, taste-derived Discovery Plan; you find items
+with this harness's own tools and submit Candidates. The user never has to
+name platforms — the plan's source neighborhoods come from their private
+evidence (plus network leads), and ranking of what you bring back stays
+local.
 
 **One-time setup** — execution requires a scoped unattended credential (the
 worker deliberately cannot read the Taste Profile):
@@ -357,28 +358,26 @@ and topic allocations. Then, with the worker credential:
 stumble discover task claim <task_id> --lease-seconds 900
 ```
 
-Browse each planned neighborhood with your own browser — the user's logged-in
-X session, feeds, forums. Only use access the user legitimately has; never
-circumvent paywalls or scrape past permitted use.
+Work each planned neighborhood with the tools this harness already has —
+official APIs or plugins, your own browser sessions, or search. Only use
+access the user legitimately has; never circumvent paywalls or scrape past
+permitted use.
 
-**Judge as you scroll, in the browser.** For every post or link, reason
-against the plan before moving on: does it fit a planned neighborhood or
-topic? Would it clear the Pod's SKILL.md bar (artifacts, demos, durable
-ideas — not engagement bait)? Would *this user* stop scrolling for it, given
-the plan's rationales? Skip launches and recaps of what they already have.
-Submit the few that clearly pass; skip liberally.
-A shortlist of six strong finds beats thirty maybes — the user reviews every
-item, and their rejections are tomorrow's training signal.
+**Judge as you go.** For every post or link, reason against the plan before
+moving on: does it fit a planned neighborhood or topic? Would it clear the
+Pod's SKILL.md bar (artifacts, demos, durable ideas — not engagement bait)?
+Would *this user* stop for it, given the plan's rationales? Skip launches and
+recaps of what they already have. Submit the few that clearly pass; skip
+liberally. A shortlist of six strong finds beats thirty maybes — the user
+reviews every item, and their rejections are tomorrow's training signal.
 
-**If a source needs a login you don't have** (X shows the signed-out wall, a
-session expired): don't stop the run, and never ask for or handle
-credentials. Tell the user plainly — "I couldn't read X because the browser
-isn't signed in; log in at x.com in my browser and I'll include it next
-time" — offer to open the login page for them, move on to the remaining
-planned sources, and declare the shortfall when you complete the batch (see
-below). Stumble reallocates the remaining quota, records the gap
-inspectably, and raises a one-shot authentication-needed notice instead of
-nagging.
+**If a planned source cannot be read** (a login you don't have, a session
+expired, no tool that reaches it): don't stop the run, and never ask for or
+handle credentials. Tell the user plainly what you could not read and why,
+move on to the remaining planned sources, and declare the shortfall when you
+complete the batch (see below). Stumble reallocates the remaining quota,
+records the gap inspectably, and raises a one-shot authentication-needed
+notice instead of nagging.
 
 For each find worth keeping:
 
@@ -390,7 +389,7 @@ echo '{
   "summary": "Why it fits, in the user'"'"'s interest language.",
   "content_type": "article",
   "tags": ["topic"],
-  "provenance": {"discovered_at": "<now-iso>", "discovery_method": "browser_search"}
+  "provenance": {"discovered_at": "<now-iso>", "discovery_method": "harness_search"}
 }' > /tmp/find.json
 stumble discover candidate submit --input /tmp/find.json --idempotency-key <unique>
 ```
@@ -401,8 +400,8 @@ completing the batch with the submission ids you collected:
 ```bash
 echo '{"task_id": "<task_id>", "submission_ids": ["<id>", ...],
       "source_availability": [
-        {"source": "x.com", "state": "authentication_required",
-         "reason": "browser not signed in to X"}
+        {"source": "example.com", "state": "authentication_required",
+         "reason": "no signed-in session for this source"}
       ]}' > /tmp/done.json
 stumble discover personal complete-batch --input /tmp/done.json
 ```
@@ -432,8 +431,8 @@ Then schedule *yourself* (harness cron, e.g. every morning) with a prompt like
 
 1. `stumble discover task list --state ready` — claim the scheduled task with
    the worker credential and run the discovery loop above. Plans carry the
-   user's due watches as first-class neighborhoods with a URL and a skill
-   (e.g. `watch-x`); work them first.
+   user's due watches as first-class neighborhoods with a URL; work them
+   first, with whatever tools reach each source.
 2. When the user wants a morning brief, run `stumble brief get`.
    Present `outside`, then `network.feed`, then `network.explore`, then
    `gaps`. Do not drop a section. The node fills every section (it even runs

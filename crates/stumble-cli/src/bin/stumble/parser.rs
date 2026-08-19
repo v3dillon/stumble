@@ -276,13 +276,13 @@ pub(super) enum WatchWorkflow {
 
 #[derive(Args)]
 pub(super) struct WatchAddArgs {
-    /// URL the harness opens with its own browser session
+    /// Source locator the harness reads with its own tools
     pub(super) url: String,
     #[arg(long, value_enum)]
     pub(super) kind: WatchKind,
     #[arg(long, value_enum, default_value_t = WatchCadence::Daily)]
     pub(super) cadence: WatchCadence,
-    /// Harness skill to apply (default watch-x for x.com timelines/accounts)
+    /// Optional harness skill; no default
     #[arg(long)]
     pub(super) skill: Option<String>,
 }
