@@ -25,8 +25,19 @@ stumble node init   # one-time setup; add --demo only for throwaway fixture data
 
 Before you save, discover, or write a brief, run `stumble context show`.
 Judge every find against `context_md` and explicit blocks.
-If context is empty, ask for two loved links and write the first draft.
-Then stop and show it. Do not invent a personality.
+**User Context is not automatic.** Saves train Taste. They never write
+`context_md`. Only the user, or a draft they accept, writes it. Agent finds
+never train it. It never federates.
+If `context_md` is empty:
+1. Ask for two loved links, or draft from links they already shared or kept.
+2. Write a short first draft in their interest language. Do not invent a
+   personality. Do not describe them as a list of Pods.
+3. Show the draft. Stop. Do not run `stumble context set` until they accept.
+4. After they accept, write it:
+    echo '{"context_md":"..."}' > /tmp/context.json
+    stumble context set --input /tmp/context.json
+Re-draft later only when they ask, or when they clearly change what they care
+about and accept a new version.
 
 ## Stumble
 
