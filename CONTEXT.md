@@ -33,8 +33,8 @@ A person whose private preferences, Subscriptions, and feedback shape their Feed
 _Avoid_: Account, member
 
 **User Context**:
-Private markdown prose the interactive User keeps about themself on the Home Node — like a Pod CONTEXT.md for the person. Only the User (or a draft the User accepts) writes it; agent finds never train it, and it never federates. Returned by `stumble context show` in one briefing packet with the Taste Profile, watches, and readiness.
-_Avoid_: User profile, personality model, memory store
+Private markdown prose the interactive User keeps about themself on the Home Node — like a Pod CONTEXT.md for the person. It names durable interests, what good new content looks like, and what to refuse, so an Agent Harness can discover new material. It is not a recap of saved items, a list of Pods, or a personality. Only the User (or a draft the User accepts) writes it; agent finds never train it, and it never federates. Returned by `stumble context show` in one briefing packet with the Taste Profile, watches, and readiness.
+_Avoid_: User profile, personality model, memory store, collection recap
 
 **Watch**:
 A private User-scoped standing watch over a source the User already trusts (a timeline, an account, a site). Watches live on the User — they are not Pod Source Rules and are not owned by the Inbox — and never federate. Due watches enter the Personal Discovery plan as first-class neighborhoods.

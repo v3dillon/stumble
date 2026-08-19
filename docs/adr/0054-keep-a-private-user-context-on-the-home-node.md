@@ -10,17 +10,19 @@ Accepted
 
 Pods carry a `CONTEXT.md` that tells an agent what the Pod is about. The
 person had no equivalent: taste lives in the Taste Profile as structured
-evidence, but there was no place for the user's own prose — who they are,
-what they care about, what to never bring them. Agents reconstructed this
-from scattered signals on every session, and some of it leaked into ad hoc
-harness memory outside the node's control.
+evidence, but there was no place for the user's own prose — what they care
+about, what good new content looks like, and what to never bring them.
+Agents reconstructed this from scattered signals on every session, and some
+of it leaked into ad hoc harness memory outside the node's control.
 
 ## Decision
 
 The Home Node stores one private User Context per User: markdown prose
 (`context_md`), read and written only through the interactive, unscoped
-Personal Discovery management policy. `stumble context show` returns it in
-one briefing packet together with the Taste Profile, the User's watches, and
+Personal Discovery management policy. The prose names durable interests and
+refusals for discovery. Saved Content Items are evidence for that decision;
+they are not the User Context. `stumble context show` returns it in one
+briefing packet together with the Taste Profile, the User's watches, and
 Personal Discovery readiness. Only the interactive User (or a draft the User
 accepted) writes the prose; agent finds never train it.
 
@@ -37,3 +39,5 @@ as first-class neighborhoods carrying only the URL, kind, and skill.
   Discovery Plan, which now includes due watch neighborhoods.
 - The harness reads one packet before it saves, discovers, or writes a brief,
   instead of inventing a personality from partial signals.
+- A first draft the User accepts names searchable interests. It does not recap
+  the collection as if those items were the interests.

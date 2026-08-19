@@ -83,6 +83,11 @@ Then show them their feed for the first time — run `stumble` (or
 saves plus a couple of reactions is enough evidence for discovery to plan
 from.
 
+If `stumble context show` still has empty `context_md`, follow **Load the
+user** in the Stumble skill: decide 3–6 durable interests from those saves
+(not a recap of the links), show the draft, and write it only after they
+accept.
+
 ## Stage 4 — First discovery run
 
 Follow the "Autonomous discovery" workflow in the Stumble skill. Short form:

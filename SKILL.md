@@ -24,18 +24,50 @@ stumble node init   # one-time setup; add --demo only for throwaway fixture data
 ## Load the user
 
 Before you save, discover, or write a brief, run `stumble context show`.
-Judge every find against `context_md` and explicit blocks.
+Judge every find against the named interests in `context_md` and explicit
+blocks. Skip launches and recaps of what they already have.
 **User Context is not automatic.** Saves train Taste. They never write
 `context_md`. Only the user, or a draft they accept, writes it. Agent finds
 never train it. It never federates.
+
+User Context is standing discovery instructions: the durable interests to
+seek, what good new content looks like, and what to refuse. Saved links are
+evidence for that decision. They are not the context. Do not invent a
+personality. Do not describe them as a list of Pods.
+
 If `context_md` is empty:
-1. Ask for two loved links, or draft from links they already shared or kept.
-2. Write a short first draft in their interest language. Do not invent a
-   personality. Do not describe them as a list of Pods.
-3. Show the draft. Stop. Do not run `stumble context set` until they accept.
-4. After they accept, write it:
+1. Gather evidence: two loved links they name, plus titles, summaries, and
+   tags they already kept.
+2. Decide 3–6 durable interests at a grain you can search for
+   (consciousness, AI, game development, software). Collapse related saves
+   into one field. Name the field, not the artifact, author, or thread.
+3. Write a short draft in this shape:
+
+```markdown
+# Interests
+- Consciousness and perception: how experience is built; new theory and wetware
+- Game development: engines, graphics, how a frame is drawn, shipping
+- Software construction: how tools, git, and infra actually work
+- AI as working systems
+
+# Avoid
+- Product launches
+- Recaps of my collection
+```
+
+   Use this user's fields, not the example bullets. Named people or works
+   appear only as calibration of kind, never as the interest itself. Do not
+   restate saved clusters as the body of the draft.
+4. Show the named interests and the draft. Stop. Do not run
+   `stumble context set` until they accept.
+5. After they accept, write the prose and the same named topics as explicit
+   Taste interests so the next Discovery Plan searches those fields:
+
     echo '{"context_md":"..."}' > /tmp/context.json
     stumble context set --input /tmp/context.json
+    echo '{"interests":["<interest>","<interest>"]}' > /tmp/taste.json
+    stumble feed taste set --input /tmp/taste.json
+
 Re-draft later only when they ask, or when they clearly change what they care
 about and accept a new version.
 
@@ -333,7 +365,8 @@ circumvent paywalls or scrape past permitted use.
 against the plan before moving on: does it fit a planned neighborhood or
 topic? Would it clear the Pod's SKILL.md bar (artifacts, demos, durable
 ideas — not engagement bait)? Would *this user* stop scrolling for it, given
-the plan's rationales? Submit the few that clearly pass; skip liberally.
+the plan's rationales? Skip launches and recaps of what they already have.
+Submit the few that clearly pass; skip liberally.
 A shortlist of six strong finds beats thirty maybes — the user reviews every
 item, and their rejections are tomorrow's training signal.
 

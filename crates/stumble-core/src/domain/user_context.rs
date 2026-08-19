@@ -9,7 +9,8 @@ pub struct UserContext {
     pub user_id: UserId,
     pub tenant_id: Option<TenantId>,
     /// User-authored markdown prose; only the interactive User (or a draft
-    /// they accepted) writes it. Agent finds never train it.
+    /// they accepted) writes it. Names durable interests and refusals; not a
+    /// recap of the collection. Agent finds never train it.
     pub context_md: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
