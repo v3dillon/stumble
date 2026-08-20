@@ -125,7 +125,7 @@ Well-known metadata (`GET /.well-known/stumble-node`) advertises only enabled en
 
 - Bootstrap: `bootstrap_announcements`, `bootstrap_announcement_stream`, `bootstrap_withdrawals`, `bootstrap_peer_advertisements`, `bootstrap_peer_advertisement_sample`
 - Index: `index_search_announcements`
-- Relay (only with `--relay`): `relay_publications`, `relay_pod_snapshot_template`
+- Relay (only with `--relay`): `relay_publications`, `relay_pod_snapshot_template`, `relay_explore_samples_template`
 - Discovery Peer serving (opt-in on that node): `discovery_peer_announcement_stream`, `discovery_peer_advertisement_sample`
 
 **Do not** advertise a disabled Relay, Hub, or retired discovery routes. A Bootstrap/Index-only process must not mention Relay.

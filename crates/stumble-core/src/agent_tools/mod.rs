@@ -93,8 +93,8 @@ pub enum AgentToolsError {
     /// The signed Pod Event Relay capability is not enabled on this process.
     #[error("relay is not enabled on this node")]
     RelayDisabled,
-    /// The pushed snapshot exceeds the bounded size open Relay admission accepts.
-    #[error("relay snapshot exceeds the bounded payload size")]
+    /// The pushed snapshot or samples exceed the bounded size open Relay admission accepts.
+    #[error("relay payload exceeds the bounded size")]
     RelayPayloadTooLarge,
     /// Discovery Peer enablement, admission, or serving was rejected.
     #[error("discovery peer rejected: {reason}")]

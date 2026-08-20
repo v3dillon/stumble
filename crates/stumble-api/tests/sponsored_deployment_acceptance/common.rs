@@ -231,6 +231,7 @@ pub(crate) async fn http_json(
     let mut builder = match method {
         "GET" => Request::get(path),
         "POST" => Request::post(path),
+        "PUT" => Request::put(path),
         "PATCH" => Request::patch(path),
         "DELETE" => Request::delete(path),
         other => panic!("unsupported method {other}"),

@@ -103,7 +103,7 @@ Degraded messages preserve direct Pod URL guidance. They never claim the sponsor
 
 ## Relay-backed Pod URLs
 
-Some public Pods share a Relay URL of the shape `https://<relay>/relay/pods/<origin-node-id>/<slug>` instead of a direct Origin URL. Subscribe to it the same way (`stumble pod subscribe <url>`). Your Home Node reads the Origin-signed snapshot from the Relay, pins the **Origin** identity and key from the snapshot, and verifies every event with the Origin public key. The Relay host never becomes the Origin and cannot alter the content.
+Some public Pods share a Relay URL of the shape `https://<relay>/relay/pods/<origin-node-id>/<slug>` instead of a direct Origin URL. Subscribe to it the same way (`stumble pod subscribe <url>`). Your Home Node reads the Origin-signed snapshot from the Relay, pins the **Origin** identity and key from the snapshot, and verifies every event with the Origin public key. The Relay host never becomes the Origin and cannot alter the content. Explore samples at `{public_pod_url}/explore-samples` are Origin-signed; the Relay stores that artifact and returns it without change. A Subscription still uses the snapshot.
 
 ## What never leaves your Home Node
 

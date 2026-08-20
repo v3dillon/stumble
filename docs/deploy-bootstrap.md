@@ -77,9 +77,9 @@ curl "https://bootstrap.example.com/bootstrap/announcements/stream?limit=5"
 
 The well-known response advertises `bootstrap_announcements`,
 `bootstrap_announcement_stream`, (with the Index role)
-`index_search_announcements`, and (with the Relay role) `relay_publications`
-and `relay_pod_snapshot_template`. A process with a role off never advertises
-that role.
+`index_search_announcements`, and (with the Relay role) `relay_publications`,
+`relay_pod_snapshot_template`, and `relay_explore_samples_template`. A process
+with a role off never advertises that role.
 
 ## Onboard friends with one link
 

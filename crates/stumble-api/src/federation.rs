@@ -84,12 +84,11 @@ pub(crate) async fn federation_sync_pod(
     ))
 }
 
-
 #[derive(Debug, Deserialize)]
 pub(crate) struct ExploreSamplesRequest {
-    announcement: PodAnnouncement,
+    pub(crate) announcement: PodAnnouncement,
     #[serde(default = "default_sample_limit")]
-    limit: usize,
+    pub(crate) limit: usize,
 }
 
 fn default_sample_limit() -> usize {

@@ -156,5 +156,15 @@ pub(crate) fn route_docs() -> Vec<ApiRouteDoc> {
             path: "/relay/pods/:origin_node_id/:slug/events",
             description: "stored Origin-signed events served by the Relay unchanged",
         },
+        ApiRouteDoc {
+            method: "PUT",
+            path: "/relay/pods/:origin_node_id/:slug/explore-samples",
+            description: "Relay admission of an Origin-signed Explore sample artifact, stored unchanged",
+        },
+        ApiRouteDoc {
+            method: "POST",
+            path: "/relay/pods/:origin_node_id/:slug/explore-samples",
+            description: "stored Origin-signed Explore samples served by the Relay unchanged",
+        },
     ]
 }

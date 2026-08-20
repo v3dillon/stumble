@@ -281,3 +281,84 @@ async fn stumble_falls_back_to_network_samples_when_caught_up() {
     let _ = alice_server.await;
     let _ = bootstrap_server.await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stumble_falls_back_to_relay_network_samples_without_origin_listener() {
+    let sponsor_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sponsor_base = format!("http://{}", sponsor_listener.local_addr().unwrap());
+    let sponsor = AgentTools::new(seed_store())
+        .with_bootstrap_capability(true, Arc::new(ReqwestOriginProbe))
+        .with_relay_capability(true);
+    let sponsor_router = router_with_base_url(sponsor, &sponsor_base);
+    let sponsor_server =
+        tokio::spawn(async move { axum::serve(sponsor_listener, sponsor_router).await.unwrap() });
+
+    let alice = Environment::new("alice-relay");
+    alice.run(&[
+        "pod",
+        "create",
+        "--name",
+        "Relayed Craft",
+        "--slug",
+        "relayed-craft",
+        "--description",
+        "Distributed systems craft published through a Relay.",
+        "--visibility",
+        "private",
+    ]);
+    alice.run(&[
+        "add",
+        "https://example.com/raft-through-relay",
+        "--pod",
+        "relayed-craft",
+        "--title",
+        "Raft through a Relay",
+        "--tag",
+        "distributed-systems",
+    ]);
+    alice.use_bootstrap(&sponsor_base);
+
+    let published = alice.run(&[
+        "pod",
+        "publish",
+        "relayed-craft",
+        "--base-url",
+        &sponsor_base,
+        "--via-relay",
+    ]);
+    assert_eq!(published["relay_push"]["status"], "admitted", "{published}");
+    assert_eq!(
+        published["relay_push"]["explore_samples"]["status"], "admitted",
+        "{published}"
+    );
+    assert_eq!(
+        published["bootstrap_submissions"][0]["status"], "admitted",
+        "{published}"
+    );
+    let share_url = published["share_url"].as_str().unwrap().to_string();
+    assert!(
+        share_url.contains("/relay/pods/"),
+        "share URL must be Relay-shaped: {share_url}"
+    );
+
+    let bob = Environment::new("bob-relay");
+    bob.use_bootstrap(&sponsor_base);
+    let report = bob.run(&["sync", "bootstrap", "run"]);
+    assert!(report["retained_announcements"].as_u64().unwrap() >= 1);
+
+    let item = bob.stumble();
+    assert_eq!(item["kind"], "network_sample", "{item}");
+    assert_eq!(item["pod"]["slug"], "relayed-craft", "{item}");
+    assert_eq!(item["pod"]["public_pod_url"], share_url, "{item}");
+    assert_eq!(item["sample"]["title"], "Raft through a Relay", "{item}");
+    assert!(
+        item["hints"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("stumble pod subscribe "),
+        "{item}"
+    );
+
+    sponsor_server.abort();
+    let _ = sponsor_server.await;
+}
