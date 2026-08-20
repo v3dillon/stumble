@@ -435,6 +435,16 @@ fn publish(args: &PublishPodArgs, tools: &AgentTools, actor: &AuthContext) -> Cl
                 .map_err(agent_tools_error)
         })
         .transpose()?;
+    // Samples bind announcement.id, so they are produced after the announcement
+    // and pushed to the Relay as a sibling Origin-signed artifact.
+    let relay_push = match (relay_push, announcement.as_ref(), share_url.as_ref()) {
+        (Some(mut report), Some(announcement), Some(relay_url)) if args.via_relay => {
+            report["explore_samples"] =
+                push_explore_samples_to_relay(tools, actor, announcement, relay_url)?;
+            Some(report)
+        }
+        (report, _, _) => report,
+    };
     // Push the announcement to every enabled Bootstrap endpoint so the wider
     // network can discover the Pod. Best-effort: a down Bootstrap never blocks
     // publishing, and direct-URL sharing needs no announcement at all.
@@ -497,6 +507,41 @@ fn push_snapshot_to_relay(
     })
 }
 
+/// Produces Origin-signed Explore samples for the current announcement and
+/// PUTs them to the Relay. Best-effort: a failed sample push never fails
+/// publish or announce.
+fn push_explore_samples_to_relay(
+    tools: &AgentTools,
+    actor: &AuthContext,
+    announcement: &stumble_core::PodAnnouncement,
+    relay_pod_url: &str,
+) -> Result<serde_json::Value, (ErrorBody, ExitStatusCategory)> {
+    let samples = match tools.pod_explore_samples(actor, announcement, 10) {
+        Ok(samples) => samples,
+        Err(error) => {
+            return Ok(json!({
+                "status": "failed",
+                "reason": error.to_string(),
+            }));
+        }
+    };
+    let url = format!("{}/explore-samples", relay_pod_url.trim_end_matches('/'));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(internal_error)?;
+    let result = runtime.block_on(stumble_api::submit_pod_explore_samples_to_relay(
+        &url, &samples,
+    ));
+    Ok(match result {
+        Ok(_) => json!({ "status": "admitted" }),
+        Err(reason) => json!({
+            "status": "failed",
+            "reason": reason,
+        }),
+    })
+}
+
 /// Pushes the current signed snapshot of a published Pod to a Relay so later
 /// event updates reach subscribers without a public Origin listener.
 fn relay_push(args: &RelayPushPodArgs, tools: &AgentTools, actor: &AuthContext) -> CliResult {
@@ -507,7 +552,21 @@ fn relay_push(args: &RelayPushPodArgs, tools: &AgentTools, actor: &AuthContext) 
         args.relay_url.trim_end_matches('/'),
         pod.slug
     );
-    let report = push_snapshot_to_relay(tools, actor, &pod.slug, &relay_pod_url)?;
+    let mut report = push_snapshot_to_relay(tools, actor, &pod.slug, &relay_pod_url)?;
+    if let Some(announcement) = tools
+        .known_pod_announcements_for_slug(&pod.slug)
+        .map_err(agent_tools_error)?
+        .into_iter()
+        .find(|item| item.origin_node_id == node_id)
+    {
+        report["explore_samples"] =
+            push_explore_samples_to_relay(tools, actor, &announcement, &relay_pod_url)?;
+    } else {
+        report["explore_samples"] = json!({
+            "status": "skipped",
+            "reason": "no current announcement",
+        });
+    }
     Ok(json!({
         "pod_id": pod.id,
         "slug": pod.slug,
@@ -584,20 +643,27 @@ fn announce(args: &AnnouncePodArgs, tools: &AgentTools, actor: &AuthContext) -> 
         }
     }
     // A Relay-shaped announcement URL means subscribers read the Relay, not
-    // this node: re-push the current signed snapshot so the Relay stays fresh.
+    // this node: re-push the snapshot and Origin-signed samples so Home Nodes
+    // do not see announcement_stale after a lease refresh.
     let mut relay_pushes = Vec::new();
-    for announcement in &refreshed {
-        let is_relay_shaped = url::Url::parse(&announcement.public_pod_url)
-            .ok()
-            .and_then(|url| stumble_core::relay_public_pod_url_parts(url.path()))
-            .is_some();
-        if is_relay_shaped {
-            relay_pushes.push(push_snapshot_to_relay(
+    if refreshed
+        .iter()
+        .any(stumble_api::announcement_uses_relay_url)
+    {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(internal_error)?;
+        for announcement in &refreshed {
+            if !stumble_api::announcement_uses_relay_url(announcement) {
+                continue;
+            }
+            let report = runtime.block_on(stumble_api::republish_relay_publication(
                 tools,
                 actor,
-                &announcement.pod_slug,
-                &announcement.public_pod_url,
-            )?);
+                announcement,
+            ));
+            relay_pushes.push(report.into_cli_report());
         }
     }
     let bootstrap_submissions = push_announcements_to_bootstraps(tools, actor, &refreshed)?;

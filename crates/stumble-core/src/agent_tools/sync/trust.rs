@@ -217,6 +217,10 @@ impl AgentTools {
                 "relay_pod_snapshot_template".to_string(),
                 format!("{base}/relay/pods/{{origin_node_id}}/{{slug}}"),
             );
+            endpoints.insert(
+                "relay_explore_samples_template".to_string(),
+                format!("{base}/relay/pods/{{origin_node_id}}/{{slug}}/explore-samples"),
+            );
         }
         // Discovery Peer inbound endpoints are advertised only while the User has
         // explicitly opted into announcement serving (ADR-0044 / ADR-0049).

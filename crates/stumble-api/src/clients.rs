@@ -472,6 +472,118 @@ pub async fn submit_pod_snapshot_to_relay(
     }
 }
 
+/// Outcome of a Relay snapshot POST plus Explore-sample PUT.
+///
+/// Each step is independent. A failed snapshot push does not skip the sample
+/// PUT. Callers treat both as best-effort.
+#[derive(Debug)]
+pub struct RelayRepublication {
+    /// Canonical Relay Pod URL used for both HTTP calls.
+    pub relay_pod_url: String,
+    /// Snapshot POST body, or a transport/admission error.
+    pub snapshot: Result<serde_json::Value, String>,
+    /// Sample PUT body, or a production/transport/admission error.
+    pub explore_samples: Result<serde_json::Value, String>,
+}
+
+impl RelayRepublication {
+    /// CLI `relay_push` / `relay_pushes` JSON: `status` is `admitted` or `failed`.
+    #[must_use]
+    pub fn into_cli_report(self) -> serde_json::Value {
+        let mut report = match self.snapshot {
+            Ok(_) => serde_json::json!({
+                "relay_pod_url": self.relay_pod_url,
+                "status": "admitted",
+            }),
+            Err(reason) => serde_json::json!({
+                "relay_pod_url": self.relay_pod_url,
+                "status": "failed",
+                "reason": reason,
+            }),
+        };
+        report["explore_samples"] = match self.explore_samples {
+            Ok(_) => serde_json::json!({ "status": "admitted" }),
+            Err(reason) => serde_json::json!({
+                "status": "failed",
+                "reason": reason,
+            }),
+        };
+        report
+    }
+}
+
+/// Returns whether an announcement's canonical URL is Relay-shaped.
+#[must_use]
+pub fn announcement_uses_relay_url(announcement: &PodAnnouncement) -> bool {
+    reqwest::Url::parse(&announcement.public_pod_url)
+        .ok()
+        .and_then(|url| relay_public_pod_url_parts(url.path()))
+        .is_some()
+}
+
+/// Re-pushes the current Origin snapshot and Origin-signed Explore samples
+/// to a Relay-shaped `announcement.public_pod_url`.
+///
+/// Snapshot POST happens first. Samples are produced for this announcement
+/// id (limit 10) and PUT next. The runner tick and `stumble pod announce`
+/// share this path so a lease refresh does not leave stale samples.
+pub async fn republish_relay_publication(
+    tools: &AgentTools,
+    actor: &AuthContext,
+    announcement: &PodAnnouncement,
+) -> RelayRepublication {
+    let relay_pod_url = announcement
+        .public_pod_url
+        .trim_end_matches('/')
+        .to_string();
+    let snapshot = match tools.federation_pod_snapshot(actor, &announcement.pod_slug, None) {
+        Ok(snapshot) => submit_pod_snapshot_to_relay(&relay_pod_url, &snapshot).await,
+        Err(error) => Err(error.to_string()),
+    };
+    let explore_samples = match tools.pod_explore_samples(actor, announcement, 10) {
+        Ok(samples) => {
+            let url = format!("{relay_pod_url}/explore-samples");
+            submit_pod_explore_samples_to_relay(&url, &samples).await
+        }
+        Err(error) => Err(error.to_string()),
+    };
+    RelayRepublication {
+        relay_pod_url,
+        snapshot,
+        explore_samples,
+    }
+}
+
+/// Pushes an Origin-signed Explore sample artifact to one Relay endpoint.
+///
+/// `relay_explore_samples_url` is
+/// `{public_pod_url}/explore-samples`. Used after a snapshot push so a
+/// Relay-backed public Pod can serve samples without an Origin listener.
+pub async fn submit_pod_explore_samples_to_relay(
+    relay_explore_samples_url: &str,
+    samples: &PodExploreSamples,
+) -> Result<serde_json::Value, String> {
+    let response = http_client()
+        .put(relay_explore_samples_url.trim_end_matches('/'))
+        .json(samples)
+        .send()
+        .await
+        .map_err(|error| format!("relay unreachable: {error}"))?;
+    let status = response.status();
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .unwrap_or_else(|_| serde_json::json!({"status": status.as_u16()}));
+    if status.is_success() {
+        Ok(body)
+    } else {
+        Err(body.get("code").and_then(|code| code.as_str()).map_or_else(
+            || format!("relay sample admission HTTP {status}"),
+            ToString::to_string,
+        ))
+    }
+}
+
 /// Production HTTP [`OriginExploreSampleClient`]: fetches bounded signed
 /// samples from the Origin named in a verified announcement.
 pub struct ReqwestOriginExploreSampleClient {

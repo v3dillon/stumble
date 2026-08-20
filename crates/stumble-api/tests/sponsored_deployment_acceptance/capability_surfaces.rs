@@ -86,6 +86,7 @@ async fn runtime_enables_relay_independently_and_advertises_only_when_on() {
     let endpoints = wk["endpoints"].as_object().unwrap();
     assert!(endpoints.contains_key("relay_publications"));
     assert!(endpoints.contains_key("relay_pod_snapshot_template"));
+    assert!(endpoints.contains_key("relay_explore_samples_template"));
     assert!(!endpoints.contains_key("bootstrap_announcements"));
     assert!(!endpoints.contains_key("index_search_announcements"));
     // Bootstrap routes stay disabled on a Relay-only process.
@@ -110,6 +111,7 @@ async fn runtime_enables_relay_independently_and_advertises_only_when_on() {
     assert!(endpoints.contains_key("index_search_announcements"));
     assert!(endpoints.contains_key("relay_publications"));
     assert!(endpoints.contains_key("relay_pod_snapshot_template"));
+    assert!(endpoints.contains_key("relay_explore_samples_template"));
 
     // No capabilities: Relay routes report the Bootstrap-style disabled pattern.
     let none = AgentTools::new(seed_store());

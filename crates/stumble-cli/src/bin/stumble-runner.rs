@@ -313,6 +313,25 @@ fn start_network_sync(config: &RunnerConfig, tools: AgentTools) {
                 // announcements bind the latest federated event pointer.
                 let refreshed = tools.refresh_origin_pod_announcements(&actor, now)?;
                 if !refreshed.is_empty() {
+                    for announcement in &refreshed {
+                        if !stumble_api::announcement_uses_relay_url(announcement) {
+                            continue;
+                        }
+                        let report = handle.block_on(stumble_api::republish_relay_publication(
+                            &tools,
+                            &actor,
+                            announcement,
+                        ));
+                        if let Err(reason) = report.snapshot {
+                            eprintln!("relay snapshot {} failed: {reason}", announcement.pod_slug);
+                        }
+                        if let Err(reason) = report.explore_samples {
+                            eprintln!(
+                                "relay explore samples {} failed: {reason}",
+                                announcement.pod_slug
+                            );
+                        }
+                    }
                     let endpoints: Vec<_> = tools
                         .list_bootstrap_endpoints(&actor)?
                         .into_iter()
@@ -320,12 +339,12 @@ fn start_network_sync(config: &RunnerConfig, tools: AgentTools) {
                         .collect();
                     for announcement in &refreshed {
                         for endpoint in &endpoints {
-                            if let Err(reason) = handle.block_on(
-                                stumble_api::submit_pod_announcement_to_bootstrap(
+                            if let Err(reason) =
+                                handle.block_on(stumble_api::submit_pod_announcement_to_bootstrap(
                                     &endpoint.base_url,
                                     announcement,
-                                ),
-                            ) {
+                                ))
+                            {
                                 eprintln!(
                                     "re-announce {} to {} failed: {reason}",
                                     announcement.pod_slug, endpoint.base_url

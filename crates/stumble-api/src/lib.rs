@@ -17,11 +17,12 @@ mod relay;
 
 pub use cli::run;
 pub use clients::{
-    fetch_pod_endorsements_from_bootstrap, submit_pod_announcement_to_bootstrap,
-    submit_pod_endorsement_to_bootstrap, submit_pod_snapshot_to_relay,
-    ReqwestAnnouncementStreamClient, ReqwestDiscoveryPeerProbe, ReqwestDiscoveryPeerStreamClient,
-    ReqwestIndexSearchClient, ReqwestOriginExploreSampleClient, ReqwestOriginProbe,
-    ReqwestPeerAdvertisementSampleClient,
+    announcement_uses_relay_url, fetch_pod_endorsements_from_bootstrap,
+    republish_relay_publication, submit_pod_announcement_to_bootstrap,
+    submit_pod_endorsement_to_bootstrap, submit_pod_explore_samples_to_relay,
+    submit_pod_snapshot_to_relay, RelayRepublication, ReqwestAnnouncementStreamClient,
+    ReqwestDiscoveryPeerProbe, ReqwestDiscoveryPeerStreamClient, ReqwestIndexSearchClient,
+    ReqwestOriginExploreSampleClient, ReqwestOriginProbe, ReqwestPeerAdvertisementSampleClient,
 };
 pub use docs::ApiRouteDoc;
 pub use error::ApiError;
@@ -32,7 +33,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::Response,
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use docs::route_docs;
@@ -160,6 +161,10 @@ pub fn router_with_options(
         .route(
             "/relay/pods/:origin_node_id/:slug/events",
             get(relay_pod_events),
+        )
+        .route(
+            "/relay/pods/:origin_node_id/:slug/explore-samples",
+            put(relay_admit_explore_samples).post(relay_serve_explore_samples),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -326,6 +331,14 @@ mod tests {
         assert!(routes
             .iter()
             .any(|route| { route.method == "GET" && route.path == "/discovery/announcements" }));
+        assert!(routes.iter().any(|route| {
+            route.method == "PUT"
+                && route.path == "/relay/pods/:origin_node_id/:slug/explore-samples"
+        }));
+        assert!(routes.iter().any(|route| {
+            route.method == "POST"
+                && route.path == "/relay/pods/:origin_node_id/:slug/explore-samples"
+        }));
     }
 
     #[tokio::test]

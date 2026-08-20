@@ -236,10 +236,15 @@ impl FederationPodSnapshot {
 /// Maximum serialized snapshot size accepted by open Relay admission (1 MiB).
 pub const MAX_RELAY_SNAPSHOT_PAYLOAD_BYTES: usize = 1_048_576;
 
+/// Maximum serialized Explore sample size accepted by open Relay admission (64 KiB).
+pub const MAX_RELAY_EXPLORE_SAMPLES_PAYLOAD_BYTES: usize = 65_536;
+
 /// Origin-signed public Pod snapshot cached by an optional Relay Node.
 ///
-/// The Relay stores and serves the snapshot unchanged. It never re-signs,
-/// never becomes the Origin, and never holds Home Node private state.
+/// The Relay stores and serves the snapshot unchanged. Explore samples are a
+/// sibling Origin-signed artifact, never a field inside the snapshot. The Relay
+/// never re-signs, never becomes the Origin, and never holds Home Node private
+/// state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RelayPublication {
@@ -249,6 +254,9 @@ pub struct RelayPublication {
     pub pod_slug: String,
     /// Verified Origin snapshot served verbatim to subscribers.
     pub snapshot: FederationPodSnapshot,
+    /// Optional Origin-signed Explore samples stored beside the snapshot.
+    #[serde(default)]
+    pub explore_samples: Option<PodExploreSamples>,
     /// Time at which this Relay admitted the snapshot.
     pub received_at: DateTime<Utc>,
 }

@@ -29,6 +29,8 @@ Public HTTP contracts (typed machine-readable `code` on failures):
 | `GET`  | `/discovery/peer/announcements/stream` | Opt-in Discovery Peer Announcement Stream pages |
 | `GET`  | `/discovery/peer/advertisements` | Opt-in randomized unranked peer-advertisement samples |
 | `POST` | `/federation/pods/:slug/explore-samples` | Origin produces a bounded signed `PodExploreSamples` artifact for the exact current announcement |
+| `PUT`  | `/relay/pods/:origin_node_id/:slug/explore-samples` | Origin admits an Origin-signed `PodExploreSamples` artifact; the Relay stores it without change |
+| `POST` | `/relay/pods/:origin_node_id/:slug/explore-samples` | Relay returns the stored signed samples for the request announcement; it never re-signs or re-slices |
 
 Node operations live in the CLI: `stumble sync discovery serve show|enable|disable` (inbound serving), `stumble sync discovery peers|gossip|run` (outbound peer set), `stumble sync discovery index list|add|remove` (replaceable Index Nodes in the local Trust Policy), and `stumble sync discovery status` (readiness including Bootstrap-outage degraded mode).
 
